@@ -184,6 +184,24 @@ jobs:
 
           echo "Stale cleanup complete."
 
+      # ── Windows: dismiss OOBE privacy settings dialog ──
+      # GHA Windows runners may show an OOBE "Choose privacy settings"
+      # dialog that steals focus and interferes with cert dialog clicking.
+      - name: "Windows: Dismiss OOBE"
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Mark OOBE as complete so the privacy dialog doesn't appear
+          $oobePath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\OOBE"
+          if (-not (Test-Path $oobePath)) {
+            New-Item -Path $oobePath -Force | Out-Null
+          }
+          Set-ItemProperty -Path $oobePath -Name "PrivacyConsentStatus" -Value 1 -Type DWord -Force
+          Set-ItemProperty -Path $oobePath -Name "SkipMachineOOBE" -Value 1 -Type DWord -Force
+          # Also try to close any existing OOBE window
+          Get-Process -Name "OOBE*","SystemSettings*" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Write-Host "OOBE dismissed via registry."
+
       # ── Step 2: WIF Bunker fresh run (creates project, SA, pool, provider) ──
       - name: "WIF Bunker: Fresh setup"
         shell: bash
