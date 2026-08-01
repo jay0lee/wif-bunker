@@ -109,6 +109,19 @@ jobs:
             source .venv/bin/activate
             echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
           fi
+          # Windows ARM64 has no PyPI cryptography wheel — install from jay0lee/cryptography-wheels
+          if [ "$RUNNER_OS" = "Windows" ] && [ "$RUNNER_ARCH" = "ARM64" ]; then
+            WHEEL_URL=$(python -c "
+          import json, urllib.request, sys
+          rel = json.loads(urllib.request.urlopen('https://api.github.com/repos/jay0lee/cryptography-wheels/releases/latest').read())
+          py_ver = f'cp{sys.version_info.major}{sys.version_info.minor}'
+          for a in rel['assets']:
+              if 'win_arm64' in a['name'] and (py_ver in a['name'] or 'abi3' in a['name']):
+                  print(a['browser_download_url']); break
+          ")
+            echo "Installing cryptography wheel: $WHEEL_URL"
+            pip install "$WHEEL_URL"
+          fi
           pip install .
 
       # TEMPORARY: Patch google-auth to support hardware-backed keys.
@@ -187,6 +200,8 @@ jobs:
           python wif_bunker.py \
             --use-adc \
             --use-project="${{ steps.config.outputs.project_id }}" \
+            --use-pool=bunker-wif-pool \
+            --use-service-account="bunker-wif-sa@${{ steps.config.outputs.project_id }}.iam.gserviceaccount.com" \
             ${{ matrix.soft_key_flag }}
 
       # ── Step 4: Cleanup own project ──
