@@ -1854,80 +1854,71 @@ def main() -> None:
         # --- Step 7: Full ADC Auth Flow Demo (ECP-backed mTLS) ---
         logger.info("=== 7) Executing Full ADC Auth Flow Demo ===")
 
-        try:
-            # Set environment so google-auth discovers our configs.
-            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(adc_path)
-            os.environ["GOOGLE_API_USE_CLIENT_CERTIFICATE"] = "true"
-            os.environ["GOOGLE_API_CERTIFICATE_CONFIG"] = str(cert_config_path)
+        # Set environment so google-auth discovers our configs.
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(adc_path)
+        os.environ["GOOGLE_API_USE_CLIENT_CERTIFICATE"] = "true"
+        os.environ["GOOGLE_API_CERTIFICATE_CONFIG"] = str(cert_config_path)
 
-            # Build a Request with the ECP mTLS adapter so that default()'s
-            # internal token exchange presents the SE-backed client cert.
-            # The cert was imported into the login keychain (step 3) so ECP's
-            # GetCertPemForPython / SignForPython can find it via
-            # SecItemCopyMatching.  macOS auto-associates it with the SE key.
-            from google.auth import default
-            from google.auth.transport.requests import (
-                Request as AuthRequest,
-                _MutualTlsOffloadAdapter,
+        # Build a Request with the ECP mTLS adapter so that default()'s
+        # internal token exchange presents the SE-backed client cert.
+        # The cert was imported into the login keychain (step 3) so ECP's
+        # GetCertPemForPython / SignForPython can find it via
+        # SecItemCopyMatching.  macOS auto-associates it with the SE key.
+        from google.auth import default
+        from google.auth.transport.requests import (
+            Request as AuthRequest,
+            _MutualTlsOffloadAdapter,
+        )
+        import requests as req_lib
+
+        # Pre-load ECP DLLs so ctypes.CDLL can resolve dependencies.
+        # On Windows, ctypes.CDLL(winmode=0) uses legacy DLL search which
+        # doesn't honour os.add_dll_directory().  Loading all ECP DLLs
+        # from the same directory ensures they can find each other.
+        if sys.platform == "win32":
+            import ctypes
+            for lib in (ecp_client_lib, tls_offload_lib):
+                try:
+                    ctypes.WinDLL(str(lib))
+                except OSError:
+                    pass  # Will fail properly in _MutualTlsOffloadAdapter
+
+        mtls_session = req_lib.Session()
+        mtls_adapter = _MutualTlsOffloadAdapter(str(cert_config_path))
+        mtls_session.mount("https://", mtls_adapter)
+        mtls_request = AuthRequest(session=mtls_session)
+
+        # Allow IAM bindings to propagate before attempting auth.
+        logger.info("    Waiting 15s for IAM propagation...")
+        time.sleep(15)
+
+        @with_retries(
+            max_attempts=10,
+            retryable_exceptions=(RefreshError, OAuthError, TypeError),
+            retry_msg="Waiting for STS propagation",
+        )
+        def _verify_adc():
+            adc_creds, _ = default(
+                scopes=["https://www.googleapis.com/auth/cloud-platform"],
+                request=mtls_request,
             )
-            import requests as req_lib
-
-            # Pre-load ECP DLLs so ctypes.CDLL can resolve dependencies.
-            # On Windows, ctypes.CDLL(winmode=0) uses legacy DLL search which
-            # doesn't honour os.add_dll_directory().  Loading all ECP DLLs
-            # from the same directory ensures they can find each other.
-            if sys.platform == "win32":
-                import ctypes
-                for lib in (ecp_client_lib, tls_offload_lib):
-                    try:
-                        ctypes.WinDLL(str(lib))
-                    except OSError:
-                        pass  # Will fail properly in _MutualTlsOffloadAdapter
-
-            mtls_session = req_lib.Session()
-            mtls_adapter = _MutualTlsOffloadAdapter(str(cert_config_path))
-            mtls_session.mount("https://", mtls_adapter)
-            mtls_request = AuthRequest(session=mtls_session)
-
-            # Allow IAM bindings to propagate before attempting auth.
-            logger.info("    Waiting 15s for IAM propagation...")
-            time.sleep(15)
-
-            @with_retries(
-                max_attempts=10,
-                retryable_exceptions=(RefreshError, OAuthError, TypeError),
-                retry_msg="Waiting for STS propagation",
+            adc_creds.refresh(mtls_request)
+            api_headers = {}
+            adc_creds.apply(api_headers)
+            target_api_res = mtls_session.get(
+                f"https://{crm_base}/v1/projects/{config.project_id}",
+                headers=api_headers,
             )
-            def _verify_adc():
-                adc_creds, _ = default(
-                    scopes=["https://www.googleapis.com/auth/cloud-platform"],
-                    request=mtls_request,
-                )
-                adc_creds.refresh(mtls_request)
-                api_headers = {}
-                adc_creds.apply(api_headers)
-                target_api_res = mtls_session.get(
-                    f"https://{crm_base}/v1/projects/{config.project_id}",
-                    headers=api_headers,
-                )
-                target_api_res.raise_for_status()
-                return target_api_res.json()
+            target_api_res.raise_for_status()
+            return target_api_res.json()
 
-            proj_result = _verify_adc()
-            logger.info(
-                "✅ API Call Successful! The OS signed the handshake via ECP."
-            )
-            if use_sa:
-                logger.info("   Authenticated SA: %s", sa_email)
-            logger.info("   Target Project:   %s", proj_result.get("name"))
-        except Exception as e:
-            logger.warning(
-                "⚠️  Step 7 (ECP auth demo) failed: %s"
-                "\n    This is expected on platforms where ECP cannot access"
-                "\n    hardware-backed keys (e.g. macOS Secure Enclave in CI)."
-                "\n    Steps 1-6 completed successfully — infrastructure is ready.",
-                e,
-            )
+        proj_result = _verify_adc()
+        logger.info(
+            "✅ API Call Successful! The OS signed the handshake via ECP."
+        )
+        if use_sa:
+            logger.info("   Authenticated SA: %s", sa_email)
+        logger.info("   Target Project:   %s", proj_result.get("name"))
 
 
 if __name__ == "__main__":
