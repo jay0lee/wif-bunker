@@ -28,7 +28,7 @@ def find_package_file(*module_parts):
 
 def patch_file_regex(filepath, pattern, replacement, description):
     """Replace a regex pattern in a file. Fails loudly if pattern not found."""
-    with open(filepath, "r") as f:
+    with open(filepath, "r", encoding="utf-8") as f:
         content = f.read()
 
     # Check if already patched
@@ -44,7 +44,7 @@ def patch_file_regex(filepath, pattern, replacement, description):
         print(f"        Pattern: {pattern[:120]}...")
         sys.exit(1)
 
-    with open(filepath, "w") as f:
+    with open(filepath, "w", encoding="utf-8") as f:
         f.write(new_content)
     print(f"  OK:   {description}")
 
