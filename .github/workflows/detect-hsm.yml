@@ -47,13 +47,13 @@ jobs:
 
       # ── Linux TPM Detection ──
       - name: "Linux: Detect TPM 2.0"
+        id: detect_tpm
         if: runner.os == 'Linux'
         run: |
-          HW_TPM=false
-
           echo "=== TPM Device Nodes ==="
           if ls -la /dev/tpm* 2>/dev/null; then
-            HW_TPM=true
+            echo "hw_tpm=true" >> "$GITHUB_OUTPUT"
+            echo "✅ Hardware TPM detected"
           else
             echo "No /dev/tpm* devices found"
           fi
@@ -63,67 +63,63 @@ jobs:
           if [ -d /sys/class/tpm/tpm0 ]; then
             echo "TPM0 exists"
             cat /sys/class/tpm/tpm0/tpm_version_major 2>/dev/null || true
-            HW_TPM=true
+            echo "hw_tpm=true" >> "$GITHUB_OUTPUT"
+            echo "✅ Hardware TPM detected via sysfs"
           else
             echo "No /sys/class/tpm/tpm0 directory"
           fi
 
-          if $HW_TPM; then
-            echo ""
-            echo "✅ Hardware TPM detected"
-          else
-            echo ""
-            echo "❌ No hardware TPM — setting up Software TPM (swtpm)"
-            echo ""
+      - name: "Linux: Setup Software TPM (swtpm)"
+        if: runner.os == 'Linux' && steps.detect_tpm.outputs.hw_tpm != 'true'
+        run: |
+          echo "❌ No hardware TPM — setting up Software TPM (swtpm)"
+          echo ""
 
-            # Install swtpm + full TPM2 PKCS#11 toolchain
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq \
-              swtpm swtpm-tools \
-              tpm2-tools tpm2-abrmd dbus \
-              libtpm2-pkcs11-1 libtpm2-pkcs11-tools \
-              gnutls-bin
+          # Install swtpm + full TPM2 PKCS#11 toolchain
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            swtpm swtpm-tools \
+            tpm2-tools tpm2-abrmd libtss2-tcti-tabrmd0 dbus \
+            libtpm2-pkcs11-1 libtpm2-pkcs11-tools \
+            gnutls-bin
 
-            # Create swtpm state directory
-            SWTPM_DIR=$(mktemp -d)
-            echo "swtpm state dir: $SWTPM_DIR"
+          # Create swtpm state directory
+          SWTPM_DIR=$(mktemp -d)
+          echo "swtpm state dir: $SWTPM_DIR"
 
-            # Start swtpm as a TCP server (port 2321/2322)
-            swtpm socket \
-              --tpmstate dir="$SWTPM_DIR" \
-              --tpm2 \
-              --ctrl type=tcp,port=2322 \
-              --server type=tcp,port=2321 \
-              --flags not-need-init,startup-clear &
-            SWTPM_PID=$!
-            sleep 2
+          # Start swtpm as a TCP server (port 2321/2322)
+          swtpm socket \
+            --tpmstate dir="$SWTPM_DIR" \
+            --tpm2 \
+            --ctrl type=tcp,port=2322 \
+            --server type=tcp,port=2321 \
+            --flags not-need-init,startup-clear &
+          sleep 2
 
-            # Start the TPM2 Resource Manager (tpm2-abrmd).
-            # Without it, swtpm only has ~3 transient object slots
-            # which causes TPM_RC_OBJECT_MEMORY during key creation.
-            eval $(dbus-launch --sh-syntax)
-            tpm2-abrmd \
-              --tcti="swtpm:host=127.0.0.1,port=2321" \
-              --session \
-              --allow-root &
-            ABRMD_PID=$!
-            sleep 1
+          # Start the TPM2 Resource Manager (tpm2-abrmd).
+          # Without it, swtpm only has ~3 transient object slots
+          # which causes TPM_RC_OBJECT_MEMORY during key creation.
+          eval $(dbus-launch --sh-syntax)
+          tpm2-abrmd \
+            --tcti="swtpm:host=127.0.0.1,port=2321" \
+            --session \
+            --allow-root &
+          sleep 1
 
-            # Route all tpm2-tools through the resource manager
-            export TPM2TOOLS_TCTI="tabrmd:bus_type=session"
-            echo "TPM2TOOLS_TCTI=$TPM2TOOLS_TCTI"
+          # Route all tpm2-tools through the resource manager
+          export TPM2TOOLS_TCTI="tabrmd:bus_type=session"
+          echo "TPM2TOOLS_TCTI=$TPM2TOOLS_TCTI"
 
-            # Persist for subsequent steps
-            echo "TPM2TOOLS_TCTI=$TPM2TOOLS_TCTI" >> "$GITHUB_ENV"
-            echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
+          # Persist for subsequent steps
+          echo "TPM2TOOLS_TCTI=$TPM2TOOLS_TCTI" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
 
-            # Verify swtpm + abrmd are responding
-            echo ""
-            echo "=== swtpm + abrmd Verification ==="
-            tpm2_getcap properties-fixed 2>&1 | head -10 && \
-              echo "✅ swtpm + resource manager responding" || \
-              echo "❌ swtpm not responding"
-          fi
+          # Verify swtpm + abrmd are responding
+          echo ""
+          echo "=== swtpm + abrmd Verification ==="
+          tpm2_getcap properties-fixed 2>&1 | head -10 && \
+            echo "✅ swtpm + resource manager responding" || \
+            echo "❌ swtpm not responding"
 
           echo ""
           echo "=== PKCS#11 TPM Library ==="
@@ -224,6 +220,7 @@ jobs:
 
       # ── Windows TPM Detection ──
       - name: "Windows: Detect TPM 2.0"
+        continue-on-error: true
         if: runner.os == 'Windows'
         shell: powershell
         run: |
