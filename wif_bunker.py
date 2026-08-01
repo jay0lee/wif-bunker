@@ -1484,13 +1484,20 @@ def main() -> None:
         iam_base = "iam.googleapis.com"
 
         # --- Step 1: Create GCP Project (or reuse) ---
+        project_exists = False
         if args.project:
-            logger.info("=== 1) Reusing existing project: %s ===", config.project_id)
-            project_number = client.api_call(
-                "GET", f"https://{crm_base}/v1/projects/{config.project_id}",
-            )["projectNumber"]
-            logger.info("    Project number: %s", project_number)
-        else:
+            # Try to reuse an existing project first.
+            try:
+                logger.info("=== 1) Reusing existing project: %s ===", config.project_id)
+                project_number = client.api_call(
+                    "GET", f"https://{crm_base}/v1/projects/{config.project_id}",
+                )["projectNumber"]
+                logger.info("    Project number: %s", project_number)
+                project_exists = True
+            except Exception:
+                logger.info("    Project not found, will create it.")
+
+        if not project_exists:
             logger.info("=== 1) Creating GCP Project (%s) ===", config.project_id)
             create_payload = {
                 "projectId": config.project_id,
