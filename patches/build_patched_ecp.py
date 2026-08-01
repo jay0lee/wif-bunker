@@ -112,16 +112,63 @@ def main():
             print("  The upstream code may have changed. Trying to continue...")
         else:
             content = content.replace(OLD_CERT_REF_TO_X509, NEW_CERT_REF_TO_X509, 1)
-            with open(keychain_path, "w") as f:
-                f.write(content)
             print("  OK: Patched certRefToX509")
 
         # Remove unused 'pem' import (no longer needed after patch).
         if '\t"encoding/pem"\n' in content:
             content = content.replace('\t"encoding/pem"\n', '', 1)
-            with open(keychain_path, "w") as f:
-                f.write(content)
             print("  OK: Removed unused 'encoding/pem' import")
+
+        # ── Patch 2: Add debug logging to findMatchingIdentities ──
+        # Print how many identities SecItemCopyMatching finds and which
+        # match the issuer filter — critical for diagnosing SE key issues.
+        print("\n   Patching findMatchingIdentities with debug logging...")
+
+        old_loop = '''\tfor i := 0; i < int(C.CFArrayGetCount(signingIdents)); i++ {
+\t\tidentDict := C.CFArrayGetValueAtIndex(signingIdents, C.CFIndex(i))
+\t\txc, err := identityToX509(C.SecIdentityRef(identDict))
+\t\tif err != nil {
+\t\t\tcontinue // Skip this identity if there's an error
+\t\t}
+\t\tif xc.Issuer.CommonName == issuerCN {
+\t\t\tleafs = append(leafs, xc)
+\t\t\tleafIdents = append(leafIdents, C.SecIdentityRef(identDict))
+\t\t}
+\t}'''
+
+        new_loop = '''\tfmt.Fprintf(os.Stderr, "ECP: findMatchingIdentities: SecItemCopyMatching returned %d identities, looking for issuer=%q\\n", int(C.CFArrayGetCount(signingIdents)), issuerCN)
+\tfor i := 0; i < int(C.CFArrayGetCount(signingIdents)); i++ {
+\t\tidentDict := C.CFArrayGetValueAtIndex(signingIdents, C.CFIndex(i))
+\t\txc, err := identityToX509(C.SecIdentityRef(identDict))
+\t\tif err != nil {
+\t\t\tfmt.Fprintf(os.Stderr, "ECP:   identity[%d]: identityToX509 error: %v\\n", i, err)
+\t\t\tcontinue // Skip this identity if there's an error
+\t\t}
+\t\tfmt.Fprintf(os.Stderr, "ECP:   identity[%d]: CN=%q, Issuer.CN=%q\\n", i, xc.Subject.CommonName, xc.Issuer.CommonName)
+\t\tif xc.Issuer.CommonName == issuerCN {
+\t\t\tleafs = append(leafs, xc)
+\t\t\tleafIdents = append(leafIdents, C.SecIdentityRef(identDict))
+\t\t}
+\t}'''
+
+        if old_loop in content:
+            content = content.replace(old_loop, new_loop, 1)
+            print("  OK: Added debug logging to identity matching loop")
+        else:
+            print("  WARNING: Could not find identity matching loop to patch")
+
+        # ── Patch 3: Log Cred() result ──
+        old_cred_err = '''\t\treturn nil, fmt.Errorf("no key found with issuer common name %q", issuerCN)'''
+        new_cred_err = '''\t\tfmt.Fprintf(os.Stderr, "ECP: Cred(): no key found with issuer CN=%q (keychainType=%q)\\n", issuerCN, keychainType)
+\t\treturn nil, fmt.Errorf("no key found with issuer common name %q", issuerCN)'''
+
+        if old_cred_err in content:
+            content = content.replace(old_cred_err, new_cred_err, 1)
+            print("  OK: Added Cred() error logging")
+
+        # Write the fully patched file
+        with open(keychain_path, "w") as f:
+            f.write(content)
 
         # Build the C-shared signer library (ecp_client)
         print("\n3. Building ECP C-shared library (ecp_client)...")

@@ -137,9 +137,9 @@ def main():
         r'\1    raise exceptions.MutualTLSChannelError("failed to get certificate")',
         "Fallback cert reading in _custom_tls_signer.get_cert",
     )
-
     print("\nAll patches applied successfully.")
 
 
 if __name__ == "__main__":
     main()
+
