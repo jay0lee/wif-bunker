@@ -1930,10 +1930,32 @@ def main() -> None:
             mtls_session.mount("https://", mtls_adapter)
             mtls_request = AuthRequest(session=mtls_session)
 
+            # Quick SSL connectivity test to get detailed error info.
+            logger.info("    Testing SSL handshake to sts.mtls.googleapis.com...")
+            try:
+                test_resp = mtls_session.get(
+                    "https://sts.mtls.googleapis.com/",
+                    timeout=15,
+                )
+                logger.info("    SSL test status: %s", test_resp.status_code)
+            except Exception as ssl_test_err:
+                logger.warning("    SSL test failed: %s", ssl_test_err)
+                # Dump full chain for debugging
+                cause = ssl_test_err
+                depth = 0
+                while cause:
+                    logger.warning("    SSL error chain [%d]: %s: %s",
+                                   depth, type(cause).__name__, cause)
+                    cause = getattr(cause, '__cause__', None) or getattr(cause, '__context__', None)
+                    depth += 1
+                    if depth > 10:
+                        break
+
             # Allow IAM bindings to propagate before attempting auth.
             logger.info("    Waiting 15s for IAM propagation...")
             time.sleep(15)
 
+            from ssl import SSLError
             @with_retries(
                 max_attempts=10,
                 retryable_exceptions=(RefreshError, OAuthError, TypeError),
@@ -1962,7 +1984,10 @@ def main() -> None:
                 logger.info("   Authenticated SA: %s", sa_email)
             logger.info("   Target Project:   %s", proj_result.get("name"))
         except Exception as e:
+            # Log full traceback for SSL/auth failures
+            import traceback
             logger.error("Step 7 (ECP auth demo) failed: %s", e)
+            logger.error("Full traceback:\n%s", traceback.format_exc())
             sys.exit(1)
 
 
