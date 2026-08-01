@@ -143,30 +143,42 @@ def main():
         )
         print(f"  Built: {signer_bin_output}")
 
-        # Build the tls_offload library
-        print("\n5. Building ECP TLS offload library...")
-        # The offload lib is in build/scripts or we build from cshared with offload tag
-        offload_output = os.path.join(output_dir, "libtls_offload.dylib")
-        # Check if there's a separate offload directory
-        offload_dir = os.path.join(repo_dir, "cshared", "tls_offload")
-        if os.path.isdir(offload_dir):
-            run(
-                [
-                    "go", "build",
-                    "-buildmode=c-shared",
-                    f"-o={offload_output}",
-                    ".",
-                ],
-                cwd=offload_dir,
-            )
-        else:
-            # Some versions bundle offload in the main cshared build
-            print("  SKIP: No separate tls_offload directory found.")
-            print("  The cshared library may include offload support.")
-            # Copy the main lib as offload too
-            shutil.copy2(signer_output, offload_output)
+        # Download the TLS offload library from the GitHub release.
+        # The offload library is a separate binary (provides ConfigureSslContext)
+        # that does NOT need patching — only the signer library does.
+        print("\n5. Downloading TLS offload library from GitHub release...")
+        import io
+        import json
+        import tarfile
+        import urllib.request
 
-        print(f"  Built: {offload_output}")
+        release_url = f"https://api.github.com/repos/googleapis/enterprise-certificate-proxy/releases/tags/{ECP_TAG}"
+        with urllib.request.urlopen(release_url) as resp:
+            release = json.loads(resp.read())
+
+        arch_str = "arm64" if platform.machine() == "arm64" else "amd64"
+        offload_output = os.path.join(output_dir, "libtls_offload.dylib")
+        offload_asset = None
+        for asset in release["assets"]:
+            if "tls_offload" in asset["name"] and "darwin" in asset["name"] and arch_str in asset["name"]:
+                offload_asset = asset
+                break
+
+        if offload_asset:
+            print(f"  Downloading {offload_asset['name']}...")
+            with urllib.request.urlopen(offload_asset["browser_download_url"]) as dl:
+                with tarfile.open(fileobj=io.BytesIO(dl.read()), mode="r:gz") as tf:
+                    tf.extractall(output_dir)
+            # Rename to expected name if needed
+            for f in os.listdir(output_dir):
+                if "tls_offload" in f and f.endswith(".dylib"):
+                    src = os.path.join(output_dir, f)
+                    if src != offload_output:
+                        shutil.move(src, offload_output)
+            print(f"  Downloaded: {offload_output}")
+        else:
+            print("  WARNING: Could not find TLS offload asset in release.")
+            print(f"  Available: {[a['name'] for a in release['assets']]}")
 
     print(f"\n✅ Patched ECP binaries installed to: {output_dir}")
     print("Files:")
