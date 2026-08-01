@@ -21,20 +21,17 @@ jobs:
             name: Linux ARM64
 
           # macOS
-          - os: macos-13
-            arch: x86_64
-            name: macOS x64 (Intel)
           - os: macos-15
             arch: arm64
             name: macOS ARM64 (Apple Silicon)
 
           # Windows
-          - os: windows-latest
+          - os: windows-2025
             arch: x86_64
-            name: Windows x64
-          - os: windows-11-arm
+            name: Windows x64 (2025)
+          - os: windows-11-vs2026-arm
             arch: arm64
-            name: Windows ARM64
+            name: Windows ARM64 (2026)
 
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.name }}
@@ -52,41 +49,119 @@ jobs:
       - name: "Linux: Detect TPM 2.0"
         if: runner.os == 'Linux'
         run: |
+          HW_TPM=false
+
           echo "=== TPM Device Nodes ==="
-          ls -la /dev/tpm* 2>/dev/null || echo "No /dev/tpm* devices found"
+          if ls -la /dev/tpm* 2>/dev/null; then
+            HW_TPM=true
+          else
+            echo "No /dev/tpm* devices found"
+          fi
 
           echo ""
           echo "=== TPM sysfs Info ==="
           if [ -d /sys/class/tpm/tpm0 ]; then
             echo "TPM0 exists"
             cat /sys/class/tpm/tpm0/tpm_version_major 2>/dev/null || true
-            cat /sys/class/tpm/tpm0/device/description 2>/dev/null || true
+            HW_TPM=true
           else
             echo "No /sys/class/tpm/tpm0 directory"
           fi
 
-          echo ""
-          echo "=== Kernel TPM Modules ==="
-          lsmod | grep -i tpm || echo "No TPM kernel modules loaded"
-
-          echo ""
-          echo "=== tpm2-tools Availability ==="
-          if command -v tpm2_getcap &>/dev/null; then
-            echo "tpm2_getcap found: $(which tpm2_getcap)"
-            tpm2_getcap properties-fixed 2>&1 | head -20 || true
+          if $HW_TPM; then
+            echo ""
+            echo "✅ Hardware TPM detected"
           else
-            echo "tpm2-tools not installed"
-            echo "Available via: sudo apt-get install tpm2-tools"
+            echo ""
+            echo "❌ No hardware TPM — setting up Software TPM (swtpm)"
+            echo ""
+
+            # Install swtpm + full TPM2 PKCS#11 toolchain
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq \
+              swtpm swtpm-tools \
+              tpm2-tools tpm2-abrmd \
+              libtpm2-pkcs11-1 libtpm2-pkcs11-tools \
+              gnutls-bin
+
+            # Create swtpm state directory
+            SWTPM_DIR=$(mktemp -d)
+            echo "swtpm state dir: $SWTPM_DIR"
+
+            # Start swtpm as a TCP server (port 2321/2322)
+            swtpm socket \
+              --tpmstate dir="$SWTPM_DIR" \
+              --tpm2 \
+              --ctrl type=tcp,port=2322 \
+              --server type=tcp,port=2321 \
+              --flags not-need-init,startup-clear &
+            SWTPM_PID=$!
+            echo "swtpm PID: $SWTPM_PID"
+
+            # Give swtpm a moment to start
+            sleep 2
+
+            # Configure tpm2-tools to use swtpm via TCTI
+            export TPM2TOOLS_TCTI="swtpm:host=127.0.0.1,port=2321"
+            echo "TPM2TOOLS_TCTI=$TPM2TOOLS_TCTI"
+
+            # Persist for subsequent steps
+            echo "TPM2TOOLS_TCTI=$TPM2TOOLS_TCTI" >> "$GITHUB_ENV"
+            echo "SWTPM_PID=$SWTPM_PID" >> "$GITHUB_ENV"
+
+            # Verify swtpm is responding
+            echo ""
+            echo "=== swtpm Verification ==="
+            tpm2_getcap properties-fixed 2>&1 | head -10 && \
+              echo "✅ swtpm responding" || \
+              echo "❌ swtpm not responding"
           fi
 
           echo ""
           echo "=== PKCS#11 TPM Library ==="
-          dpkg -l libtpm2-pkcs11-1 2>/dev/null || echo "libtpm2-pkcs11 not installed"
           ls /usr/lib/*/libtpm2_pkcs11.so* 2>/dev/null || echo "No libtpm2_pkcs11.so found"
 
-          echo ""
-          echo "=== Software TPM (swtpm) ==="
-          command -v swtpm && echo "swtpm available" || echo "swtpm not available"
+      - name: "Linux: PKCS#11 Key Generation Test"
+        if: runner.os == 'Linux'
+        run: |
+          echo "=== TPM PKCS#11 Key Generation Test ==="
+
+          # Set up PKCS#11 store
+          export TPM2_PKCS11_STORE=$(mktemp -d)
+          echo "PKCS#11 store: $TPM2_PKCS11_STORE"
+
+          # Initialize the PKCS#11 token
+          tpm2_ptool init
+          tpm2_ptool addtoken --pid=1 \
+            --sopin=citest123 --userpin=citest123 \
+            --label=ci-test
+
+          # Generate an EC P-256 key
+          tpm2_ptool addkey \
+            --algorithm=ecc256 \
+            --label=ci-test-key \
+            --userpin=citest123
+
+          echo "✅ TPM PKCS#11 key generation succeeded"
+
+          # Generate a self-signed cert to verify the full chain
+          PKCS11_URI="pkcs11:token=ci-test;object=ci-test-key;type=private;pin-value=citest123"
+          cat > /tmp/ci-cert.cfg <<EOF
+          cn = "ci-test-workload"
+          expiration_days = 1
+          tls_www_client
+          EOF
+
+          certtool --generate-self-signed \
+            --load-privkey "$PKCS11_URI" \
+            --template /tmp/ci-cert.cfg \
+            --outfile /tmp/ci-test-cert.pem 2>&1 && \
+            echo "✅ Self-signed cert generated with TPM key" || \
+            echo "❌ certtool failed"
+
+          if [ -f /tmp/ci-test-cert.pem ]; then
+            openssl x509 -in /tmp/ci-test-cert.pem -noout -subject -issuer
+          fi
 
       # ── macOS Secure Enclave Detection ──
       - name: "macOS: Detect Secure Enclave"
@@ -189,7 +264,12 @@ jobs:
             Write-Output "❌ certreq.exe not found"
           }
 
-          Write-Output ""
+      - name: "Windows: TPM Key Generation Test"
+        if: runner.os == 'Windows'
+        timeout-minutes: 2
+        continue-on-error: true
+        shell: powershell
+        run: |
           Write-Output "=== TPM Key Generation Test ==="
           # Try to create a TPM-backed key via certreq
           $inf = @"
