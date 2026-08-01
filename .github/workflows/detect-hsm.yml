@@ -1,81 +1,57 @@
-name: Hardware Security Module Detection
+name: WIF Bunker Integration Test
 
 on:
   push:
     branches: [main]
-  pull_request:
   workflow_dispatch:
 
+# Only allow one integration test at a time to avoid project name collisions
+concurrency:
+  group: wif-bunker-integration
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write  # Required for OIDC token exchange with GCP
+
 jobs:
-  detect-hsm:
+  integration-test:
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Linux
           - os: ubuntu-24.04
-            arch: x86_64
             name: Linux x64
+            soft_key_flag: ""
           - os: ubuntu-24.04-arm
-            arch: arm64
             name: Linux ARM64
-
-          # macOS
+            soft_key_flag: ""
           - os: macos-15
-            arch: arm64
             name: macOS ARM64 (Apple Silicon)
-
-          # Windows
+            soft_key_flag: ""
           - os: windows-2025
-            arch: x86_64
-            name: Windows x64 (2025)
-          - os: windows-11-vs2026-arm
-            arch: arm64
-            name: Windows ARM64 (2026)
+            name: Windows x64
+            soft_key_flag: "--soft-key"
 
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.name }}
 
     steps:
-      - name: System info
-        shell: bash
-        run: |
-          echo "=== Runner Info ==="
-          echo "OS:   ${{ matrix.os }}"
-          echo "Arch: $(uname -m)"
-          echo "Kernel: $(uname -a)"
+      - uses: actions/checkout@v4
 
-      # ── Linux TPM Detection ──
-      - name: "Linux: Detect TPM 2.0"
-        id: detect_tpm
+      # ── Authenticate to GCP via WIF ──
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      # ── Setup: Linux Software TPM ──
+      - name: "Linux: Setup Software TPM (swtpm)"
         if: runner.os == 'Linux'
         run: |
-          echo "=== TPM Device Nodes ==="
-          if ls -la /dev/tpm* 2>/dev/null; then
-            echo "hw_tpm=true" >> "$GITHUB_OUTPUT"
-            echo "✅ Hardware TPM detected"
-          else
-            echo "No /dev/tpm* devices found"
-          fi
-
-          echo ""
-          echo "=== TPM sysfs Info ==="
-          if [ -d /sys/class/tpm/tpm0 ]; then
-            echo "TPM0 exists"
-            cat /sys/class/tpm/tpm0/tpm_version_major 2>/dev/null || true
-            echo "hw_tpm=true" >> "$GITHUB_OUTPUT"
-            echo "✅ Hardware TPM detected via sysfs"
-          else
-            echo "No /sys/class/tpm/tpm0 directory"
-          fi
-
-      - name: "Linux: Setup Software TPM (swtpm)"
-        if: runner.os == 'Linux' && steps.detect_tpm.outputs.hw_tpm != 'true'
-        run: |
-          echo "❌ No hardware TPM — setting up Software TPM (swtpm)"
-          echo ""
-
-          # Install swtpm + full TPM2 PKCS#11 toolchain
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             swtpm swtpm-tools \
@@ -83,7 +59,6 @@ jobs:
             libtpm2-pkcs11-1 libtpm2-pkcs11-tools \
             gnutls-bin
 
-          # Start swtpm as a TCP server (port 2321/2322)
           SWTPM_DIR=$(mktemp -d)
           swtpm socket \
             --tpmstate dir="$SWTPM_DIR" \
@@ -93,16 +68,9 @@ jobs:
             --flags not-need-init,startup-clear &
           sleep 2
 
-          # Start a persistent D-Bus session daemon.
-          # Using dbus-daemon --fork instead of dbus-launch so the daemon
-          # survives the shell exit and persists across GHA steps.
           DBUS_SESSION_BUS_ADDRESS=$(dbus-daemon --session --fork --print-address --address="unix:tmpdir=/tmp")
-          echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS"
           echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
 
-          # Start the TPM2 Resource Manager (tpm2-abrmd).
-          # Without it, swtpm only has ~3 transient object slots
-          # which causes TPM_RC_OBJECT_MEMORY during key creation.
           export DBUS_SESSION_BUS_ADDRESS
           tpm2-abrmd \
             --tcti="swtpm:host=127.0.0.1,port=2321" \
@@ -110,273 +78,106 @@ jobs:
             --allow-root &
           sleep 1
 
-          # Route all tpm2-tools through the resource manager
           echo "TPM2TOOLS_TCTI=tabrmd:bus_type=session" >> "$GITHUB_ENV"
-          export TPM2TOOLS_TCTI="tabrmd:bus_type=session"
 
-          # Verify swtpm + abrmd are responding
-          echo ""
-          echo "=== swtpm + abrmd Verification ==="
-          tpm2_getcap properties-fixed 2>&1 | head -5
-          echo "✅ swtpm + resource manager responding"
+      # ── Setup: Python ──
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
-      - name: "Linux: PKCS#11 Key Generation Test"
-        if: runner.os == 'Linux' && steps.detect_tpm.outputs.hw_tpm != 'true'
+      - name: Install dependencies
+        run: pip install requests cryptography google-auth google-auth-httplib2
+
+      # ── Generate unique project ID for this job ──
+      - name: Set project ID
+        id: config
+        shell: bash
         run: |
-          echo "=== PKCS#11 Key Generation Test ==="
+          # GCP project IDs: 6-30 chars, lowercase, digits, hyphens
+          PROJECT_ID="wif-ci-${{ github.run_id }}-${{ strategy.job-index }}"
+          # Truncate to 30 chars max
+          PROJECT_ID="${PROJECT_ID:0:30}"
+          echo "project_id=$PROJECT_ID" >> "$GITHUB_OUTPUT"
+          echo "Project ID: $PROJECT_ID"
 
-          export TPM2_PKCS11_STORE=$(mktemp -d)
-          echo "PKCS#11 store: $TPM2_PKCS11_STORE"
-
-          # Initialize the PKCS#11 token
-          tpm2_ptool init
-          tpm2_ptool addtoken --pid=1 \
-            --sopin=citest123 --userpin=citest123 \
-            --label=ci-test
-
-          # Generate an EC P-256 key in the 'ci-test' token
-          tpm2_ptool addkey \
-            --algorithm=ecc256 \
-            --label=ci-test \
-            --key-label=ci-test-key \
-            --userpin=citest123
-
-          echo "✅ TPM PKCS#11 key generation succeeded"
-
-          # Generate a self-signed cert to verify the full chain
-          PKCS11_URI="pkcs11:token=ci-test;object=ci-test-key;type=private;pin-value=citest123"
-          cat > /tmp/ci-cert.cfg <<EOF
-          cn = "ci-test-workload"
-          expiration_days = 1
-          tls_www_client
-          EOF
-
-          certtool --generate-self-signed \
-            --load-privkey "$PKCS11_URI" \
-            --template /tmp/ci-cert.cfg \
-            --outfile /tmp/ci-test-cert.pem 2>&1
-          echo "✅ Self-signed cert generated with swtpm key"
-
-          openssl x509 -in /tmp/ci-test-cert.pem -noout -subject -issuer
-
-      # ── macOS Secure Enclave Detection ──
-      - name: "macOS: Detect Secure Enclave"
-        if: runner.os == 'macOS'
+      # ── Step 1: Cleanup stale projects from previous failed runs ──
+      - name: "Cleanup stale test projects"
+        shell: bash
         run: |
-          echo "=== macOS Version ==="
-          sw_vers
+          echo "=== Cleaning up stale test projects ==="
+          FOLDER_ID="${{ secrets.SANDBOX_FOLDER_ID }}"
 
-          echo ""
-          echo "=== Secure Enclave Processor (SEP) ==="
-          if ioreg -l 2>/dev/null | grep -q "AppleSEP"; then
-            echo "✅ Secure Enclave detected (AppleSEP present in IORegistry)"
-          else
-            echo "❌ No Secure Enclave detected"
+          # List all active projects in the sandbox folder with wif-ci- prefix
+          # Exclude the host project (wif-ci-host-*)
+          PROJECTS=$(gcloud projects list \
+            --filter="parent.id=$FOLDER_ID AND parent.type=folder AND projectId:wif-ci- AND NOT projectId:wif-ci-host- AND lifecycleState=ACTIVE" \
+            --format="value(projectId,createTime)" \
+            --sort-by=createTime 2>/dev/null || true)
+
+          if [ -z "$PROJECTS" ]; then
+            echo "No stale projects found."
+            exit 0
           fi
 
-          echo ""
-          echo "=== Apple Silicon / T2 Chip ==="
-          system_profiler SPHardwareDataType 2>/dev/null | grep -E "Chip|Model|Processor" || true
+          # Compute cutoff (1 hour ago) — works on both GNU and BSD date
+          CUTOFF=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S 2>/dev/null || \
+                   date -u -v-1H +%Y-%m-%dT%H:%M:%S 2>/dev/null || \
+                   echo "")
 
-          echo ""
-          echo "=== CryptoTokenKit Identities ==="
-          if command -v sc_auth &>/dev/null; then
-            echo "sc_auth found: $(which sc_auth)"
-            sc_auth identities 2>&1 || echo "  (no identities)"
-            echo ""
-            echo "sc_auth version/help:"
-            sc_auth 2>&1 | head -5 || true
-          else
-            echo "sc_auth not found (requires macOS 15+)"
+          while IFS=$'\t' read -r project_id create_time; do
+            [ -z "$project_id" ] && continue
+
+            # Skip projects newer than 1 hour (might be from concurrent runners)
+            if [ -n "$CUTOFF" ] && [[ "$create_time" > "$CUTOFF" ]]; then
+              echo "  Skipping recent project: $project_id (created $create_time)"
+              continue
+            fi
+
+            echo "  Deleting stale project: $project_id (created $create_time)"
+            gcloud projects delete "$project_id" --quiet 2>/dev/null || true
+          done <<< "$PROJECTS"
+
+          echo "Stale cleanup complete."
+
+      # ── Step 2: WIF Bunker fresh run (creates project, SA, pool, provider) ──
+      - name: "WIF Bunker: Fresh setup"
+        shell: bash
+        run: |
+          echo "=== Running WIF Bunker (fresh creation) ==="
+          python gam_wif_adc.py \
+            --use-adc \
+            --project="${{ steps.config.outputs.project_id }}" \
+            --folder="${{ secrets.SANDBOX_FOLDER_ID }}" \
+            ${{ matrix.soft_key_flag }} \
+            --debug
+
+      # ── Step 3: WIF Bunker reuse run (detects existing resources) ──
+      - name: "WIF Bunker: Reuse existing"
+        shell: bash
+        run: |
+          echo "=== Running WIF Bunker (reuse flow) ==="
+          python gam_wif_adc.py \
+            --use-adc \
+            --project="${{ steps.config.outputs.project_id }}" \
+            ${{ matrix.soft_key_flag }} \
+            --debug
+
+      # ── Step 4: Cleanup own project ──
+      - name: "Cleanup test project"
+        if: always()
+        shell: bash
+        run: |
+          PROJECT_ID="${{ steps.config.outputs.project_id }}"
+          if [ -n "$PROJECT_ID" ]; then
+            echo "Deleting test project: $PROJECT_ID"
+            gcloud projects delete "$PROJECT_ID" --quiet 2>/dev/null || true
           fi
-
-          echo ""
-          echo "=== Keychain Smart Card Support ==="
-          security list-smartcards 2>&1 || echo "  (no smart cards listed)"
-
-          echo ""
-          echo "=== Secure Enclave Key Generation Test ==="
-          # Attempt to generate a test key in the Secure Enclave
-          if command -v sc_auth &>/dev/null; then
-            sc_auth create-ctk-identity \
-              -l "ci-test-key" \
-              -N "ci-test-key" \
-              -k p-256-ne \
-              -t none 2>&1 && echo "✅ SE key generation succeeded" \
-                           || echo "❌ SE key generation failed"
-            # Clean up
-            sc_auth identities 2>&1 | grep "ci-test-key" | awk '{print $1}' | while read hash; do
-              sc_auth delete-ctk-identity -h "$hash" 2>/dev/null || true
-            done
-          fi
-
-      # ── Windows TPM Detection ──
-      - name: "Windows: Detect TPM 2.0"
-        id: detect_tpm_win
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: |
-          $ErrorActionPreference = "Continue"
-
-          Write-Output "=== TPM Status (Get-Tpm) ==="
-          try {
-            $tpm = Get-Tpm -ErrorAction Stop
-            $tpm | Format-List
-            if ($tpm.TpmPresent -and $tpm.TpmReady) {
-              Write-Output "✅ Hardware TPM detected and ready"
-              "hw_tpm=true" | Out-File -Append -FilePath $env:GITHUB_OUTPUT
-            } else {
-              Write-Output "⚠ TPM present=$($tpm.TpmPresent) ready=$($tpm.TpmReady)"
-            }
-          } catch {
-            Write-Output "Get-Tpm failed: $_"
-          }
-
-          Write-Output ""
-          Write-Output "=== Microsoft Platform Crypto Provider ==="
-          try {
-            $providers = certutil -csplist 2>&1
-            $mpc = $providers | Select-String "Microsoft Platform Crypto Provider"
-            if ($mpc) {
-              Write-Output "✅ Microsoft Platform Crypto Provider registered"
-              $mpc
-            } else {
-              Write-Output "❌ Microsoft Platform Crypto Provider not found"
-            }
-          } catch {
-            Write-Output "certutil query failed: $_"
-          }
-
-          Write-Output ""
-          Write-Output "=== certreq Availability ==="
-          if (Get-Command certreq -ErrorAction SilentlyContinue) {
-            Write-Output "✅ certreq.exe found: $((Get-Command certreq).Source)"
-          } else {
-            Write-Output "❌ certreq.exe not found"
-          }
-
-          # Force success — this is a diagnostic step. certutil -csplist
-          # sets $LASTEXITCODE=1 when Platform Crypto Provider reports
-          # "device not ready", which PowerShell propagates as a failure.
-          exit 0
-
-      - name: "Windows: TPM Key Generation Test"
-        if: runner.os == 'Windows' && steps.detect_tpm_win.outputs.hw_tpm == 'true'
-        timeout-minutes: 2
-        shell: powershell
-        run: |
-          Write-Output "=== TPM Key Generation Test (Platform Crypto Provider) ==="
-          $inf = @(
-            '[Version]',
-            'Signature="$Windows NT$"',
-            '',
-            '[NewRequest]',
-            'Subject = "CN=ci-tpm-test"',
-            'KeyAlgorithm = ECDSA_P256',
-            'HashAlgorithm = SHA256',
-            'ProviderName = "Microsoft Platform Crypto Provider"',
-            'Exportable = FALSE',
-            'MachineKeySet = FALSE',
-            'RequestType = PKCS10',
-            'KeyUsage = 0x80'
-          ) -join "`r`n"
-          $infPath = "$env:TEMP\ci-tpm-test.inf"
-          $csrPath = "$env:TEMP\ci-tpm-test.csr"
-          Set-Content -Path $infPath -Value $inf
-          try {
-            $result = certreq -new -f $infPath $csrPath 2>&1
-            if (Test-Path $csrPath) {
-              Write-Output "✅ TPM key generation succeeded"
-              Get-ChildItem Cert:\CurrentUser\My |
-                Where-Object { $_.Subject -eq 'CN=ci-tpm-test' } |
-                Remove-Item -Force 2>$null
-              Remove-Item $csrPath -Force 2>$null
-            } else {
-              Write-Output "❌ TPM key generation failed"
-              Write-Output $result
-            }
-          } catch {
-            Write-Output "❌ certreq failed: $_"
-          }
-          Remove-Item $infPath -Force 2>$null
-
-      - name: "Windows: Soft Key Generation Test (--soft-key fallback)"
-        if: runner.os == 'Windows' && steps.detect_tpm_win.outputs.hw_tpm != 'true'
-        shell: powershell
-        run: |
-          Write-Output "No hardware TPM - testing soft-key mode"
-          Write-Output "(Microsoft Software Key Storage Provider is built-in, no setup needed)"
-          Write-Output ""
-          Write-Output "=== Soft Key Test (Software Key Storage Provider) ==="
-          $inf = @(
-            '[Version]',
-            'Signature="$Windows NT$"',
-            '',
-            '[NewRequest]',
-            'Subject = "CN=ci-softkey-test"',
-            'KeyAlgorithm = ECDSA_P256',
-            'HashAlgorithm = SHA256',
-            'ProviderName = "Microsoft Software Key Storage Provider"',
-            'Exportable = FALSE',
-            'MachineKeySet = FALSE',
-            'RequestType = PKCS10',
-            'KeyUsage = 0x80'
-          ) -join "`r`n"
-          $infPath = "$env:TEMP\ci-softkey-test.inf"
-          $csrPath = "$env:TEMP\ci-softkey-test.csr"
-          Set-Content -Path $infPath -Value $inf
-          $result = certreq -new -f $infPath $csrPath 2>&1
-          if (Test-Path $csrPath) {
-            Write-Output "Software key generation succeeded (soft-key mode works)"
-            $cert = Get-ChildItem Cert:\CurrentUser\My |
-              Where-Object { $_.Subject -eq 'CN=ci-softkey-test' }
-            if ($cert) {
-              Write-Output "  Subject:    $($cert.Subject)"
-              Write-Output "  Thumbprint: $($cert.Thumbprint)"
-              $cert | Remove-Item -Force 2>$null
-            }
-            Remove-Item $csrPath -Force 2>$null
-          } else {
-            Write-Output "Software key generation failed"
-            Write-Output $result
-            exit 1
-          }
-          Remove-Item $infPath -Force 2>$null
 
       # ── Summary ──
       - name: Summary
         if: always()
         shell: bash
         run: |
-          # Determine HSM type and status
-          HSM_TYPE="Unknown"
-          HSM_STATUS="❓"
-
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            if [ "${{ steps.detect_tpm.outputs.hw_tpm }}" = "true" ]; then
-              HSM_TYPE="🔒 Hardware TPM 2.0"
-              HSM_STATUS="✅"
-            else
-              HSM_TYPE="🖥️ Software TPM (swtpm + tpm2-abrmd)"
-              # Check if the PKCS#11 test step succeeded
-              if [ "${{ steps.detect_tpm.outputs.hw_tpm }}" != "true" ]; then
-                HSM_STATUS="✅"
-              fi
-            fi
-          elif [ "$RUNNER_OS" = "macOS" ]; then
-            HSM_TYPE="🔐 Secure Enclave (CryptoTokenKit)"
-            HSM_STATUS="✅"
-          elif [ "$RUNNER_OS" = "Windows" ]; then
-            if [ "${{ steps.detect_tpm_win.outputs.hw_tpm }}" = "true" ]; then
-              HSM_TYPE="🔒 Hardware TPM 2.0 (Platform Crypto Provider)"
-              HSM_STATUS="✅"
-            else
-              HSM_TYPE="🖥️ Software Keys (--soft-key mode)"
-              HSM_STATUS="✅"
-            fi
-          fi
-
-          # Write to GitHub Step Summary (visible on the workflow run page)
           cat >> "$GITHUB_STEP_SUMMARY" <<EOF
           ## ${{ matrix.name }}
 
@@ -384,9 +185,7 @@ jobs:
           |----------|-------|
           | **Runner** | \`${{ matrix.os }}\` |
           | **Architecture** | \`$(uname -m)\` |
-          | **OS** | \`$RUNNER_OS\` |
-          | **HSM Type** | ${HSM_TYPE} |
-          | **Status** | ${HSM_STATUS} |
+          | **Project** | \`${{ steps.config.outputs.project_id }}\` |
+          | **Soft Key** | \`${{ matrix.soft_key_flag || 'no (hardware/swtpm)' }}\` |
 
           EOF
-
