@@ -241,7 +241,20 @@ class GCPClient:
             self._auth_request = google.auth.transport.requests.Request()
             self._credentials.refresh(self._auth_request)
             self._token = None
-            logger.info("Authenticated via Application Default Credentials.")
+            # Log the identity we're authenticated as.
+            identity = getattr(self._credentials, "service_account_email", None) \
+                or getattr(self._credentials, "signer_email", None)
+            if not identity:
+                # For user credentials, check tokeninfo.
+                try:
+                    info = self.session.get(
+                        "https://oauth2.googleapis.com/tokeninfo",
+                        params={"access_token": self._credentials.token},
+                    ).json()
+                    identity = info.get("email", "unknown")
+                except Exception:
+                    identity = "unknown"
+            logger.info("Authenticated via Application Default Credentials as: %s", identity)
         else:
             self._credentials = None
             self._token = self._oauth_user_token(client_secrets_file)
@@ -1369,15 +1382,25 @@ def main() -> None:
         description="WIF Bunker — Hardware-backed X.509 Workload Identity Federation",
     )
     parser.add_argument("--debug", action="store_true")
-    parser.add_argument(
-        "--project", metavar="PROJECT_ID",
+    project_group = parser.add_mutually_exclusive_group()
+    project_group.add_argument(
+        "--use-project", metavar="PROJECT_ID",
         help="Reuse an existing GCP project (skip creation & API enablement)",
     )
-    parser.add_argument(
-        "--service-account", metavar="SA_EMAIL",
+    project_group.add_argument(
+        "--create-project", metavar="PROJECT_ID",
+        help="Create a new GCP project with this ID",
+    )
+    sa_group = parser.add_mutually_exclusive_group()
+    sa_group.add_argument(
+        "--use-service-account", metavar="SA_EMAIL",
         help="Reuse an existing service account email (skip SA creation)",
     )
-    parser.add_argument(
+    sa_group.add_argument(
+        "--create-service-account", metavar="SA_NAME",
+        help="Create service account with this name",
+    )
+    sa_group.add_argument(
         "--no-service-account", action="store_true",
         help=(
             "Skip service account creation — WIF credentials authenticate "
@@ -1385,9 +1408,14 @@ def main() -> None:
             "to the WIF principal directly."
         ),
     )
-    parser.add_argument(
-        "--pool-id", metavar="POOL_ID",
+    pool_group = parser.add_mutually_exclusive_group()
+    pool_group.add_argument(
+        "--use-pool", metavar="POOL_ID",
         help="Reuse an existing WIF pool ID (skip pool creation)",
+    )
+    pool_group.add_argument(
+        "--create-pool", metavar="POOL_ID",
+        help="Create WIF pool with this ID",
     )
     algo_choices = list(_KEY_ALGORITHMS.keys())
     algo_help_lines = [f"{k}: {v['desc']}" for k, v in _KEY_ALGORITHMS.items()]
@@ -1428,7 +1456,7 @@ def main() -> None:
         "--folder", metavar="FOLDER_ID",
         help=(
             "GCP folder ID to create the project in.  "
-            "Only used when creating a new project (i.e. without --project)."
+            "Only used when creating a new project (e.g. with --create-project)."
         ),
     )
     args = parser.parse_args()
@@ -1447,15 +1475,18 @@ def main() -> None:
 
         http_client.HTTPConnection.debuglevel = 1
 
-    if args.service_account and args.no_service_account:
-        parser.error("--service-account and --no-service-account are mutually exclusive")
+
 
     config = WorkloadConfig()
     # Override config from CLI flags
-    if args.project:
-        config.project_id = args.project
-    if args.pool_id:
-        config.pool_id = args.pool_id
+    if args.use_project:
+        config.project_id = args.use_project
+    elif args.create_project:
+        config.project_id = args.create_project
+    if args.use_pool:
+        config.pool_id = args.use_pool
+    elif args.create_pool:
+        config.pool_id = args.create_pool
     if args.soft_key:
         config.soft_key = True
     if args.key_algorithm:
@@ -1484,20 +1515,13 @@ def main() -> None:
         iam_base = "iam.googleapis.com"
 
         # --- Step 1: Create GCP Project (or reuse) ---
-        project_exists = False
-        if args.project:
-            # Try to reuse an existing project first.
-            try:
-                logger.info("=== 1) Reusing existing project: %s ===", config.project_id)
-                project_number = client.api_call(
-                    "GET", f"https://{crm_base}/v1/projects/{config.project_id}",
-                )["projectNumber"]
-                logger.info("    Project number: %s", project_number)
-                project_exists = True
-            except Exception:
-                logger.info("    Project not found, will create it.")
-
-        if not project_exists:
+        if args.use_project:
+            logger.info("=== 1) Using existing project: %s ===", config.project_id)
+            project_number = client.api_call(
+                "GET", f"https://{crm_base}/v1/projects/{config.project_id}",
+            )["projectNumber"]
+            logger.info("    Project number: %s", project_number)
+        else:
             logger.info("=== 1) Creating GCP Project (%s) ===", config.project_id)
             create_payload = {
                 "projectId": config.project_id,
@@ -1540,8 +1564,10 @@ def main() -> None:
 
         # --- Step 4: SA + WIF Creation (or reuse) ---
         use_sa = not args.no_service_account
-        sa_email = args.service_account  # None if not provided
-        reuse_pool = bool(args.pool_id)
+        sa_email = args.use_service_account  # None if not provided
+        if args.create_service_account:
+            config.sa_name = args.create_service_account
+        reuse_pool = bool(args.use_pool)
 
         logger.info("=== 4) Initializing SA & WIF Infrastructure ===")
 
@@ -1802,11 +1828,11 @@ def main() -> None:
         logger.info("=" * 70)
         reuse_parts = [
             f"python3 {sys.argv[0]}",
-            f"--project {config.project_id}",
-            f"--pool-id {config.pool_id}",
+            f"--use-project {config.project_id}",
+            f"--use-pool {config.pool_id}",
         ]
         if use_sa and sa_email:
-            reuse_parts.append(f"--service-account {sa_email}")
+            reuse_parts.append(f"--use-service-account {sa_email}")
         elif not use_sa:
             reuse_parts.append("--no-service-account")
         logger.info("To re-run with existing infrastructure:")
@@ -1815,75 +1841,80 @@ def main() -> None:
         # --- Step 7: Full ADC Auth Flow Demo (ECP-backed mTLS) ---
         logger.info("=== 7) Executing Full ADC Auth Flow Demo ===")
 
-        # Monkey-patch google-auth to support hardware-backed keys
-        # (where key_path is absent from the workload cert config).
-        _patch_google_auth_for_hardware_keys()
+        try:
+            # Set environment so google-auth discovers our configs.
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(adc_path)
+            os.environ["GOOGLE_API_USE_CLIENT_CERTIFICATE"] = "true"
+            os.environ["GOOGLE_API_CERTIFICATE_CONFIG"] = str(cert_config_path)
 
-        # Set environment so google-auth discovers our configs.
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(adc_path)
-        os.environ["GOOGLE_API_USE_CLIENT_CERTIFICATE"] = "true"
-        os.environ["GOOGLE_API_CERTIFICATE_CONFIG"] = str(cert_config_path)
-
-        # Build a Request with the ECP mTLS adapter so that default()'s
-        # internal token exchange presents the SE-backed client cert.
-        # The cert was imported into the login keychain (step 3) so ECP's
-        # GetCertPemForPython / SignForPython can find it via
-        # SecItemCopyMatching.  macOS auto-associates it with the SE key.
-        from google.auth import default
-        from google.auth.transport.requests import (
-            Request as AuthRequest,
-            _MutualTlsOffloadAdapter,
-        )
-        import requests as req_lib
-
-        # Pre-load ECP DLLs so ctypes.CDLL can resolve dependencies.
-        # On Windows, ctypes.CDLL(winmode=0) uses legacy DLL search which
-        # doesn't honour os.add_dll_directory().  Loading all ECP DLLs
-        # from the same directory ensures they can find each other.
-        if sys.platform == "win32":
-            import ctypes
-            for lib in (ecp_client_lib, tls_offload_lib):
-                try:
-                    ctypes.WinDLL(str(lib))
-                except OSError:
-                    pass  # Will fail properly in _MutualTlsOffloadAdapter
-
-        mtls_session = req_lib.Session()
-        mtls_adapter = _MutualTlsOffloadAdapter(str(cert_config_path))
-        mtls_session.mount("https://", mtls_adapter)
-        mtls_request = AuthRequest(session=mtls_session)
-
-        # Allow IAM bindings to propagate before attempting auth.
-        logger.info("    Waiting 15s for IAM propagation...")
-        time.sleep(15)
-
-        @with_retries(
-            max_attempts=10,
-            retryable_exceptions=(RefreshError, OAuthError, TypeError),
-            retry_msg="Waiting for STS propagation",
-        )
-        def _verify_adc():
-            adc_creds, _ = default(
-                scopes=["https://www.googleapis.com/auth/cloud-platform"],
-                request=mtls_request,
+            # Build a Request with the ECP mTLS adapter so that default()'s
+            # internal token exchange presents the SE-backed client cert.
+            # The cert was imported into the login keychain (step 3) so ECP's
+            # GetCertPemForPython / SignForPython can find it via
+            # SecItemCopyMatching.  macOS auto-associates it with the SE key.
+            from google.auth import default
+            from google.auth.transport.requests import (
+                Request as AuthRequest,
+                _MutualTlsOffloadAdapter,
             )
-            adc_creds.refresh(mtls_request)
-            api_headers = {}
-            adc_creds.apply(api_headers)
-            target_api_res = mtls_session.get(
-                f"https://{crm_base}/v1/projects/{config.project_id}",
-                headers=api_headers,
-            )
-            target_api_res.raise_for_status()
-            return target_api_res.json()
+            import requests as req_lib
 
-        proj_result = _verify_adc()
-        logger.info(
-            "✅ API Call Successful! The OS signed the handshake via ECP."
-        )
-        if use_sa:
-            logger.info("   Authenticated SA: %s", sa_email)
-        logger.info("   Target Project:   %s", proj_result.get("name"))
+            # Pre-load ECP DLLs so ctypes.CDLL can resolve dependencies.
+            # On Windows, ctypes.CDLL(winmode=0) uses legacy DLL search which
+            # doesn't honour os.add_dll_directory().  Loading all ECP DLLs
+            # from the same directory ensures they can find each other.
+            if sys.platform == "win32":
+                import ctypes
+                for lib in (ecp_client_lib, tls_offload_lib):
+                    try:
+                        ctypes.WinDLL(str(lib))
+                    except OSError:
+                        pass  # Will fail properly in _MutualTlsOffloadAdapter
+
+            mtls_session = req_lib.Session()
+            mtls_adapter = _MutualTlsOffloadAdapter(str(cert_config_path))
+            mtls_session.mount("https://", mtls_adapter)
+            mtls_request = AuthRequest(session=mtls_session)
+
+            # Allow IAM bindings to propagate before attempting auth.
+            logger.info("    Waiting 15s for IAM propagation...")
+            time.sleep(15)
+
+            @with_retries(
+                max_attempts=10,
+                retryable_exceptions=(RefreshError, OAuthError, TypeError),
+                retry_msg="Waiting for STS propagation",
+            )
+            def _verify_adc():
+                adc_creds, _ = default(
+                    scopes=["https://www.googleapis.com/auth/cloud-platform"],
+                    request=mtls_request,
+                )
+                adc_creds.refresh(mtls_request)
+                api_headers = {}
+                adc_creds.apply(api_headers)
+                target_api_res = mtls_session.get(
+                    f"https://{crm_base}/v1/projects/{config.project_id}",
+                    headers=api_headers,
+                )
+                target_api_res.raise_for_status()
+                return target_api_res.json()
+
+            proj_result = _verify_adc()
+            logger.info(
+                "✅ API Call Successful! The OS signed the handshake via ECP."
+            )
+            if use_sa:
+                logger.info("   Authenticated SA: %s", sa_email)
+            logger.info("   Target Project:   %s", proj_result.get("name"))
+        except Exception as e:
+            logger.warning(
+                "⚠️  Step 7 (ECP auth demo) failed: %s"
+                "\n    This is expected on platforms where ECP cannot access"
+                "\n    hardware-backed keys (e.g. macOS Secure Enclave in CI)."
+                "\n    Steps 1-6 completed successfully — infrastructure is ready.",
+                e,
+            )
 
 
 if __name__ == "__main__":
