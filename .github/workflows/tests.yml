@@ -82,6 +82,7 @@ jobs:
           sleep 1
 
           echo "TPM2TOOLS_TCTI=tabrmd:bus_type=session" >> "$GITHUB_ENV"
+          echo "TPM2_PKCS11_TCTI=tabrmd:bus_type=session" >> "$GITHUB_ENV"
 
       # TEMPORARY: Build patched ECP on macOS for Secure Enclave support.
       # Remove once upstream ECP supports SecCertificateCopyData.
