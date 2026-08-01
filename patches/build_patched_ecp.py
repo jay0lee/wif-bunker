@@ -163,7 +163,11 @@ def main():
         import urllib.request
 
         release_url = f"https://api.github.com/repos/googleapis/enterprise-certificate-proxy/releases/tags/{ECP_TAG}"
-        with urllib.request.urlopen(release_url) as resp:
+        req = urllib.request.Request(release_url)
+        gh_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+        if gh_token:
+            req.add_header("Authorization", f"token {gh_token}")
+        with urllib.request.urlopen(req) as resp:
             release = json.loads(resp.read())
 
         arch_str = "arm64" if platform.machine() == "arm64" else "amd64"
@@ -176,7 +180,10 @@ def main():
 
         if offload_asset:
             print(f"  Downloading {offload_asset['name']}...")
-            with urllib.request.urlopen(offload_asset["browser_download_url"]) as dl:
+            dl_req = urllib.request.Request(offload_asset["browser_download_url"])
+            if gh_token:
+                dl_req.add_header("Authorization", f"token {gh_token}")
+            with urllib.request.urlopen(dl_req) as dl:
                 with tarfile.open(fileobj=io.BytesIO(dl.read()), mode="r:gz") as tf:
                     tf.extractall(output_dir)
             # Rename to expected name if needed
