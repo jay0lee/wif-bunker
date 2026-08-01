@@ -43,6 +43,29 @@ class _CleanFormatter(logging.Formatter):
             return record.getMessage()
         return f"{record.levelname}: {record.getMessage()}"
 
+
+def _supports_unicode() -> bool:
+    """Detect whether the output terminal can render Unicode symbols."""
+    if sys.platform == "win32":
+        # Windows cmd.exe / GHA runner often lacks UTF-8 support
+        # unless the code page is explicitly set to 65001.
+        try:
+            enc = sys.stdout.encoding or ""
+            if "utf" in enc.lower():
+                return True
+        except Exception:
+            pass
+        return os.environ.get("WT_SESSION") is not None  # Windows Terminal
+    return True  # macOS/Linux terminals support UTF-8
+
+
+# Symbols that degrade gracefully on non-Unicode terminals.
+_UNICODE = _supports_unicode()
+SYM_OK = "\u2705" if _UNICODE else "[OK]"       # ✅
+SYM_WARN = "\u26a0" if _UNICODE else "[!]"      # ⚠
+SYM_FAIL = "\u274c" if _UNICODE else "[X]"       # ❌
+SYM_ARROW = "\u2192" if _UNICODE else "->"       # →
+
 # --- Tuning Constants ---
 MAX_BACKOFF_SECONDS = 60
 LRO_TIMEOUT_SECONDS = 300
@@ -590,8 +613,8 @@ def _create_ca_and_sign(
         .sign(ca_key, hashes.SHA256())
     )
     logger.info(
-        "    Workload cert signed by CA: CN=%s → issued by CN=%s",
-        config.workload_cn, config.ca_cn,
+        "    Workload cert signed by CA: CN=%s %s issued by CN=%s",
+        config.workload_cn, SYM_ARROW, config.ca_cn,
     )
 
     ca_cert_pem = ca_cert.public_bytes(serialization.Encoding.PEM).decode().strip()
@@ -624,6 +647,7 @@ def _create_ca_and_sign(
 
 
 # --- Platform-Specific Hardware Keystore Generators ---
+
 def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
     """Generates a TPM 2.0-backed certificate via certreq + Microsoft Platform Crypto Provider.
 
@@ -654,7 +678,7 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
         if config.soft_key:
             provider = "Microsoft Software Key Storage Provider"
             logger.warning(
-                "    ⚠  --soft-key: using software keys (NOT TPM-backed). "
+                f"    {SYM_WARN}  --soft-key: using software keys (NOT TPM-backed). "
                 "For production use, remove --soft-key to use the TPM."
             )
         else:
@@ -711,10 +735,6 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
             f"-CertStoreLocation 'Cert:\\CurrentUser\\Root'; "
             f"Write-Output $cert.Thumbprint"
         )
-        logger.info(
-            "    ⚠  A Windows security dialog will appear — click YES"
-            " to temporarily trust the ephemeral CA."
-        )
         ca_result = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_install_ca],
             capture_output=True, text=True, check=True,
@@ -750,11 +770,6 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
         )
 
         # 6. Remove the ephemeral CA from trusted root store (cleanup).
-        #    This also triggers a Windows dialog — user must click Yes.
-        logger.info(
-            "    ⚠  Another dialog will appear — click YES to remove"
-            " the ephemeral CA from the trusted root store."
-        )
         ps_remove_ca = (
             f"Get-ChildItem Cert:\\CurrentUser\\Root | "
             f"Where-Object {{ $_.Thumbprint -eq '{ca_thumbprint}' }} | "
@@ -1941,7 +1956,7 @@ def main() -> None:
 
             proj_result = _verify_adc()
             logger.info(
-                "✅ API Call Successful! The OS signed the handshake via ECP."
+                f"{SYM_OK} API Call Successful! The OS signed the handshake via ECP."
             )
             if use_sa:
                 logger.info("   Authenticated SA: %s", sa_email)
