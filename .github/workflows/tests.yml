@@ -98,6 +98,12 @@ jobs:
           fi
           pip install .
 
+      # TEMPORARY: Patch google-auth to support hardware-backed keys.
+      # Remove once upstream PRs land in google-auth and ECP.
+      - name: "Patch google-auth (temporary)"
+        shell: bash
+        run: python patches/patch_google_auth.py
+
       # ── Generate unique project ID for this job ──
       - name: Set project ID
         id: config
@@ -156,7 +162,7 @@ jobs:
           echo "=== Running WIF Bunker (fresh creation) ==="
           python wif_bunker.py \
             --use-adc \
-            --project="${{ steps.config.outputs.project_id }}" \
+            --create-project="${{ steps.config.outputs.project_id }}" \
             --folder="${{ secrets.SANDBOX_FOLDER_ID }}" \
             ${{ matrix.soft_key_flag }}
 
@@ -167,7 +173,7 @@ jobs:
           echo "=== Running WIF Bunker (reuse flow) ==="
           python wif_bunker.py \
             --use-adc \
-            --project="${{ steps.config.outputs.project_id }}" \
+            --use-project="${{ steps.config.outputs.project_id }}" \
             ${{ matrix.soft_key_flag }}
 
       # ── Step 4: Cleanup own project ──
