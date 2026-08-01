@@ -116,8 +116,12 @@ def main():
                 f.write(content)
             print("  OK: Patched certRefToX509")
 
-        # Remove unused 'pem' import (no longer needed after patch)
-        # The import is used elsewhere so we leave it.
+        # Remove unused 'pem' import (no longer needed after patch).
+        if '\t"encoding/pem"\n' in content:
+            content = content.replace('\t"encoding/pem"\n', '', 1)
+            with open(keychain_path, "w") as f:
+                f.write(content)
+            print("  OK: Removed unused 'encoding/pem' import")
 
         # Build the C-shared signer library (ecp_client)
         print("\n3. Building ECP C-shared library (ecp_client)...")
