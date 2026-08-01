@@ -153,9 +153,10 @@ def main():
         )
         print(f"  Built: {signer_bin_output}")
 
-        # Download the TLS offload library from the GitHub release.
-        # The offload library is a separate binary (provides ConfigureSslContext)
-        # that does NOT need patching — only the signer library does.
+        # Download libtls_offload from the GitHub release.
+        # This binary doesn't need patching — it receives cert PEM and sign
+        # callback from our patched libecp.dylib; it doesn't access the
+        # keychain itself.
         print("\n5. Downloading TLS offload library from GitHub release...")
         import io
         import json
@@ -171,7 +172,6 @@ def main():
             release = json.loads(resp.read())
 
         arch_str = "arm64" if platform.machine() == "arm64" else "amd64"
-        offload_output = os.path.join(output_dir, "libtls_offload.dylib")
         offload_asset = None
         for asset in release["assets"]:
             if "tls_offload" in asset["name"] and "darwin" in asset["name"] and arch_str in asset["name"]:
@@ -186,16 +186,18 @@ def main():
             with urllib.request.urlopen(dl_req) as dl:
                 with tarfile.open(fileobj=io.BytesIO(dl.read()), mode="r:gz") as tf:
                     tf.extractall(output_dir)
-            # Rename to expected name if needed
+            # Find and rename to expected name
+            offload_output = os.path.join(output_dir, "libtls_offload.dylib")
             for f in os.listdir(output_dir):
-                if "tls_offload" in f and f.endswith(".dylib"):
-                    src = os.path.join(output_dir, f)
-                    if src != offload_output:
-                        shutil.move(src, offload_output)
+                if "tls_offload" in f and f.endswith(".dylib") and f != "libtls_offload.dylib":
+                    shutil.move(os.path.join(output_dir, f), offload_output)
             print(f"  Downloaded: {offload_output}")
         else:
-            print("  WARNING: Could not find TLS offload asset in release.")
-            print(f"  Available: {[a['name'] for a in release['assets']]}")
+            available = [a["name"] for a in release["assets"]]
+            raise FileNotFoundError(
+                f"Could not find TLS offload asset for darwin/{arch_str} in release {ECP_TAG}.\n"
+                f"Available assets: {available}"
+            )
 
     print(f"\n✅ Patched ECP binaries installed to: {output_dir}")
     print("Files:")
