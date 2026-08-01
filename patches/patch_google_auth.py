@@ -31,8 +31,9 @@ def patch_file_regex(filepath, pattern, replacement, description):
     with open(filepath, "r") as f:
         content = f.read()
 
-    # Check if already patched (replacement text present)
-    if "# PATCHED:" in content and description in content:
+    # Check if already patched
+    marker = f"PATCHED: {description}"
+    if marker in content:
         print(f"  SKIP (already patched): {description}")
         return
 
@@ -60,13 +61,25 @@ def main():
     )
     patch_file_regex(
         mtls_helper,
-        # Match the key_path check block regardless of exact error message formatting.
-        # Captures: the if block that checks for key_path and raises ClientCertError,
-        # followed by the assignment.
-        r'(\s+)if "key_path" not in workload:.*?'
-        r'key_path = workload\["key_path"\]',
-        # Replace with a simple .get() that returns None for hardware-backed keys.
-        r'\1# PATCHED: allow missing key_path for hardware-backed keys\n'
+        # Match the combined cert_path/key_path check and both assignments.
+        # Actual code:
+        #   if "cert_path" not in workload or "key_path" not in workload:
+        #       raise exceptions.ClientCertError(...)
+        #   cert_path = workload["cert_path"]
+        #   key_path = workload["key_path"]
+        r'([ \t]+)if "cert_path" not in workload or "key_path" not in workload:.*?'
+        r'cert_path = workload\["cert_path"\]\s*\n'
+        r'\s+key_path = workload\["key_path"\]',
+        # Replace: require cert_path but allow key_path to be missing.
+        r'\1if "cert_path" not in workload:\n'
+        r'\1    raise exceptions.ClientCertError(\n'
+        r"\1        'Workload certificate configuration is missing"
+        r''' \"cert_path\" in {}'.format(\n'''
+        r'\1            absolute_path\n'
+        r'\1        )\n'
+        r'\1    )\n'
+        r'\1# PATCHED: Allow missing key_path\n'
+        r'\1cert_path = workload["cert_path"]\n'
         r'\1key_path = workload.get("key_path")  # None for hardware-backed keys',
         "Allow missing key_path",
     )
@@ -81,12 +94,12 @@ def main():
     patch_file_regex(
         external_account,
         # Match the mTLS cert injection block.
-        r'(\s+)if self\._mtls_required\(\):\s*\n'
+        r'([ \t]+)if self\._mtls_required\(\):\s*\n'
         r'\s+request = functools\.partial\(\s*\n'
         r'\s+request, cert=self\._get_mtls_cert_and_key_paths\(\)\s*\n'
         r'\s+\)',
         # Replace: only inject cert= if key_path is not None.
-        r'\1# PATCHED: skip cert= injection when key_path is None (Allow missing key_path)\n'
+        r'\1# PATCHED: Skip cert= injection when key_path is None\n'
         r'\1if self._mtls_required():\n'
         r'\1    _cert_path, _key_path = self._get_mtls_cert_and_key_paths()\n'
         r'\1    if _key_path is not None:\n'
@@ -105,10 +118,10 @@ def main():
     patch_file_regex(
         custom_tls_signer,
         # Match: if cert_len == 0: raise MutualTLSChannelError(...)
-        r'(\s+)if cert_len == 0:\s*\n'
+        r'([ \t]+)if cert_len == 0:\s*\n'
         r'\s+raise exceptions\.MutualTLSChannelError\("failed to get certificate"\)',
         # Replace: try reading from cert_path in config, then raise if that also fails.
-        r'\1# PATCHED: fallback cert reading (Allow missing key_path)\n'
+        r'\1# PATCHED: Fallback cert reading in _custom_tls_signer.get_cert\n'
         r'\1if cert_len == 0:\n'
         r'\1    # Fallback: read cert from the cert_path in the config file.\n'
         r'\1    try:\n'
