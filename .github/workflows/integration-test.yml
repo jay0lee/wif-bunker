@@ -184,26 +184,18 @@ jobs:
 
           echo "Stale cleanup complete."
 
-      # ── Windows: launch dialog auto-accept background process ──
-      # wif_bunker.py triggers Windows "Security Warning" dialogs when
-      # importing/removing the ephemeral CA from the Root store.
-      # This background process polls for those dialogs and clicks Yes.
-      - name: "Windows: Start dialog auto-accept"
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          Write-Host "Launching dialog auto-accept in background..."
-          Start-Process powershell `
-            -ArgumentList "-NoProfile", "-File", ".github\scripts\win_dialog_accept.ps1" `
-            -NoNewWindow
-          Start-Sleep -Seconds 2
-          Write-Host "Dialog auto-accept is running."
-
       # ── Step 2: WIF Bunker fresh run (creates project, SA, pool, provider) ──
       - name: "WIF Bunker: Fresh setup"
         shell: bash
         run: |
           echo "=== Running WIF Bunker (fresh creation) ==="
+          # On Windows, launch dialog auto-accept in background (clicks
+          # Security Warning dialogs for CA root store operations).
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            powershell -NoProfile -File .github/scripts/win_dialog_accept.ps1 &
+            DIALOG_PID=$!
+            echo "Dialog auto-accept PID: $DIALOG_PID"
+          fi
           python wif_bunker.py \
             --use-adc \
             --create-project="${{ steps.config.outputs.project_id }}" \
@@ -215,6 +207,9 @@ jobs:
         shell: bash
         run: |
           echo "=== Running WIF Bunker (reuse flow) ==="
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            powershell -NoProfile -File .github/scripts/win_dialog_accept.ps1 &
+          fi
           python wif_bunker.py \
             --use-adc \
             --use-project="${{ steps.config.outputs.project_id }}" \

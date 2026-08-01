@@ -1,14 +1,14 @@
 # win_dialog_accept.ps1 — Background process for CI that auto-clicks
 # Windows "Security Warning" dialogs and captures screenshots.
 #
-# Usage (launch as background job before running wif_bunker.py):
-#   Start-Process powershell -ArgumentList "-NoProfile -File .github\scripts\win_dialog_accept.ps1" -NoNewWindow
+# Usage (launch as background job in the same step as wif_bunker.py):
+#   Start-Job -FilePath .github\scripts\win_dialog_accept.ps1
 #
 # Based on the SendKeys pattern from GAM's ssd.mjs:
 #   https://github.com/GAM-team/GAM/blob/main/src/tools/ssd.mjs
 
 param(
-    [int]$TimeoutSeconds = 120,
+    [int]$TimeoutSeconds = 180,
     [string]$ScreenshotDir = $env:GITHUB_WORKSPACE
 )
 
@@ -16,6 +16,14 @@ if (-not $ScreenshotDir) { $ScreenshotDir = $PWD }
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+
+# Possible dialog window titles for cert root store operations
+$dialogTitles = @(
+    'Security Warning',
+    'Root Certificate Store',
+    'Certificate',
+    'Windows Security'
+)
 
 function Take-Screenshot($label) {
     try {
@@ -26,45 +34,63 @@ function Take-Screenshot($label) {
         $g.CopyFromScreen($screen.Left, $screen.Top, 0, 0, $bmp.Size)
         $path = Join-Path $ScreenshotDir "$label.png"
         $bmp.Save($path)
-        Write-Host "  Screenshot: $path"
+        Write-Output "  Screenshot: $path"
         $g.Dispose()
         $bmp.Dispose()
     } catch {
-        Write-Host "  Screenshot failed: $_"
+        Write-Output "  Screenshot failed: $_"
     }
 }
 
-Write-Host "Dialog auto-accept started (timeout: ${TimeoutSeconds}s)"
-Write-Host "Screenshots will be saved to: $ScreenshotDir"
+Write-Output "Dialog auto-accept started (timeout: ${TimeoutSeconds}s)"
+Write-Output "Screenshots dir: $ScreenshotDir"
+Write-Output "Watching for titles: $($dialogTitles -join ', ')"
 
 $wshell = New-Object -ComObject wscript.shell
 $elapsed = 0
 $clickCount = 0
 
+# Take an initial screenshot to verify the desktop is visible
+Take-Screenshot "dialog_00_start"
+
 while ($elapsed -lt $TimeoutSeconds) {
-    $found = $wshell.AppActivate('Security Warning')
-    if ($found) {
-        $clickCount++
-        Write-Host "Dialog #$clickCount found at ${elapsed}s"
-        Take-Screenshot "dialog_${clickCount}_found"
+    foreach ($title in $dialogTitles) {
+        $found = $false
+        try {
+            $found = $wshell.AppActivate($title)
+        } catch {
+            # AppActivate can throw if no matching window
+        }
 
-        # Small delay to ensure the window is fully focused
-        Start-Sleep -Milliseconds 500
+        if ($found) {
+            $clickCount++
+            Write-Output "Dialog #$clickCount found: '$title' at ${elapsed}s"
+            Take-Screenshot "dialog_${clickCount}_found"
 
-        # Tab to the Yes button and press Enter
-        $wshell.SendKeys('{TAB}{ENTER}')
-        Write-Host "  Sent Tab+Enter"
+            # Small delay to ensure the window is fully focused
+            Start-Sleep -Milliseconds 500
 
-        Start-Sleep -Milliseconds 500
-        Take-Screenshot "dialog_${clickCount}_after_click"
+            # The Security Warning dialog has Yes/No buttons.
+            # Yes is NOT the default — Tab to it, then Enter.
+            $wshell.SendKeys('{TAB}{ENTER}')
+            Write-Output "  Sent Tab+Enter"
 
-        # Don't exit — there may be a second dialog (CA removal).
-        # Just keep polling.
+            Start-Sleep -Milliseconds 1000
+            Take-Screenshot "dialog_${clickCount}_after"
+
+            # Don't exit — there may be a second dialog (CA removal).
+            break
+        }
     }
 
     Start-Sleep -Seconds 1
     $elapsed++
+
+    # Periodic screenshots every 30s for debugging
+    if ($elapsed % 30 -eq 0) {
+        Take-Screenshot "dialog_poll_${elapsed}s"
+    }
 }
 
 Take-Screenshot "dialog_final"
-Write-Host "Dialog auto-accept finished ($clickCount dialog(s) clicked in ${elapsed}s)"
+Write-Output "Dialog auto-accept finished ($clickCount dialog(s) clicked in ${elapsed}s)"
