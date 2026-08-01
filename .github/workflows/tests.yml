@@ -32,6 +32,9 @@ jobs:
           - os: windows-2025
             name: Windows x64
             soft_key_flag: "--soft-key"
+          - os: windows-11-arm
+            name: Windows ARM64
+            soft_key_flag: "--soft-key"
 
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.name }}
@@ -79,6 +82,15 @@ jobs:
           sleep 1
 
           echo "TPM2TOOLS_TCTI=tabrmd:bus_type=session" >> "$GITHUB_ENV"
+
+      # TEMPORARY: Build patched ECP on macOS for Secure Enclave support.
+      # Remove once upstream ECP supports SecCertificateCopyData.
+      - name: "macOS: Build patched ECP"
+        if: runner.os == 'macOS'
+        run: |
+          # Go is pre-installed on macOS runners
+          go version
+          python3 patches/build_patched_ecp.py
 
       # ── Setup: Python ──
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
