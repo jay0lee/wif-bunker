@@ -166,6 +166,33 @@ def main():
             content = content.replace(old_cred_err, new_cred_err, 1)
             print("  OK: Added Cred() error logging")
 
+        # ── Patch 4: Don't restrict search to traditional keychains ──
+        # SecKeychainCopySearchList only returns traditional keychains
+        # (login.keychain-db, System.keychain).  CryptoTokenKit tokens
+        # (where Secure Enclave keys live) are NOT included.  By adding
+        # kSecMatchSearchList, ECP excludes SE identities from the search.
+        # Fix: only add kSecMatchSearchList when filtering to a specific
+        # keychain type (login or system).  For "all"/empty, let the
+        # system search everything including CTK.
+        print("\n   Patching findMatchingIdentities to not restrict CTK search...")
+
+        old_restrict = '''\t// Restrict keychain search space
+\tC.CFDictionaryAddValue(leafSearch, unsafe.Pointer(C.kSecMatchSearchList), unsafe.Pointer(keychainList))'''
+
+        new_restrict = '''\t// Restrict keychain search space — but only when filtering to
+\t// a specific keychain type.  When keychainType is "all" or "",
+\t// skip this to allow SecItemCopyMatching to search CryptoTokenKit
+\t// tokens (where Secure Enclave keys live).
+\tif keychainType == "login" || keychainType == "system" {
+\t\tC.CFDictionaryAddValue(leafSearch, unsafe.Pointer(C.kSecMatchSearchList), unsafe.Pointer(keychainList))
+\t}'''
+
+        if old_restrict in content:
+            content = content.replace(old_restrict, new_restrict, 1)
+            print("  OK: kSecMatchSearchList now only added for login/system filtering")
+        else:
+            print("  WARNING: Could not find kSecMatchSearchList restriction to patch")
+
         # Write the fully patched file
         with open(keychain_path, "w") as f:
             f.write(content)
