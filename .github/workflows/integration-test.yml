@@ -39,6 +39,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.name }}
 
+    env:
+      ENABLE_ENTERPRISE_CERTIFICATE_LOGS: "1"
+
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 

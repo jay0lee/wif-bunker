@@ -1913,6 +1913,57 @@ def main() -> None:
                 str(cert_config_path).encode(), None, 0,
             )
             logger.info("    ECP GetCertPemForPython returned cert_len=%d", _cert_len)
+            if _cert_len == 0 and sys.platform == "darwin":
+                # Diagnostic: dump config, verify binary, check keychain
+                logger.warning("    ECP cert_len=0 — running diagnostics...")
+                try:
+                    with open(cert_config_path) as _f:
+                        _cfg_text = _f.read()
+                    logger.warning("    certificate_config.json:\n%s", _cfg_text)
+                except Exception as _e:
+                    logger.warning("    Could not read config: %s", _e)
+
+                # Check if ECP signer binary contains our patch marker
+                try:
+                    _ecp_bin = Path(json.loads(_cfg_text)["libs"]["ecp"])
+                    if _ecp_bin.exists():
+                        _bin_data = _ecp_bin.read_bytes()
+                        _has_patch = b"SecCertificateCopyData" in _bin_data
+                        _has_old = b"SecItemExport" in _bin_data
+                        logger.warning("    ECP binary: %s (%d KB)", _ecp_bin, len(_bin_data) // 1024)
+                        logger.warning("    Contains SecCertificateCopyData (patched): %s", _has_patch)
+                        logger.warning("    Contains SecItemExport (unpatched): %s", _has_old)
+                    else:
+                        logger.warning("    ECP binary NOT FOUND: %s", _ecp_bin)
+                except Exception as _e:
+                    logger.warning("    Binary check error: %s", _e)
+
+                # Run signer binary directly to capture its stderr
+                try:
+                    _ecp_bin_path = str(Path(json.loads(_cfg_text)["libs"]["ecp"]))
+                    _result = subprocess.run(
+                        [_ecp_bin_path, str(cert_config_path)],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    logger.warning("    ECP signer stdout: %s", _result.stdout[:500] if _result.stdout else "(empty)")
+                    logger.warning("    ECP signer stderr: %s", _result.stderr[:500] if _result.stderr else "(empty)")
+                    logger.warning("    ECP signer returncode: %d", _result.returncode)
+                except subprocess.TimeoutExpired:
+                    logger.warning("    ECP signer started OK (timed out waiting = it's listening for RPC)")
+                except Exception as _e:
+                    logger.warning("    ECP signer direct run error: %s", _e)
+
+                # Check keychain identities
+                try:
+                    _id_result = subprocess.run(
+                        ["security", "find-identity", "-v", "-p", "ssl-client"],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    logger.warning("    Keychain SSL-client identities:\n%s", _id_result.stdout)
+                    if _id_result.stderr:
+                        logger.warning("    find-identity stderr: %s", _id_result.stderr)
+                except Exception as _e:
+                    logger.warning("    find-identity error: %s", _e)
             if _cert_len > 0:
                 _buf = ctypes.create_string_buffer(_cert_len)
                 _ecp_lib.GetCertPemForPython(
