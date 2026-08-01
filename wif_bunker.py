@@ -1884,6 +1884,32 @@ def main() -> None:
                     except OSError:
                         pass  # Will fail properly in _MutualTlsOffloadAdapter
 
+            # Enable ECP debug logging so we can see what it's doing.
+            os.environ["ENABLE_ENTERPRISE_CERTIFICATE_LOGS"] = "1"
+
+            # Diagnostic: verify ECP libs can load and work.
+            import ctypes
+            _ecp_lib = ctypes.CDLL(str(ecp_client_lib))
+            _ecp_lib.GetCertPemForPython.argtypes = [
+                ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int,
+            ]
+            _ecp_lib.GetCertPemForPython.restype = ctypes.c_int
+            _cert_len = _ecp_lib.GetCertPemForPython(
+                str(cert_config_path).encode(), None, 0,
+            )
+            logger.info("    ECP GetCertPemForPython returned cert_len=%d", _cert_len)
+            if _cert_len > 0:
+                _buf = ctypes.create_string_buffer(_cert_len)
+                _ecp_lib.GetCertPemForPython(
+                    str(cert_config_path).encode(), _buf, _cert_len,
+                )
+                logger.info("    ECP cert PEM (first 80 chars): %s", bytes(_buf)[:80])
+
+            _offload = ctypes.CDLL(str(tls_offload_lib))
+            logger.info("    TLS offload lib loaded: %s", tls_offload_lib)
+            logger.info("    ConfigureSslContext symbol: %s",
+                        hasattr(_offload, "ConfigureSslContext"))
+
             mtls_session = req_lib.Session()
             mtls_adapter = _MutualTlsOffloadAdapter(str(cert_config_path))
             mtls_session.mount("https://", mtls_adapter)
