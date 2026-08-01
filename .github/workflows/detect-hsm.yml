@@ -80,7 +80,7 @@ jobs:
             sudo apt-get update -qq
             sudo apt-get install -y -qq \
               swtpm swtpm-tools \
-              tpm2-tools tpm2-abrmd \
+              tpm2-tools tpm2-abrmd dbus \
               libtpm2-pkcs11-1 libtpm2-pkcs11-tools \
               gnutls-bin
 
@@ -96,24 +96,32 @@ jobs:
               --server type=tcp,port=2321 \
               --flags not-need-init,startup-clear &
             SWTPM_PID=$!
-            echo "swtpm PID: $SWTPM_PID"
-
-            # Give swtpm a moment to start
             sleep 2
 
-            # Configure tpm2-tools to use swtpm via TCTI
-            export TPM2TOOLS_TCTI="swtpm:host=127.0.0.1,port=2321"
+            # Start the TPM2 Resource Manager (tpm2-abrmd).
+            # Without it, swtpm only has ~3 transient object slots
+            # which causes TPM_RC_OBJECT_MEMORY during key creation.
+            eval $(dbus-launch --sh-syntax)
+            tpm2-abrmd \
+              --tcti="swtpm:host=127.0.0.1,port=2321" \
+              --session \
+              --allow-root &
+            ABRMD_PID=$!
+            sleep 1
+
+            # Route all tpm2-tools through the resource manager
+            export TPM2TOOLS_TCTI="tabrmd:bus_type=session"
             echo "TPM2TOOLS_TCTI=$TPM2TOOLS_TCTI"
 
             # Persist for subsequent steps
             echo "TPM2TOOLS_TCTI=$TPM2TOOLS_TCTI" >> "$GITHUB_ENV"
-            echo "SWTPM_PID=$SWTPM_PID" >> "$GITHUB_ENV"
+            echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
 
-            # Verify swtpm is responding
+            # Verify swtpm + abrmd are responding
             echo ""
-            echo "=== swtpm Verification ==="
+            echo "=== swtpm + abrmd Verification ==="
             tpm2_getcap properties-fixed 2>&1 | head -10 && \
-              echo "✅ swtpm responding" || \
+              echo "✅ swtpm + resource manager responding" || \
               echo "❌ swtpm not responding"
           fi
 
@@ -270,8 +278,7 @@ jobs:
         continue-on-error: true
         shell: powershell
         run: |
-          Write-Output "=== TPM Key Generation Test ==="
-          # Try to create a TPM-backed key via certreq
+          Write-Output "=== TPM Key Generation Test (Platform Crypto Provider) ==="
           $inf = @"
           [Version]
           Signature="`$Windows NT`$"
@@ -292,17 +299,57 @@ jobs:
             $result = certreq -new -f $infPath $csrPath 2>&1
             if (Test-Path $csrPath) {
               Write-Output "✅ TPM key generation succeeded"
-              # Clean up
               Get-ChildItem Cert:\CurrentUser\My |
                 Where-Object { $_.Subject -eq 'CN=ci-tpm-test' } |
                 Remove-Item -Force 2>$null
               Remove-Item $csrPath -Force 2>$null
             } else {
-              Write-Output "❌ TPM key generation failed"
+              Write-Output "❌ TPM key generation failed (expected without vTPM)"
               Write-Output $result
             }
           } catch {
             Write-Output "❌ certreq failed: $_"
+          }
+          Remove-Item $infPath -Force 2>$null
+
+      - name: "Windows: Soft Key Generation Test (--soft-key mode)"
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          Write-Output "=== Soft Key Test (Software Key Storage Provider) ==="
+          $inf = @"
+          [Version]
+          Signature="`$Windows NT`$"
+          [NewRequest]
+          Subject = "CN=ci-softkey-test"
+          KeyAlgorithm = ECDSA_P256
+          HashAlgorithm = SHA256
+          ProviderName = "Microsoft Software Key Storage Provider"
+          Exportable = FALSE
+          MachineKeySet = FALSE
+          RequestType = PKCS10
+          KeyUsage = 0x80
+          "@
+          $infPath = "$env:TEMP\ci-softkey-test.inf"
+          $csrPath = "$env:TEMP\ci-softkey-test.csr"
+          Set-Content -Path $infPath -Value $inf
+          $result = certreq -new -f $infPath $csrPath 2>&1
+          if (Test-Path $csrPath) {
+            Write-Output "✅ Software key generation succeeded (--soft-key mode works)"
+            # Verify the cert is in the store
+            $cert = Get-ChildItem Cert:\CurrentUser\My |
+              Where-Object { $_.Subject -eq 'CN=ci-softkey-test' }
+            if ($cert) {
+              Write-Output "  Subject:    $($cert.Subject)"
+              Write-Output "  Thumbprint: $($cert.Thumbprint)"
+              Write-Output "  Provider:   Software Key Storage Provider"
+              $cert | Remove-Item -Force 2>$null
+            }
+            Remove-Item $csrPath -Force 2>$null
+          } else {
+            Write-Output "❌ Software key generation failed"
+            Write-Output $result
+            exit 1
           }
           Remove-Item $infPath -Force 2>$null
 
