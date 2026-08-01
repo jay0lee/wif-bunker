@@ -25,6 +25,7 @@ ECP_TAG = "v0.3.19"
 # The old certRefToX509 uses SecItemExport which fails for SE keys.
 OLD_CERT_REF_TO_X509 = '''\
 func certRefToX509(certRef C.SecCertificateRef) (*x509.Certificate, error) {
+\t// Export the PEM-encoded certificate to a CFDataRef.
 \tvar certPEMData C.CFDataRef
 \tif errno := C.SecItemExport(C.CFTypeRef(certRef), C.kSecFormatUnknown, C.kSecItemPemArmour, nil, &certPEMData); errno != 0 {
 \t\treturn nil, keychainError(errno)
@@ -32,6 +33,7 @@ func certRefToX509(certRef C.SecCertificateRef) (*x509.Certificate, error) {
 \tdefer C.CFRelease(C.CFTypeRef(certPEMData))
 \tcertPEM := cfDataToBytes(certPEMData)
 
+\t// This part based on crypto/tls.
 \tvar certDERBlock *pem.Block
 \tfor {
 \t\tcertDERBlock, certPEM = pem.Decode(certPEM)
@@ -39,10 +41,14 @@ func certRefToX509(certRef C.SecCertificateRef) (*x509.Certificate, error) {
 \t\t\treturn nil, fmt.Errorf("failed to parse certificate PEM data")
 \t\t}
 \t\tif certDERBlock.Type == "CERTIFICATE" {
+\t\t\t// found it
 \t\t\tbreak
 \t\t}
 \t}
 
+\t// Check the certificate is OK by the x509 library, and obtain the
+\t// public key algorithm (which I assume is the same as the private key
+\t// algorithm). This also filters out certs missing critical extensions.
 \txc, err := x509.ParseCertificate(certDERBlock.Bytes)'''
 
 # Replacement uses SecCertificateCopyData which works for all cert types.
