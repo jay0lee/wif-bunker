@@ -1,0 +1,240 @@
+name: Hardware Security Module Detection
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  detect-hsm:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux
+          - os: ubuntu-24.04
+            arch: x86_64
+            name: Linux x64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+            name: Linux ARM64
+
+          # macOS
+          - os: macos-13
+            arch: x86_64
+            name: macOS x64 (Intel)
+          - os: macos-15
+            arch: arm64
+            name: macOS ARM64 (Apple Silicon)
+
+          # Windows
+          - os: windows-latest
+            arch: x86_64
+            name: Windows x64
+          - os: windows-11-arm
+            arch: arm64
+            name: Windows ARM64
+
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.name }}
+
+    steps:
+      - name: System info
+        shell: bash
+        run: |
+          echo "=== Runner Info ==="
+          echo "OS:   ${{ matrix.os }}"
+          echo "Arch: $(uname -m)"
+          echo "Kernel: $(uname -a)"
+
+      # ── Linux TPM Detection ──
+      - name: "Linux: Detect TPM 2.0"
+        if: runner.os == 'Linux'
+        run: |
+          echo "=== TPM Device Nodes ==="
+          ls -la /dev/tpm* 2>/dev/null || echo "No /dev/tpm* devices found"
+
+          echo ""
+          echo "=== TPM sysfs Info ==="
+          if [ -d /sys/class/tpm/tpm0 ]; then
+            echo "TPM0 exists"
+            cat /sys/class/tpm/tpm0/tpm_version_major 2>/dev/null || true
+            cat /sys/class/tpm/tpm0/device/description 2>/dev/null || true
+          else
+            echo "No /sys/class/tpm/tpm0 directory"
+          fi
+
+          echo ""
+          echo "=== Kernel TPM Modules ==="
+          lsmod | grep -i tpm || echo "No TPM kernel modules loaded"
+
+          echo ""
+          echo "=== tpm2-tools Availability ==="
+          if command -v tpm2_getcap &>/dev/null; then
+            echo "tpm2_getcap found: $(which tpm2_getcap)"
+            tpm2_getcap properties-fixed 2>&1 | head -20 || true
+          else
+            echo "tpm2-tools not installed"
+            echo "Available via: sudo apt-get install tpm2-tools"
+          fi
+
+          echo ""
+          echo "=== PKCS#11 TPM Library ==="
+          dpkg -l libtpm2-pkcs11-1 2>/dev/null || echo "libtpm2-pkcs11 not installed"
+          ls /usr/lib/*/libtpm2_pkcs11.so* 2>/dev/null || echo "No libtpm2_pkcs11.so found"
+
+          echo ""
+          echo "=== Software TPM (swtpm) ==="
+          command -v swtpm && echo "swtpm available" || echo "swtpm not available"
+
+      # ── macOS Secure Enclave Detection ──
+      - name: "macOS: Detect Secure Enclave"
+        if: runner.os == 'macOS'
+        run: |
+          echo "=== macOS Version ==="
+          sw_vers
+
+          echo ""
+          echo "=== Secure Enclave Processor (SEP) ==="
+          if ioreg -l 2>/dev/null | grep -q "AppleSEP"; then
+            echo "✅ Secure Enclave detected (AppleSEP present in IORegistry)"
+          else
+            echo "❌ No Secure Enclave detected"
+          fi
+
+          echo ""
+          echo "=== Apple Silicon / T2 Chip ==="
+          system_profiler SPHardwareDataType 2>/dev/null | grep -E "Chip|Model|Processor" || true
+
+          echo ""
+          echo "=== CryptoTokenKit Identities ==="
+          if command -v sc_auth &>/dev/null; then
+            echo "sc_auth found: $(which sc_auth)"
+            sc_auth identities 2>&1 || echo "  (no identities)"
+            echo ""
+            echo "sc_auth version/help:"
+            sc_auth 2>&1 | head -5 || true
+          else
+            echo "sc_auth not found (requires macOS 15+)"
+          fi
+
+          echo ""
+          echo "=== Keychain Smart Card Support ==="
+          security list-smartcards 2>&1 || echo "  (no smart cards listed)"
+
+          echo ""
+          echo "=== Secure Enclave Key Generation Test ==="
+          # Attempt to generate a test key in the Secure Enclave
+          if command -v sc_auth &>/dev/null; then
+            sc_auth create-ctk-identity \
+              -l "ci-test-key" \
+              -N "ci-test-key" \
+              -k p-256-ne \
+              -t none 2>&1 && echo "✅ SE key generation succeeded" \
+                           || echo "❌ SE key generation failed"
+            # Clean up
+            sc_auth identities 2>&1 | grep "ci-test-key" | awk '{print $1}' | while read hash; do
+              sc_auth delete-ctk-identity -h "$hash" 2>/dev/null || true
+            done
+          fi
+
+      # ── Windows TPM Detection ──
+      - name: "Windows: Detect TPM 2.0"
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          Write-Output "=== TPM Status (Get-Tpm) ==="
+          try {
+            $tpm = Get-Tpm -ErrorAction Stop
+            $tpm | Format-List
+          } catch {
+            Write-Output "Get-Tpm failed: $_"
+          }
+
+          Write-Output ""
+          Write-Output "=== TPM WMI Class ==="
+          try {
+            $wmi = Get-CimInstance -Namespace "root\cimv2\Security\MicrosoftTpm" `
+                                   -ClassName Win32_Tpm -ErrorAction Stop
+            $wmi | Format-List IsActivated_InitialValue,
+                               IsEnabled_InitialValue,
+                               IsOwned_InitialValue,
+                               SpecVersion,
+                               ManufacturerVersion
+          } catch {
+            Write-Output "WMI TPM query failed: $_"
+          }
+
+          Write-Output ""
+          Write-Output "=== Microsoft Platform Crypto Provider ==="
+          try {
+            $providers = certutil -csplist 2>&1
+            $mpc = $providers | Select-String "Microsoft Platform Crypto Provider"
+            if ($mpc) {
+              Write-Output "✅ Microsoft Platform Crypto Provider available"
+              $mpc
+            } else {
+              Write-Output "❌ Microsoft Platform Crypto Provider not found"
+            }
+          } catch {
+            Write-Output "certutil query failed: $_"
+          }
+
+          Write-Output ""
+          Write-Output "=== certreq Availability ==="
+          if (Get-Command certreq -ErrorAction SilentlyContinue) {
+            Write-Output "✅ certreq.exe found: $((Get-Command certreq).Source)"
+          } else {
+            Write-Output "❌ certreq.exe not found"
+          }
+
+          Write-Output ""
+          Write-Output "=== TPM Key Generation Test ==="
+          # Try to create a TPM-backed key via certreq
+          $inf = @"
+          [Version]
+          Signature="`$Windows NT`$"
+          [NewRequest]
+          Subject = "CN=ci-tpm-test"
+          KeyAlgorithm = ECDSA_P256
+          HashAlgorithm = SHA256
+          ProviderName = "Microsoft Platform Crypto Provider"
+          Exportable = FALSE
+          MachineKeySet = FALSE
+          RequestType = PKCS10
+          KeyUsage = 0x80
+          "@
+          $infPath = "$env:TEMP\ci-tpm-test.inf"
+          $csrPath = "$env:TEMP\ci-tpm-test.csr"
+          Set-Content -Path $infPath -Value $inf
+          try {
+            $result = certreq -new -f $infPath $csrPath 2>&1
+            if (Test-Path $csrPath) {
+              Write-Output "✅ TPM key generation succeeded"
+              # Clean up
+              Get-ChildItem Cert:\CurrentUser\My |
+                Where-Object { $_.Subject -eq 'CN=ci-tpm-test' } |
+                Remove-Item -Force 2>$null
+              Remove-Item $csrPath -Force 2>$null
+            } else {
+              Write-Output "❌ TPM key generation failed"
+              Write-Output $result
+            }
+          } catch {
+            Write-Output "❌ certreq failed: $_"
+          }
+          Remove-Item $infPath -Force 2>$null
+
+      # ── Summary ──
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          echo ""
+          echo "========================================"
+          echo "  HSM Detection Complete"
+          echo "  Runner: ${{ matrix.name }}"
+          echo "  OS:     ${{ matrix.os }}"
+          echo "  Arch:   $(uname -m)"
+          echo "========================================"
