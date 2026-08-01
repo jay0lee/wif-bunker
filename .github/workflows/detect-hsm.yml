@@ -134,10 +134,11 @@ jobs:
             --sopin=citest123 --userpin=citest123 \
             --label=ci-test
 
-          # Generate an EC P-256 key
+          # Generate an EC P-256 key in the 'ci-test' token
           tpm2_ptool addkey \
             --algorithm=ecc256 \
-            --label=ci-test-key \
+            --label=ci-test \
+            --key-label=ci-test-key \
             --userpin=citest123
 
           echo "✅ TPM PKCS#11 key generation succeeded"
@@ -253,6 +254,11 @@ jobs:
           } else {
             Write-Output "❌ certreq.exe not found"
           }
+
+          # Force success — this is a diagnostic step. certutil -csplist
+          # sets $LASTEXITCODE=1 when Platform Crypto Provider reports
+          # "device not ready", which PowerShell propagates as a failure.
+          exit 0
 
       - name: "Windows: TPM Key Generation Test"
         if: runner.os == 'Windows' && steps.detect_tpm_win.outputs.hw_tpm == 'true'
