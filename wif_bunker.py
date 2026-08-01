@@ -973,7 +973,7 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
         subprocess.run(
             [
                 "tpm2_ptool", "addkey", f"--algorithm={config.key_algo_config['linux_tpm2']}",
-                f"--label={config.workload_cn}",
+                "--label=bunker-wif",
                 f"--userpin={config.linux_tpm_pin}",
             ],
             check=True, capture_output=True,
@@ -1011,7 +1011,7 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
         subprocess.run(
             [
                 "tpm2_ptool", "addcert",
-                f"--label={config.workload_cn}",
+                "--label=bunker-wif",
                 f"--userpin={config.linux_tpm_pin}",
                 "bunker-workload-public.pem",
             ],
@@ -1581,26 +1581,39 @@ def main() -> None:
 
         def create_sa_task() -> str:
             logger.info("[Thread] Creating Service Account...")
-            result = client.api_call(
-                "POST",
-                f"https://{iam_base}/v1/projects/{config.project_id}/serviceAccounts",
-                {
-                    "accountId": config.sa_name,
-                    "serviceAccount": {"displayName": "WIF Bunker SA"},
-                },
-            )
-            return result["email"]
+            try:
+                result = client.api_call(
+                    "POST",
+                    f"https://{iam_base}/v1/projects/{config.project_id}/serviceAccounts",
+                    {
+                        "accountId": config.sa_name,
+                        "serviceAccount": {"displayName": "WIF Bunker SA"},
+                    },
+                )
+                return result["email"]
+            except Exception as e:
+                if "409" in str(e) or "ALREADY_EXISTS" in str(e):
+                    email = f"{config.sa_name}@{config.project_id}.iam.gserviceaccount.com"
+                    logger.info("    SA already exists: %s", email)
+                    return email
+                raise
 
         def create_pool_task() -> None:
             logger.info("[Thread] Creating WIF Pool...")
-            pool_op = client.api_call(
-                "POST",
-                f"https://{iam_base}/v1/projects/{project_number}"
-                f"/locations/global/workloadIdentityPools"
-                f"?workloadIdentityPoolId={config.pool_id}",
-                {"displayName": "WIF Bunker Pool", "disabled": False},
-            )
-            client.wait_for_lro(iam_base, pool_op["name"])
+            try:
+                pool_op = client.api_call(
+                    "POST",
+                    f"https://{iam_base}/v1/projects/{project_number}"
+                    f"/locations/global/workloadIdentityPools"
+                    f"?workloadIdentityPoolId={config.pool_id}",
+                    {"displayName": "WIF Bunker Pool", "disabled": False},
+                )
+                client.wait_for_lro(iam_base, pool_op["name"])
+            except Exception as e:
+                if "409" in str(e) or "ALREADY_EXISTS" in str(e):
+                    logger.info("    Pool already exists: %s", config.pool_id)
+                else:
+                    raise
             client.wait_for_wif_resource(pool_res_url)
 
         def create_provider_task() -> None:
@@ -1744,7 +1757,7 @@ def main() -> None:
                 "pkcs11": {
                     "module": "/usr/lib/x86_64-linux-gnu/libtpm2_pkcs11.so.1",
                     "slot": "0",
-                    "label": config.workload_cn,
+                    "label": "bunker-wif",
                     "user_pin": config.linux_tpm_pin,
                 },
             }
