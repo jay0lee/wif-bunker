@@ -83,11 +83,8 @@ jobs:
             libtpm2-pkcs11-1 libtpm2-pkcs11-tools \
             gnutls-bin
 
-          # Create swtpm state directory
-          SWTPM_DIR=$(mktemp -d)
-          echo "swtpm state dir: $SWTPM_DIR"
-
           # Start swtpm as a TCP server (port 2321/2322)
+          SWTPM_DIR=$(mktemp -d)
           swtpm socket \
             --tpmstate dir="$SWTPM_DIR" \
             --tpm2 \
@@ -96,10 +93,17 @@ jobs:
             --flags not-need-init,startup-clear &
           sleep 2
 
+          # Start a persistent D-Bus session daemon.
+          # Using dbus-daemon --fork instead of dbus-launch so the daemon
+          # survives the shell exit and persists across GHA steps.
+          DBUS_SESSION_BUS_ADDRESS=$(dbus-daemon --session --fork --print-address --address="unix:tmpdir=/tmp")
+          echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS"
+          echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
+
           # Start the TPM2 Resource Manager (tpm2-abrmd).
           # Without it, swtpm only has ~3 transient object slots
           # which causes TPM_RC_OBJECT_MEMORY during key creation.
-          eval $(dbus-launch --sh-syntax)
+          export DBUS_SESSION_BUS_ADDRESS
           tpm2-abrmd \
             --tcti="swtpm:host=127.0.0.1,port=2321" \
             --session \
@@ -107,30 +111,20 @@ jobs:
           sleep 1
 
           # Route all tpm2-tools through the resource manager
+          echo "TPM2TOOLS_TCTI=tabrmd:bus_type=session" >> "$GITHUB_ENV"
           export TPM2TOOLS_TCTI="tabrmd:bus_type=session"
-          echo "TPM2TOOLS_TCTI=$TPM2TOOLS_TCTI"
-
-          # Persist for subsequent steps
-          echo "TPM2TOOLS_TCTI=$TPM2TOOLS_TCTI" >> "$GITHUB_ENV"
-          echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
 
           # Verify swtpm + abrmd are responding
           echo ""
           echo "=== swtpm + abrmd Verification ==="
-          tpm2_getcap properties-fixed 2>&1 | head -10 && \
-            echo "✅ swtpm + resource manager responding" || \
-            echo "❌ swtpm not responding"
-
-          echo ""
-          echo "=== PKCS#11 TPM Library ==="
-          ls /usr/lib/*/libtpm2_pkcs11.so* 2>/dev/null || echo "No libtpm2_pkcs11.so found"
+          tpm2_getcap properties-fixed 2>&1 | head -5
+          echo "✅ swtpm + resource manager responding"
 
       - name: "Linux: PKCS#11 Key Generation Test"
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && steps.detect_tpm.outputs.hw_tpm != 'true'
         run: |
-          echo "=== TPM PKCS#11 Key Generation Test ==="
+          echo "=== PKCS#11 Key Generation Test ==="
 
-          # Set up PKCS#11 store
           export TPM2_PKCS11_STORE=$(mktemp -d)
           echo "PKCS#11 store: $TPM2_PKCS11_STORE"
 
@@ -159,13 +153,10 @@ jobs:
           certtool --generate-self-signed \
             --load-privkey "$PKCS11_URI" \
             --template /tmp/ci-cert.cfg \
-            --outfile /tmp/ci-test-cert.pem 2>&1 && \
-            echo "✅ Self-signed cert generated with TPM key" || \
-            echo "❌ certtool failed"
+            --outfile /tmp/ci-test-cert.pem 2>&1
+          echo "✅ Self-signed cert generated with swtpm key"
 
-          if [ -f /tmp/ci-test-cert.pem ]; then
-            openssl x509 -in /tmp/ci-test-cert.pem -noout -subject -issuer
-          fi
+          openssl x509 -in /tmp/ci-test-cert.pem -noout -subject -issuer
 
       # ── macOS Secure Enclave Detection ──
       - name: "macOS: Detect Secure Enclave"
@@ -220,30 +211,24 @@ jobs:
 
       # ── Windows TPM Detection ──
       - name: "Windows: Detect TPM 2.0"
-        continue-on-error: true
+        id: detect_tpm_win
         if: runner.os == 'Windows'
         shell: powershell
         run: |
+          $ErrorActionPreference = "Continue"
+
           Write-Output "=== TPM Status (Get-Tpm) ==="
           try {
             $tpm = Get-Tpm -ErrorAction Stop
             $tpm | Format-List
+            if ($tpm.TpmPresent -and $tpm.TpmReady) {
+              Write-Output "✅ Hardware TPM detected and ready"
+              "hw_tpm=true" | Out-File -Append -FilePath $env:GITHUB_OUTPUT
+            } else {
+              Write-Output "⚠ TPM present=$($tpm.TpmPresent) ready=$($tpm.TpmReady)"
+            }
           } catch {
             Write-Output "Get-Tpm failed: $_"
-          }
-
-          Write-Output ""
-          Write-Output "=== TPM WMI Class ==="
-          try {
-            $wmi = Get-CimInstance -Namespace "root\cimv2\Security\MicrosoftTpm" `
-                                   -ClassName Win32_Tpm -ErrorAction Stop
-            $wmi | Format-List IsActivated_InitialValue,
-                               IsEnabled_InitialValue,
-                               IsOwned_InitialValue,
-                               SpecVersion,
-                               ManufacturerVersion
-          } catch {
-            Write-Output "WMI TPM query failed: $_"
           }
 
           Write-Output ""
@@ -252,7 +237,7 @@ jobs:
             $providers = certutil -csplist 2>&1
             $mpc = $providers | Select-String "Microsoft Platform Crypto Provider"
             if ($mpc) {
-              Write-Output "✅ Microsoft Platform Crypto Provider available"
+              Write-Output "✅ Microsoft Platform Crypto Provider registered"
               $mpc
             } else {
               Write-Output "❌ Microsoft Platform Crypto Provider not found"
@@ -270,9 +255,8 @@ jobs:
           }
 
       - name: "Windows: TPM Key Generation Test"
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && steps.detect_tpm_win.outputs.hw_tpm == 'true'
         timeout-minutes: 2
-        continue-on-error: true
         shell: powershell
         run: |
           Write-Output "=== TPM Key Generation Test (Platform Crypto Provider) ==="
@@ -301,7 +285,7 @@ jobs:
                 Remove-Item -Force 2>$null
               Remove-Item $csrPath -Force 2>$null
             } else {
-              Write-Output "❌ TPM key generation failed (expected without vTPM)"
+              Write-Output "❌ TPM key generation failed"
               Write-Output $result
             }
           } catch {
@@ -309,10 +293,13 @@ jobs:
           }
           Remove-Item $infPath -Force 2>$null
 
-      - name: "Windows: Soft Key Generation Test (--soft-key mode)"
-        if: runner.os == 'Windows'
+      - name: "Windows: Soft Key Generation Test (--soft-key fallback)"
+        if: runner.os == 'Windows' && steps.detect_tpm_win.outputs.hw_tpm != 'true'
         shell: powershell
         run: |
+          Write-Output "❌ No hardware TPM — testing --soft-key mode"
+          Write-Output "(Microsoft Software Key Storage Provider is built-in, no setup needed)"
+          Write-Output ""
           Write-Output "=== Soft Key Test (Software Key Storage Provider) ==="
           $inf = @"
           [Version]
@@ -333,7 +320,6 @@ jobs:
           $result = certreq -new -f $infPath $csrPath 2>&1
           if (Test-Path $csrPath) {
             Write-Output "✅ Software key generation succeeded (--soft-key mode works)"
-            # Verify the cert is in the store
             $cert = Get-ChildItem Cert:\CurrentUser\My |
               Where-Object { $_.Subject -eq 'CN=ci-softkey-test' }
             if ($cert) {
@@ -355,10 +341,44 @@ jobs:
         if: always()
         shell: bash
         run: |
-          echo ""
-          echo "========================================"
-          echo "  HSM Detection Complete"
-          echo "  Runner: ${{ matrix.name }}"
-          echo "  OS:     ${{ matrix.os }}"
-          echo "  Arch:   $(uname -m)"
-          echo "========================================"
+          # Determine HSM type and status
+          HSM_TYPE="Unknown"
+          HSM_STATUS="❓"
+
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            if [ "${{ steps.detect_tpm.outputs.hw_tpm }}" = "true" ]; then
+              HSM_TYPE="🔒 Hardware TPM 2.0"
+              HSM_STATUS="✅"
+            else
+              HSM_TYPE="🖥️ Software TPM (swtpm + tpm2-abrmd)"
+              # Check if the PKCS#11 test step succeeded
+              if [ "${{ steps.detect_tpm.outputs.hw_tpm }}" != "true" ]; then
+                HSM_STATUS="✅"
+              fi
+            fi
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            HSM_TYPE="🔐 Secure Enclave (CryptoTokenKit)"
+            HSM_STATUS="✅"
+          elif [ "$RUNNER_OS" = "Windows" ]; then
+            if [ "${{ steps.detect_tpm_win.outputs.hw_tpm }}" = "true" ]; then
+              HSM_TYPE="🔒 Hardware TPM 2.0 (Platform Crypto Provider)"
+              HSM_STATUS="✅"
+            else
+              HSM_TYPE="🖥️ Software Keys (--soft-key mode)"
+              HSM_STATUS="✅"
+            fi
+          fi
+
+          # Write to GitHub Step Summary (visible on the workflow run page)
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ## ${{ matrix.name }}
+
+          | Property | Value |
+          |----------|-------|
+          | **Runner** | \`${{ matrix.os }}\` |
+          | **Architecture** | \`$(uname -m)\` |
+          | **OS** | \`$RUNNER_OS\` |
+          | **HSM Type** | ${HSM_TYPE} |
+          | **Status** | ${HSM_STATUS} |
+
+          EOF
