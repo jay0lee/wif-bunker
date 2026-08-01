@@ -89,9 +89,14 @@ jobs:
         shell: bash
         run: |
           python -m venv .venv
-          source .venv/bin/activate || . .venv/Scripts/activate
+          if [ -d ".venv/Scripts" ]; then
+            source .venv/Scripts/activate
+            echo "$PWD/.venv/Scripts" >> "$GITHUB_PATH"
+          else
+            source .venv/bin/activate
+            echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          fi
           pip install .
-          echo "$VIRTUAL_ENV/bin" >> "$GITHUB_PATH"
 
       # ── Generate unique project ID for this job ──
       - name: Set project ID
@@ -153,8 +158,7 @@ jobs:
             --use-adc \
             --project="${{ steps.config.outputs.project_id }}" \
             --folder="${{ secrets.SANDBOX_FOLDER_ID }}" \
-            ${{ matrix.soft_key_flag }} \
-            --debug
+            ${{ matrix.soft_key_flag }}
 
       # ── Step 3: WIF Bunker reuse run (detects existing resources) ──
       - name: "WIF Bunker: Reuse existing"
@@ -164,8 +168,7 @@ jobs:
           python wif_bunker.py \
             --use-adc \
             --project="${{ steps.config.outputs.project_id }}" \
-            ${{ matrix.soft_key_flag }} \
-            --debug
+            ${{ matrix.soft_key_flag }}
 
       # ── Step 4: Cleanup own project ──
       - name: "Cleanup test project"
