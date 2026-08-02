@@ -56,14 +56,6 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
-      # Install gcloud's ECP component on Linux. The GitHub-released
-      # libtls_offload.so statically links an incompatible OpenSSL — its
-      # SSL_CTX_set1_sigalgs_list fails on SSL_CTX* created by Python's
-      # OpenSSL 3 (ABI mismatch). gcloud's bundled version is compatible.
-      - name: "Linux: Install gcloud ECP component"
-        if: runner.os == 'Linux'
-        run: gcloud components install enterprise-certificate-proxy --quiet
-
       # ── Setup: Linux Software TPM ──
       - name: "Linux: Setup Software TPM (swtpm)"
         if: runner.os == 'Linux'

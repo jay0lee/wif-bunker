@@ -1098,7 +1098,6 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
         ) from e
 
 # --- ECP Binary Resolution ---
-_ECP_GITHUB_REPO = "googleapis/enterprise-certificate-proxy"
 
 
 def _get_ecp_platform_info() -> tuple[str, str, str, str]:
@@ -1119,77 +1118,128 @@ def _get_ecp_platform_info() -> tuple[str, str, str, str]:
         return "linux", arch, ".so", ".tar.gz"
 
 
-def _download_ecp_from_github(ecp_dir: Path) -> None:
-    """Downloads the latest ECP binaries from GitHub releases."""
+def _get_ecp_gcloud_component_info() -> tuple[str, str]:
+    """Returns (component_id, arch) for gcloud component manifest lookup."""
+    machine = platform.machine().lower()
+    if machine in ("arm64", "aarch64"):
+        arch = "arm"
+    else:
+        arch = "x86_64"
+
+    if sys.platform == "win32":
+        return f"enterprise-certificate-proxy-windows-{arch}", arch
+    elif sys.platform == "darwin":
+        return f"enterprise-certificate-proxy-darwin-{arch}", arch
+    else:
+        return f"enterprise-certificate-proxy-linux-{arch}", arch
+
+
+_GCLOUD_COMPONENTS_URL = (
+    "https://dl.google.com/dl/cloudsdk/channels/rapid/components-2.json"
+)
+_GCLOUD_CDN_BASE = "https://dl.google.com/dl/cloudsdk/channels/rapid/"
+
+
+def _download_ecp_from_gcloud_components(ecp_dir: Path) -> None:
+    """Downloads ECP binaries from gcloud's component CDN.
+
+    The gcloud component CDN distributes the same binaries as
+    `gcloud components install enterprise-certificate-proxy`. These
+    are ABI-compatible with the system's OpenSSL (the GitHub release
+    binaries statically link an older OpenSSL that causes ABI
+    mismatches on systems with OpenSSL 3).
+
+    The tarball has structure:
+        bin/ecp
+        platform/enterprise_cert/libecp.{so|dylib|dll}
+        platform/enterprise_cert/libtls_offload.{so|dylib|dll}
+
+    We flatten the relevant files into ecp_dir.
+    """
     import io
     import tarfile
     import zipfile
 
-    github_os, arch, _, archive_ext = _get_ecp_platform_info()
+    component_id, _ = _get_ecp_gcloud_component_info()
 
-    # Fetch latest release metadata.
-    logger.info("    Fetching latest ECP release from GitHub...")
-    resp = requests.get(
-        f"https://api.github.com/repos/{_ECP_GITHUB_REPO}/releases/latest",
-        headers={"Accept": "application/vnd.github+json"},
-        timeout=30,
-    )
+    logger.info("    Fetching gcloud component manifest...")
+    resp = requests.get(_GCLOUD_COMPONENTS_URL, timeout=30)
     resp.raise_for_status()
-    assets = resp.json()["assets"]
-    tag = resp.json()["tag_name"]
-    logger.info("    Latest ECP release: %s", tag)
+    manifest = resp.json()
 
-    # Find matching assets for our platform.
-    # Pattern: ecp_NNN_{os}_{arch}.{ext} and ecp_NNN_{os}_{arch}_tls_offload.{ext}
-    platform_suffix = f"_{github_os}_{arch}"
-    main_asset = None
-    tls_asset = None
-    for asset in assets:
-        name = asset["name"]
-        if "tls_offload" in name and platform_suffix in name:
-            tls_asset = asset
-        elif platform_suffix in name and "tls_offload" not in name:
-            main_asset = asset
+    # Find our platform-specific component.
+    component = None
+    for comp in manifest.get("components", []):
+        if comp.get("id") == component_id:
+            component = comp
+            break
 
-    if not main_asset or not tls_asset:
+    if not component or "data" not in component:
         raise FileNotFoundError(
-            f"Could not find ECP release assets for {github_os}/{arch}. "
-            f"Available: {[a['name'] for a in assets]}"
+            f"ECP component '{component_id}' not found in gcloud manifest. "
+            f"Available: {[c['id'] for c in manifest.get('components', []) if 'enterprise' in c.get('id', '')]}"
         )
+
+    source_path = component["data"]["source"]
+    download_url = _GCLOUD_CDN_BASE + source_path
+    version = component.get("version", {}).get("version_string", "?")
+    logger.info("    Downloading ECP v%s from gcloud CDN...", version)
+    logger.info("    %s", source_path.split("/")[-1])
+
+    dl_resp = requests.get(download_url, timeout=120, stream=True)
+    dl_resp.raise_for_status()
+    content = dl_resp.content
+
+    # Verify checksum if available.
+    expected_sha256 = component["data"].get("checksum")
+    if expected_sha256:
+        import hashlib
+        actual_sha256 = hashlib.sha256(content).hexdigest()
+        if actual_sha256 != expected_sha256:
+            raise RuntimeError(
+                f"ECP download checksum mismatch: "
+                f"expected {expected_sha256}, got {actual_sha256}"
+            )
+        logger.debug("    SHA-256 checksum verified.")
 
     ecp_dir.mkdir(parents=True, exist_ok=True)
 
-    for asset in (main_asset, tls_asset):
-        logger.info("    Downloading %s ...", asset["name"])
-        dl_resp = requests.get(
-            asset["browser_download_url"], timeout=120, stream=True,
-        )
-        dl_resp.raise_for_status()
-        content = dl_resp.content
-
-        if archive_ext == ".zip":
-            with zipfile.ZipFile(io.BytesIO(content)) as zf:
-                zf.extractall(ecp_dir)
-        else:
-            with tarfile.open(fileobj=io.BytesIO(content), mode="r:gz") as tf:
-                tf.extractall(ecp_dir)
+    # Extract and flatten — the tarball has subdirectories
+    # (bin/, platform/enterprise_cert/) but we want everything flat.
+    if source_path.endswith(".zip"):
+        with zipfile.ZipFile(io.BytesIO(content)) as zf:
+            for member in zf.namelist():
+                basename = Path(member).name
+                if not basename or member.endswith("/"):
+                    continue  # Skip directories
+                target = ecp_dir / basename
+                with zf.open(member) as src, open(target, "wb") as dst:
+                    dst.write(src.read())
+    else:
+        with tarfile.open(fileobj=io.BytesIO(content), mode="r:gz") as tf:
+            for member in tf.getmembers():
+                if not member.isfile():
+                    continue
+                basename = Path(member.name).name
+                target = ecp_dir / basename
+                src = tf.extractfile(member)
+                if src:
+                    with open(target, "wb") as dst:
+                        dst.write(src.read())
 
     # Make binaries executable on Unix.
     if sys.platform != "win32":
         for f in ecp_dir.iterdir():
-            if f.is_file() and not f.suffix:
+            if f.is_file():
                 f.chmod(f.stat().st_mode | 0o755)
 
-    logger.info("    ECP binaries downloaded to %s", ecp_dir)
+    logger.info("    ECP v%s installed to %s", version, ecp_dir)
+
+
 
 
 def _ensure_ecp_binaries() -> tuple[Path, Path, Path]:
-    """Locates ECP binaries, downloading from GitHub if not found.
-
-    Search order:
-      1. gcloud SDK's enterprise-certificate-proxy component (in-place)
-      2. Persistent install directory (from a previous GitHub download)
-      3. Auto-download from GitHub releases
+    """Locates ECP binaries, downloading from gcloud component CDN if needed.
 
     Returns:
         (ecp_binary, ecp_client_lib, tls_offload_lib) paths.
@@ -1199,59 +1249,26 @@ def _ensure_ecp_binaries() -> tuple[Path, Path, Path]:
 
     ecp_install_dir = _get_ecp_install_dir()
 
-    # Expected filenames — GitHub releases may omit the "lib" prefix on some
-    # files (e.g. tls_offload.dll), while gcloud SDK always has it.
     ecp_bin_name = f"ecp{exe_ext}"
-    libecp_names = [f"libecp{lib_ext}"]
-    tls_offload_names = [f"libtls_offload{lib_ext}", f"tls_offload{lib_ext}"]
+    libecp_name = f"libecp{lib_ext}"
+    tls_offload_name = f"libtls_offload{lib_ext}"
 
-    def _find_lib(directory: Path, candidates: list[str]) -> Path | None:
-        """Return the first existing file from a list of candidate names."""
-        for name in candidates:
-            p = directory / name
-            if p.exists():
-                return p
-        return None
+    ecp_bin = ecp_install_dir / ecp_bin_name
+    client = ecp_install_dir / libecp_name
+    offload = ecp_install_dir / tls_offload_name
 
-    ecp_bin = client = offload = None
-
-    # 1. Check gcloud SDK (use files in-place — ecp.exe in bin/,
-    #    libecp + libtls_offload in platform/enterprise_cert/).
-    gcloud_path = shutil.which("gcloud")
-    if gcloud_path:
-        gcloud_sdk_root = Path(gcloud_path).resolve().parent.parent
-        gcloud_ecp_dir = gcloud_sdk_root / "platform" / "enterprise_cert"
-        if gcloud_ecp_dir.is_dir():
-            gcloud_ecp_bin = gcloud_sdk_root / "bin" / ecp_bin_name
-            gcloud_client = _find_lib(gcloud_ecp_dir, libecp_names)
-            gcloud_offload = _find_lib(gcloud_ecp_dir, tls_offload_names)
-            if gcloud_ecp_bin.exists() and gcloud_client and gcloud_offload:
-                logger.info("    Using gcloud SDK ECP binaries from %s", gcloud_ecp_dir)
-                ecp_bin, client, offload = gcloud_ecp_bin, gcloud_client, gcloud_offload
-
-    # 2. Check persistent install directory (from a previous download).
-    if not ecp_bin and ecp_install_dir.is_dir():
-        ecp_bin = ecp_install_dir / ecp_bin_name
-        client = _find_lib(ecp_install_dir, libecp_names)
-        offload = _find_lib(ecp_install_dir, tls_offload_names)
-        if ecp_bin.exists() and client and offload:
-            logger.info("    Using ECP binaries from %s", ecp_install_dir)
-        else:
-            ecp_bin = client = offload = None
-
-    # 3. Download from GitHub as last resort.
-    if not ecp_bin:
-        logger.info("    ECP binaries not found — downloading from GitHub...")
-        _download_ecp_from_github(ecp_install_dir)
-        ecp_bin = ecp_install_dir / ecp_bin_name
-        client = _find_lib(ecp_install_dir, libecp_names)
-        offload = _find_lib(ecp_install_dir, tls_offload_names)
-        if not ecp_bin.exists() or not client or not offload:
+    # Download from gcloud component CDN if not already cached.
+    if not (ecp_bin.exists() and client.exists() and offload.exists()):
+        logger.info("    ECP binaries not found — downloading from gcloud CDN...")
+        _download_ecp_from_gcloud_components(ecp_install_dir)
+        if not (ecp_bin.exists() and client.exists() and offload.exists()):
             actual = [f.name for f in ecp_install_dir.iterdir()] if ecp_install_dir.is_dir() else []
             raise FileNotFoundError(
                 f"ECP download succeeded but expected files not found. "
                 f"Actual files: {actual}"
             )
+    else:
+        logger.info("    Using cached ECP binaries from %s", ecp_install_dir)
 
     # Prefer local patched binaries if available (macOS SE development).
     patched_ecp = Path.cwd() / "ecp_patched"
@@ -1261,9 +1278,7 @@ def _ensure_ecp_binaries() -> tuple[Path, Path, Path]:
     if patched_libecp.exists():
         client = patched_libecp
 
-    # Register all directories containing ECP files for DLL resolution.
-    # ecp_bin may be in a different dir than the DLLs (e.g. gcloud's
-    # bin/ vs platform/enterprise_cert/).
+    # Register directories for DLL resolution.
     ecp_dirs = {str(p.parent) for p in (ecp_bin, client, offload)}
     for d in ecp_dirs:
         _ensure_ecp_on_path(Path(d))
