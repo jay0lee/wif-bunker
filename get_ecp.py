@@ -14,13 +14,13 @@ Usage:
 
 from __future__ import annotations
 
+import argparse
 import io
 import os
+import platform
 import sys
 import tarfile
 import zipfile
-import argparse
-import platform
 from pathlib import Path
 
 import requests
@@ -61,7 +61,8 @@ def get_default_ecp_dir() -> Path:
     """Returns the default persistent directory for ECP binaries."""
     if sys.platform == "win32":
         local_app_data = os.environ.get(
-            "LOCALAPPDATA", str(Path.home() / "AppData" / "Local"),
+            "LOCALAPPDATA",
+            str(Path.home() / "AppData" / "Local"),
         )
         return Path(local_app_data) / "Google" / "ECP"
     else:
@@ -70,7 +71,7 @@ def get_default_ecp_dir() -> Path:
 
 def download_ecp(output_dir: Path) -> None:
     """Downloads ECP binaries from the forked GitHub release into output_dir."""
-    github_os, arch, lib_ext, archive_ext = get_ecp_platform_info()
+    github_os, arch, _lib_ext, _archive_ext = get_ecp_platform_info()
 
     # Use GITHUB_TOKEN if available (CI runners share IPs and hit the
     # 60 req/hr unauthenticated rate limit quickly).
@@ -106,10 +107,7 @@ def download_ecp(output_dir: Path) -> None:
 
     if not signer_asset or not offload_asset:
         available = [a["name"] for a in assets]
-        raise FileNotFoundError(
-            f"ECP release {tag} missing assets for {target_os_arch}.\n"
-            f"Available: {available}"
-        )
+        raise FileNotFoundError(f"ECP release {tag} missing assets for {target_os_arch}.\nAvailable: {available}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -117,7 +115,9 @@ def download_ecp(output_dir: Path) -> None:
     for asset in (signer_asset, offload_asset):
         print(f"Downloading {asset['name']}...")
         dl = requests.get(
-            asset["browser_download_url"], headers=gh_headers, timeout=120,
+            asset["browser_download_url"],
+            headers=gh_headers,
+            timeout=120,
         )
         dl.raise_for_status()
 
@@ -151,10 +151,7 @@ def download_ecp(output_dir: Path) -> None:
     for name in (ecp_bin, libecp, tls_offload):
         if not (output_dir / name).exists():
             actual = [f.name for f in output_dir.iterdir()]
-            raise FileNotFoundError(
-                f"Expected {name} not found after download. "
-                f"Actual files: {actual}"
-            )
+            raise FileNotFoundError(f"Expected {name} not found after download. Actual files: {actual}")
 
 
 def main():
@@ -162,7 +159,8 @@ def main():
         description="Download ECP binaries for the current platform.",
     )
     parser.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         type=Path,
         default=None,
         help="Output directory (default: platform-specific location)",

@@ -8,18 +8,34 @@ on:
 
 jobs:
   lint:
-    name: Lint & Syntax Check
+    name: Lint & Format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Syntax check
-        run: python -m py_compile wif_bunker.py get_ecp.py minimal-adc.py
+      - run: pip install ruff
+      - name: Ruff lint
+        run: ruff check .
+      - name: Ruff format check
+        run: ruff format --check .
+
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pytest pytest-cov .
+      - name: Run tests
+        run: pytest --cov --cov-report=term-missing
 
   build:
     name: Build (${{ matrix.platform_name }})
+    needs: [lint, test]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

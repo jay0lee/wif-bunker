@@ -9,5 +9,57 @@ dependencies = [
     "google-auth @ https://github.com/jay0lee/google-cloud-python/releases/download/google-auth-v2.56.2-bunker3/google_auth-2.56.2+bunker3-py3-none-any.whl",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "ruff",
+    "pytest",
+    "pytest-cov",
+]
+
+[tool.setuptools]
+packages = []
+
 [project.scripts]
 wif-bunker = "wif_bunker:main"
+
+# ── Ruff ──
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific rules
+]
+ignore = [
+    "E501",   # line length (handled by formatter)
+    "SIM105", # contextlib.suppress (try/except/pass with comments is clearer)
+    "SIM108", # ternary operator (readability preference)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["wif_bunker", "get_ecp"]
+
+# ── PyTest ──
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "unit: fast tests with no external dependencies",
+    "integration: requires GCP credentials and/or hardware",
+]
+addopts = "-v --tb=short -m 'not integration'"
+
+# ── Coverage ──
+[tool.coverage.run]
+source = ["wif_bunker", "get_ecp"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 20

@@ -26,24 +26,27 @@ import sys
 import tempfile
 import threading
 import time
-import traceback
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import wraps
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, ClassVar
 
 import requests
 from cryptography import x509 as cx509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 from google.auth import default as google_auth_default
-from google.auth.exceptions import RefreshError, OAuthError
+from google.auth.exceptions import OAuthError, RefreshError
 from google.auth.transport.requests import (
     Request as GoogleAuthRequest,
+)
+from google.auth.transport.requests import (
     _MutualTlsOffloadAdapter,
 )
-from get_ecp import get_ecp_platform_info, get_ecp_binary_names, get_default_ecp_dir
+
+from get_ecp import get_default_ecp_dir, get_ecp_binary_names, get_ecp_platform_info
 
 logger = logging.getLogger(__name__)
 
@@ -74,10 +77,10 @@ def _supports_unicode() -> bool:
 
 # Symbols that degrade gracefully on non-Unicode terminals.
 _UNICODE = _supports_unicode()
-SYM_OK = "\u2705" if _UNICODE else "[OK]"       # ✅
-SYM_WARN = "\u26a0" if _UNICODE else "[!]"      # ⚠
-SYM_FAIL = "\u274c" if _UNICODE else "[X]"       # ❌
-SYM_ARROW = "\u2192" if _UNICODE else "->"       # →
+SYM_OK = "\u2705" if _UNICODE else "[OK]"  # ✅
+SYM_WARN = "\u26a0" if _UNICODE else "[!]"  # ⚠
+SYM_FAIL = "\u274c" if _UNICODE else "[X]"  # ❌
+SYM_ARROW = "\u2192" if _UNICODE else "->"  # →
 
 # --- Tuning Constants ---
 MAX_BACKOFF_SECONDS = 60
@@ -94,9 +97,9 @@ _KEY_ALGORITHMS: dict[str, dict] = {
     "es256": {
         "desc": "ECDSA P-256 (default, fastest)",
         "platforms": {"darwin", "win32", "linux"},
-        "macos_sc_auth": "p-256-ne",        # sc_auth -k flag
-        "windows_certreq": "ECDSA_P256",     # certreq INF KeyAlgorithm
-        "linux_tpm2": "ecc256",              # tpm2_ptool --algorithm
+        "macos_sc_auth": "p-256-ne",  # sc_auth -k flag
+        "windows_certreq": "ECDSA_P256",  # certreq INF KeyAlgorithm
+        "linux_tpm2": "ecc256",  # tpm2_ptool --algorithm
     },
     "es384": {
         "desc": "ECDSA P-384",
@@ -162,7 +165,8 @@ def _check_tpm_linux() -> None:
     try:
         abrmd = subprocess.run(
             ["systemctl", "is-active", "--quiet", "tpm2-abrmd"],
-            capture_output=True, timeout=5,
+            capture_output=True,
+            timeout=5,
         )
         if abrmd.returncode == 0:
             return  # tpm2-abrmd is running and managing a TPM
@@ -174,6 +178,7 @@ def _check_tpm_linux() -> None:
         return  # User has explicitly configured a TCTI (e.g. swtpm)
     try:
         import socket
+
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(1)
             s.connect(("127.0.0.1", 2321))
@@ -264,10 +269,13 @@ def with_retries(
                     return func(*args, **kwargs)
                 except retryable_exceptions:
                     if attempt < max_attempts - 1:
-                        sleep_time = min(2 ** attempt, MAX_BACKOFF_SECONDS)
+                        sleep_time = min(2**attempt, MAX_BACKOFF_SECONDS)
                         logger.info(
                             "    %s (%d/%d), %ds...",
-                            retry_msg, attempt + 1, max_attempts, sleep_time,
+                            retry_msg,
+                            attempt + 1,
+                            max_attempts,
+                            sleep_time,
                         )
                         time.sleep(sleep_time)
                         continue
@@ -276,24 +284,25 @@ def with_retries(
                     status = e.response.status_code
                     body = e.response.text
                     is_expected_status = status in expected_errors
-                    is_custom_error = (
-                        custom_error_text and custom_error_text in body
-                    )
-                    if (
-                        (is_expected_status or is_custom_error)
-                        and attempt < max_attempts - 1
-                    ):
-                        sleep_time = min(2 ** attempt, MAX_BACKOFF_SECONDS)
+                    is_custom_error = custom_error_text and custom_error_text in body
+                    if (is_expected_status or is_custom_error) and attempt < max_attempts - 1:
+                        sleep_time = min(2**attempt, MAX_BACKOFF_SECONDS)
                         logger.info(
                             "    %s (%d/%d), %ds...",
-                            retry_msg, attempt + 1, max_attempts, sleep_time,
+                            retry_msg,
+                            attempt + 1,
+                            max_attempts,
+                            sleep_time,
                         )
                         time.sleep(sleep_time)
                         continue
                     # Final attempt or unexpected error — log full detail.
                     logger.error(
                         "HTTP %d from %s FAILED after %d attempts — %s",
-                        status, func.__name__, attempt + 1, body,
+                        status,
+                        func.__name__,
+                        attempt + 1,
+                        body,
                     )
                     raise
 
@@ -325,7 +334,7 @@ class GCPClient:
     # --client-secrets-file pointing to their own Desktop OAuth client.
     _DEFAULT_CLIENT_ID = "284409941921-t4ukaudpiagsbl51t3adqtkgb30gu93o.apps.googleusercontent.com"
     _DEFAULT_CLIENT_SECRET = "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"
-    _OAUTH_SCOPES = [
+    _OAUTH_SCOPES: ClassVar[list[str]] = [
         # Project CRUD + project-level IAM policy
         "https://www.googleapis.com/auth/cloudplatformprojects",
         # Service accounts, WIF pools & providers
@@ -354,8 +363,9 @@ class GCPClient:
             self._credentials.refresh(self._auth_request)
             self._token = None
             # Log the identity we're authenticated as.
-            identity = getattr(self._credentials, "service_account_email", None) \
-                or getattr(self._credentials, "signer_email", None)
+            identity = getattr(self._credentials, "service_account_email", None) or getattr(
+                self._credentials, "signer_email", None
+            )
             if not identity:
                 # For user credentials, check tokeninfo.
                 try:
@@ -370,13 +380,6 @@ class GCPClient:
         else:
             self._credentials = None
             self._token = self._oauth_user_token(client_secrets_file)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        self.session.close()
-        return False
 
     def _oauth_user_token(self, client_secrets_file: str | None) -> str:
         """3-legged OAuth flow — returns a short-lived access token.
@@ -407,9 +410,7 @@ class GCPClient:
         # CSRF protection + PKCE (RFC 7636).
         state = secrets.token_urlsafe(32)
         code_verifier = secrets.token_urlsafe(64)  # 43-128 chars
-        code_challenge = base64.urlsafe_b64encode(
-            hashlib.sha256(code_verifier.encode()).digest()
-        ).rstrip(b"=").decode()
+        code_challenge = base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode()).digest()).rstrip(b"=").decode()
         auth_code = None
 
         # Start a local redirect server on a random port.
@@ -425,8 +426,7 @@ class GCPClient:
                 self_handler.send_header("Content-Type", "text/html")
                 self_handler.end_headers()
                 self_handler.wfile.write(
-                    b"<h2>Authorization complete.</h2>"
-                    b"<p>You may close this window and return to the terminal.</p>"
+                    b"<h2>Authorization complete.</h2><p>You may close this window and return to the terminal.</p>"
                 )
 
             def log_message(self_handler, *args):
@@ -437,16 +437,18 @@ class GCPClient:
         redirect_uri = f"http://localhost:{port}"
 
         # Build the authorization URL with PKCE.
-        auth_params = urllib.parse.urlencode({
-            "client_id": client_id,
-            "redirect_uri": redirect_uri,
-            "response_type": "code",
-            "scope": " ".join(self._OAUTH_SCOPES),
-            "state": state,
-            "access_type": "online",  # No refresh token.
-            "code_challenge": code_challenge,
-            "code_challenge_method": "S256",
-        })
+        auth_params = urllib.parse.urlencode(
+            {
+                "client_id": client_id,
+                "redirect_uri": redirect_uri,
+                "response_type": "code",
+                "scope": " ".join(self._OAUTH_SCOPES),
+                "state": state,
+                "access_type": "online",  # No refresh token.
+                "code_challenge": code_challenge,
+                "code_challenge_method": "S256",
+            }
+        )
         auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{auth_params}"
 
         # Google Workspace orgs may block untrusted OAuth apps (OWL).
@@ -520,10 +522,12 @@ class GCPClient:
 
         # Patch the handler to signal the event when code is captured.
         orig_do_GET = _RedirectHandler.do_GET
+
         def _signaling_do_GET(self_handler):
             orig_do_GET(self_handler)
             if auth_code:
                 code_event.set()
+
         _RedirectHandler.do_GET = _signaling_do_GET
 
         server_thread = threading.Thread(target=_serve_until_code, daemon=True)
@@ -553,8 +557,7 @@ class GCPClient:
         token_data = token_resp.json()
 
         access_token = token_data["access_token"]
-        logger.info("    Authenticated successfully (token expires in %ss).",
-                     token_data.get("expires_in", "?"))
+        logger.info("    Authenticated successfully (token expires in %ss).", token_data.get("expires_in", "?"))
         return access_token
 
     def __enter__(self) -> GCPClient:
@@ -565,7 +568,10 @@ class GCPClient:
 
     @with_retries(max_attempts=10, expected_errors=(403, 404))
     def api_call(
-        self, method: str, url: str, json_payload: dict | None = None,
+        self,
+        method: str,
+        url: str,
+        json_payload: dict | None = None,
     ) -> dict | None:
         if self._credentials:
             # ADC mode — auto-refresh and apply credentials.
@@ -593,9 +599,7 @@ class GCPClient:
             if op_data and op_data.get("done"):
                 return op_data
             time.sleep(2)
-        raise TimeoutError(
-            f"LRO {op_name} did not complete within {timeout}s"
-        )
+        raise TimeoutError(f"LRO {op_name} did not complete within {timeout}s")
 
     def wait_for_wif_resource(self, url: str, max_attempts: int = 12) -> dict:
         """Polls a WIF resource until it reaches ACTIVE state."""
@@ -603,21 +607,21 @@ class GCPClient:
             data = self.api_call("GET", url)
             if data and data.get("state") == "ACTIVE":
                 return data
-            sleep_time = min(2 ** attempt, MAX_BACKOFF_SECONDS)
+            sleep_time = min(2**attempt, MAX_BACKOFF_SECONDS)
             logger.debug(
                 "WIF resource not ACTIVE yet (attempt %d/%d), sleeping %ds",
-                attempt + 1, max_attempts, sleep_time,
+                attempt + 1,
+                max_attempts,
+                sleep_time,
             )
             time.sleep(sleep_time)
-        raise TimeoutError(
-            f"WIF resource at {url} did not become ACTIVE "
-            f"within {max_attempts} attempts"
-        )
+        raise TimeoutError(f"WIF resource at {url} did not become ACTIVE within {max_attempts} attempts")
 
 
 # --- Ephemeral CA & Workload Certificate Signing ---
 def _create_ca_and_sign(
-    hw_public_key_pem: str, config: WorkloadConfig,
+    hw_public_key_pem: str,
+    config: WorkloadConfig,
 ) -> tuple[CertificateBundle, str]:
     """Creates an ephemeral CA and signs a workload cert for a hardware key.
 
@@ -646,11 +650,13 @@ def _create_ca_and_sign(
 
     # --- Generate ephemeral CA (in-memory only, never written to disk) ---
     ca_key = ec.generate_private_key(ec.SECP256R1())
-    ca_name = cx509.Name([
-        cx509.NameAttribute(NameOID.COMMON_NAME, config.ca_cn),
-        cx509.NameAttribute(NameOID.ORGANIZATION_NAME, "WIF Bunker"),
-    ])
-    now = datetime.datetime.now(datetime.timezone.utc)
+    ca_name = cx509.Name(
+        [
+            cx509.NameAttribute(NameOID.COMMON_NAME, config.ca_cn),
+            cx509.NameAttribute(NameOID.ORGANIZATION_NAME, "WIF Bunker"),
+        ]
+    )
+    now = datetime.datetime.now(datetime.UTC)
     ca_cert = (
         cx509.CertificateBuilder()
         .subject_name(ca_name)
@@ -660,14 +666,20 @@ def _create_ca_and_sign(
         .not_valid_before(now)
         .not_valid_after(now + datetime.timedelta(days=_WIF_MAX_CERT_LIFETIME_DAYS))
         .add_extension(
-            cx509.BasicConstraints(ca=True, path_length=0), critical=True,
+            cx509.BasicConstraints(ca=True, path_length=0),
+            critical=True,
         )
         .add_extension(
             cx509.KeyUsage(
-                digital_signature=False, key_cert_sign=True, crl_sign=True,
-                content_commitment=False, key_encipherment=False,
-                data_encipherment=False, key_agreement=False,
-                encipher_only=False, decipher_only=False,
+                digital_signature=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                encipher_only=False,
+                decipher_only=False,
             ),
             critical=True,
         )
@@ -676,9 +688,11 @@ def _create_ca_and_sign(
     logger.info("    Ephemeral CA generated: CN=%s", config.ca_cn)
 
     # --- Sign workload cert with the CA ---
-    workload_name = cx509.Name([
-        cx509.NameAttribute(NameOID.COMMON_NAME, config.workload_cn),
-    ])
+    workload_name = cx509.Name(
+        [
+            cx509.NameAttribute(NameOID.COMMON_NAME, config.workload_cn),
+        ]
+    )
     workload_cert = (
         cx509.CertificateBuilder()
         .subject_name(workload_name)
@@ -688,14 +702,20 @@ def _create_ca_and_sign(
         .not_valid_before(now)
         .not_valid_after(now + datetime.timedelta(days=_WIF_MAX_CERT_LIFETIME_DAYS))
         .add_extension(
-            cx509.BasicConstraints(ca=False, path_length=None), critical=True,
+            cx509.BasicConstraints(ca=False, path_length=None),
+            critical=True,
         )
         .add_extension(
             cx509.KeyUsage(
-                digital_signature=True, key_cert_sign=False, crl_sign=False,
-                content_commitment=False, key_encipherment=False,
-                data_encipherment=False, key_agreement=False,
-                encipher_only=False, decipher_only=False,
+                digital_signature=True,
+                key_cert_sign=False,
+                crl_sign=False,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                encipher_only=False,
+                decipher_only=False,
             ),
             critical=True,
         )
@@ -703,13 +723,13 @@ def _create_ca_and_sign(
     )
     logger.info(
         "    Workload cert signed by CA: CN=%s %s issued by CN=%s",
-        config.workload_cn, SYM_ARROW, config.ca_cn,
+        config.workload_cn,
+        SYM_ARROW,
+        config.ca_cn,
     )
 
     ca_cert_pem = ca_cert.public_bytes(serialization.Encoding.PEM).decode().strip()
-    workload_cert_pem = workload_cert.public_bytes(
-        serialization.Encoding.PEM
-    ).decode().strip()
+    workload_cert_pem = workload_cert.public_bytes(serialization.Encoding.PEM).decode().strip()
     logger.debug("Trust anchor PEM repr: %s", repr(ca_cert_pem[:120]))
 
     # Compute cert-pinning values for the WIF attributeCondition.
@@ -717,9 +737,7 @@ def _create_ca_and_sign(
     #   assertion.serialNumberHex — uppercase hex string
     #   assertion.sha256Fingerprint — standard Base64 encoded
     workload_der = workload_cert.public_bytes(serialization.Encoding.DER)
-    sha256_fp = base64.b64encode(
-        hashlib.sha256(workload_der).digest()
-    ).decode().rstrip("=")
+    sha256_fp = base64.b64encode(hashlib.sha256(workload_der).digest()).decode().rstrip("=")
     serial_hex = format(workload_cert.serial_number, "X")
 
     logger.info("    Workload cert serial (hex): %s", serial_hex)
@@ -737,6 +755,7 @@ def _create_ca_and_sign(
 
 # --- Platform-Specific Hardware Keystore Generators ---
 
+
 def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
     """Generates a TPM 2.0-backed certificate via certreq + Microsoft Platform Crypto Provider.
 
@@ -747,12 +766,13 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
       4. certreq -accept issued.cer            → associates CA cert with TPM key
     """
     # Pre-validate required commands.
-    _require_command("certreq",
-        install_hint="Built-in Windows command — should be at C:\\Windows\\System32\\certreq.exe")
-    _require_command("certutil",
-        install_hint="Built-in Windows command — should be at C:\\Windows\\System32\\certutil.exe")
-    _require_command("powershell",
-        install_hint="Built-in Windows command — ensure PowerShell is on PATH")
+    _require_command(
+        "certreq", install_hint="Built-in Windows command — should be at C:\\Windows\\System32\\certreq.exe"
+    )
+    _require_command(
+        "certutil", install_hint="Built-in Windows command — should be at C:\\Windows\\System32\\certutil.exe"
+    )
+    _require_command("powershell", install_hint="Built-in Windows command — ensure PowerShell is on PATH")
 
     _tmpdir = tempfile.TemporaryDirectory(prefix="bunker_")
     work_dir = Path(_tmpdir.name)
@@ -766,7 +786,8 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
         )
         subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_cleanup],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         logger.info("    Cleaned up stale bunker-workload certs from CurrentUser store.")
 
@@ -804,12 +825,13 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
         csr_path = work_dir / "request.csr"
         result = subprocess.run(
             ["certreq", "-new", "-f", str(inf_path), str(csr_path)],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         )
         if not csr_path.exists():
             raise FileNotFoundError(
-                f"CSR not found at {csr_path} after certreq -new. "
-                f"stdout: {result.stdout}, stderr: {result.stderr}"
+                f"CSR not found at {csr_path} after certreq -new. stdout: {result.stdout}, stderr: {result.stderr}"
             )
         csr_pem = csr_path.read_text().strip()
         logger.info("    TPM key created and CSR generated: %s", config.workload_cn)
@@ -829,13 +851,9 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
         logger.warning("    ║     Check your taskbar for a 'Security Warning' prompt.  ║")
         logger.warning("    ╚══════════════════════════════════════════════════════════╝")
         logger.warning("")
-        ca_cert_obj = cx509.load_pem_x509_certificate(
-            bundle.trust_anchor_pem.encode()
-        )
+        ca_cert_obj = cx509.load_pem_x509_certificate(bundle.trust_anchor_pem.encode())
         ca_der_path = work_dir / "ca.der"
-        ca_der_path.write_bytes(
-            ca_cert_obj.public_bytes(serialization.Encoding.DER)
-        )
+        ca_der_path.write_bytes(ca_cert_obj.public_bytes(serialization.Encoding.DER))
         ps_install_ca = (
             f"$cert = Import-Certificate "
             f"-FilePath '{ca_der_path}' "
@@ -844,18 +862,20 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
         )
         ca_result = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_install_ca],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         )
         ca_thumbprint = ca_result.stdout.strip()
 
         # Verify the CA was actually accepted.
         ps_verify_ca = (
-            f"(Get-ChildItem Cert:\\CurrentUser\\Root | "
-            f"Where-Object {{ $_.Thumbprint -eq '{ca_thumbprint}' }}).Count"
+            f"(Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object {{ $_.Thumbprint -eq '{ca_thumbprint}' }}).Count"
         )
         verify_result = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_verify_ca],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         if verify_result.stdout.strip() != "1":
             raise RuntimeError(
@@ -870,11 +890,11 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
         issued_cert_path.write_text(workload_pem)
         subprocess.run(
             ["certreq", "-accept", str(issued_cert_path)],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         )
-        logger.info(
-            "    CA-signed cert associated with TPM key in CurrentUser store."
-        )
+        logger.info("    CA-signed cert associated with TPM key in CurrentUser store.")
 
         # 6. Remove the ephemeral CA from trusted root store.
         #    On Windows, this triggers a Security Warning dialog
@@ -890,13 +910,18 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
         logger.info("    Removing ephemeral CA from trusted root store...")
         subprocess.run(
             ["certutil", "-user", "-delstore", "Root", ca_thumbprint],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         verify_result = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             f"@(Get-ChildItem Cert:\\CurrentUser\\Root | "
-             f"Where-Object Thumbprint -eq '{ca_thumbprint}').Count"],
-            capture_output=True, text=True,
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                f"@(Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object Thumbprint -eq '{ca_thumbprint}').Count",
+            ],
+            capture_output=True,
+            text=True,
         )
         if verify_result.stdout.strip() == "0":
             logger.info("    Ephemeral CA removed from trusted root store.")
@@ -952,18 +977,15 @@ def _generate_cert_macos(config: WorkloadConfig) -> CertificateBundle:
       6. sc_auth import-ctk-certificate → replace self-signed cert with CA-signed
     """
     # Pre-validate required commands.
-    _require_command("security",
-        install_hint="Built-in macOS command — should always be at /usr/bin/security")
-    _require_command("sc_auth",
-        install_hint="Built-in macOS command — requires macOS 10.15+. Check /usr/bin/sc_auth")
+    _require_command("security", install_hint="Built-in macOS command — should always be at /usr/bin/security")
+    _require_command("sc_auth", install_hint="Built-in macOS command — requires macOS 10.15+. Check /usr/bin/sc_auth")
 
     mac_ver_str = platform.mac_ver()[0]
     if mac_ver_str:
         major_ver = int(mac_ver_str.split(".")[0])
         if major_ver < 15:
             raise RuntimeError(
-                f"Hardware-backed mTLS via CryptoTokenKit requires macOS 15+. "
-                f"Current version: {mac_ver_str}"
+                f"Hardware-backed mTLS via CryptoTokenKit requires macOS 15+. Current version: {mac_ver_str}"
             )
 
     _tmpdir = tempfile.TemporaryDirectory(prefix="bunker_")
@@ -975,7 +997,9 @@ def _generate_cert_macos(config: WorkloadConfig) -> CertificateBundle:
         #    ones are orphaned.
         id_result = subprocess.run(
             ["sc_auth", "identities"],
-            check=True, capture_output=True, text=True,
+            check=True,
+            capture_output=True,
+            text=True,
         )
         for line in id_result.stdout.splitlines():
             parts = line.split("\t")
@@ -990,9 +1014,9 @@ def _generate_cert_macos(config: WorkloadConfig) -> CertificateBundle:
         # Also remove stale bunker-workload certs from the login keychain.
         login_kc = _macos_login_keychain()
         find_result = subprocess.run(
-            ["security", "find-certificate", "-c", "bunker-workload", "-a", "-Z",
-             login_kc],
-            capture_output=True, text=True,
+            ["security", "find-certificate", "-c", "bunker-workload", "-a", "-Z", login_kc],
+            capture_output=True,
+            text=True,
         )
         for line in find_result.stdout.splitlines():
             if "SHA-1" in line:
@@ -1005,13 +1029,20 @@ def _generate_cert_macos(config: WorkloadConfig) -> CertificateBundle:
         # 1. Generate Secure Enclave key (+ throwaway self-signed cert)
         subprocess.run(
             [
-                "sc_auth", "create-ctk-identity",
-                "-l", config.workload_cn,
-                "-N", config.workload_cn,
-                "-k", config.key_algo_config["macos_sc_auth"],
-                "-t", "none",
+                "sc_auth",
+                "create-ctk-identity",
+                "-l",
+                config.workload_cn,
+                "-N",
+                config.workload_cn,
+                "-k",
+                config.key_algo_config["macos_sc_auth"],
+                "-t",
+                "none",
             ],
-            check=True, capture_output=True, text=True,
+            check=True,
+            capture_output=True,
+            text=True,
         )
         logger.info("    Secure Enclave key created: %s", config.workload_cn)
 
@@ -1019,10 +1050,12 @@ def _generate_cert_macos(config: WorkloadConfig) -> CertificateBundle:
         #    Retry briefly — the CTK token may need a moment to register
         #    the new identity after creation and stale identity deletion.
         key_hash: str | None = None
-        for attempt in range(5):
+        for _attempt in range(5):
             id_result = subprocess.run(
                 ["sc_auth", "identities"],
-                check=True, capture_output=True, text=True,
+                check=True,
+                capture_output=True,
+                text=True,
             )
             for line in id_result.stdout.splitlines():
                 if config.workload_cn in line:
@@ -1032,8 +1065,7 @@ def _generate_cert_macos(config: WorkloadConfig) -> CertificateBundle:
             time.sleep(1)
         if not key_hash:
             raise RuntimeError(
-                f"Could not find key hash for '{config.workload_cn}' "
-                f"in sc_auth identities output:\n{id_result.stdout}"
+                f"Could not find key hash for '{config.workload_cn}' in sc_auth identities output:\n{id_result.stdout}"
             )
         logger.info("    SE key hash: %s", key_hash)
 
@@ -1041,18 +1073,22 @@ def _generate_cert_macos(config: WorkloadConfig) -> CertificateBundle:
         csr_basename = str(work_dir / "workload_csr")
         subprocess.run(
             [
-                "sc_auth", "create-ctk-csr",
-                "-h", key_hash,
-                "-N", config.workload_cn,
-                "-f", csr_basename,
+                "sc_auth",
+                "create-ctk-csr",
+                "-h",
+                key_hash,
+                "-N",
+                config.workload_cn,
+                "-f",
+                csr_basename,
             ],
-            check=True, capture_output=True, text=True,
+            check=True,
+            capture_output=True,
+            text=True,
         )
         csr_path = Path(f"{csr_basename}.csr")
         if not csr_path.exists():
-            raise FileNotFoundError(
-                f"CSR not found at {csr_path} after sc_auth create-ctk-csr"
-            )
+            raise FileNotFoundError(f"CSR not found at {csr_path} after sc_auth create-ctk-csr")
         csr_pem = csr_path.read_text().strip()
         logger.info("    CSR generated from SE key.")
 
@@ -1066,14 +1102,16 @@ def _generate_cert_macos(config: WorkloadConfig) -> CertificateBundle:
         workload_cert_path.write_text(workload_pem)
         subprocess.run(
             [
-                "sc_auth", "import-ctk-certificate",
-                "-f", str(workload_cert_path),
+                "sc_auth",
+                "import-ctk-certificate",
+                "-f",
+                str(workload_cert_path),
             ],
-            check=True, capture_output=True, text=True,
+            check=True,
+            capture_output=True,
+            text=True,
         )
-        logger.info(
-            "    CA-signed cert linked to SE key via import-ctk-certificate."
-        )
+        logger.info("    CA-signed cert linked to SE key via import-ctk-certificate.")
 
         # 6. Also import the cert into the login keychain so that ECP's
         #    GetCertPemForPython / SignForPython can find it via
@@ -1083,11 +1121,16 @@ def _generate_cert_macos(config: WorkloadConfig) -> CertificateBundle:
         login_kc = _macos_login_keychain()
         subprocess.run(
             [
-                "security", "import", str(workload_cert_path),
-                "-k", login_kc,
-                "-T", "/usr/bin/security",
+                "security",
+                "import",
+                str(workload_cert_path),
+                "-k",
+                login_kc,
+                "-T",
+                "/usr/bin/security",
             ],
-            capture_output=True, text=True,  # Don't check — may warn "already exists"
+            capture_output=True,
+            text=True,  # Don't check — may warn "already exists"
         )
         logger.info("    Cert also imported into login keychain for ECP.")
 
@@ -1120,15 +1163,11 @@ def _generate_cert_macos(config: WorkloadConfig) -> CertificateBundle:
 def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
     """Generates a TPM 2.0-backed certificate via PKCS#11 toolchain (Ubuntu 24+)."""
     # Pre-validate required commands.
-    _require_command("tpm2_ptool", package="tpm2-pkcs11-tools",
-        install_hint="sudo apt install tpm2-pkcs11-tools")
-    _require_command("p11tool", package="gnutls-bin",
-        install_hint="sudo apt install gnutls-bin")
-    _require_command("pkcs11-tool", package="opensc",
-        install_hint="sudo apt install opensc")
+    _require_command("tpm2_ptool", package="tpm2-pkcs11-tools", install_hint="sudo apt install tpm2-pkcs11-tools")
+    _require_command("p11tool", package="gnutls-bin", install_hint="sudo apt install gnutls-bin")
+    _require_command("pkcs11-tool", package="opensc", install_hint="sudo apt install opensc")
     # Also need certtool from gnutls-bin for CSR generation.
-    _require_command("certtool", package="gnutls-bin",
-        install_hint="sudo apt install gnutls-bin")
+    _require_command("certtool", package="gnutls-bin", install_hint="sudo apt install gnutls-bin")
 
     # Check TPM availability (unless using software keys).
     if not config.soft_key:
@@ -1141,35 +1180,47 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
     try:
         # 1. Initialize TPM PKCS#11 token and generate hardware-backed key
         init_result = subprocess.run(
-            ["tpm2_ptool", "init"], check=True, capture_output=True, text=True,
+            ["tpm2_ptool", "init"],
+            check=True,
+            capture_output=True,
+            text=True,
         )
         logger.debug("    tpm2_ptool init: %s", init_result.stdout.strip())
 
         # Remove existing token if present (reuse flow).
         subprocess.run(
             ["tpm2_ptool", "rmtoken", "--label=bunker-wif"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )  # Ignore errors — token may not exist yet.
 
         token_result = subprocess.run(
             [
-                "tpm2_ptool", "addtoken", "--pid=1",
+                "tpm2_ptool",
+                "addtoken",
+                "--pid=1",
                 f"--sopin={config.linux_tpm_pin}",
                 f"--userpin={config.linux_tpm_pin}",
                 "--label=bunker-wif",
             ],
-            check=True, capture_output=True, text=True,
+            check=True,
+            capture_output=True,
+            text=True,
         )
         logger.debug("    tpm2_ptool addtoken: %s", token_result.stdout.strip())
 
         key_result = subprocess.run(
             [
-                "tpm2_ptool", "addkey", f"--algorithm={config.key_algo_config['linux_tpm2']}",
+                "tpm2_ptool",
+                "addkey",
+                f"--algorithm={config.key_algo_config['linux_tpm2']}",
                 "--label=bunker-wif",
                 f"--key-label={config.workload_cn}",
                 f"--userpin={config.linux_tpm_pin}",
             ],
-            check=True, capture_output=True, text=True,
+            check=True,
+            capture_output=True,
+            text=True,
         )
         logger.debug("    tpm2_ptool addkey: %s", key_result.stdout.strip())
 
@@ -1177,7 +1228,9 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
         try:
             p11_result = subprocess.run(
                 ["p11tool", "--list-tokens"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             logger.debug("    p11tool --list-tokens:\n%s", p11_result.stdout)
             if "bunker-wif" not in p11_result.stdout:
@@ -1185,10 +1238,10 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
                 # Try listing via pkcs11-tool as fallback diagnostic
                 try:
                     pkcs11_result = subprocess.run(
-                        ["pkcs11-tool", "--module",
-                         "/usr/lib/x86_64-linux-gnu/pkcs11/libtpm2_pkcs11.so",
-                         "-T"],
-                        capture_output=True, text=True, timeout=10,
+                        ["pkcs11-tool", "--module", "/usr/lib/x86_64-linux-gnu/pkcs11/libtpm2_pkcs11.so", "-T"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
                     )
                     logger.debug("    pkcs11-tool -T:\n%s", pkcs11_result.stdout)
                 except Exception:
@@ -1197,11 +1250,7 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
             logger.debug("    p11tool check failed: %s", p11_err)
 
         # 2. Generate a temporary self-signed cert to extract the public key
-        cert_cfg = (
-            f'cn = "{config.workload_cn}"\n'
-            f"expiration_days = 365\n"
-            f"tls_www_client\n"
-        )
+        cert_cfg = f'cn = "{config.workload_cn}"\nexpiration_days = 365\ntls_www_client\n'
         write_secure_file("cert.cfg", cert_cfg)
 
         # Set GNUTLS_PIN so certtool can access the token without
@@ -1209,17 +1258,21 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
         os.environ["GNUTLS_PIN"] = config.linux_tpm_pin
 
         pkcs11_uri = (
-            f"pkcs11:token=bunker-wif;object={config.workload_cn};"
-            f"type=private;pin-value={config.linux_tpm_pin}"
+            f"pkcs11:token=bunker-wif;object={config.workload_cn};type=private;pin-value={config.linux_tpm_pin}"
         )
         subprocess.run(
             [
-                "certtool", "--generate-self-signed",
-                "--load-privkey", pkcs11_uri,
-                "--template", "cert.cfg",
-                "--outfile", "bunker-workload-selfsigned.pem",
+                "certtool",
+                "--generate-self-signed",
+                "--load-privkey",
+                pkcs11_uri,
+                "--template",
+                "cert.cfg",
+                "--outfile",
+                "bunker-workload-selfsigned.pem",
             ],
-            check=True, capture_output=True,
+            check=True,
+            capture_output=True,
         )
 
         se_pem = Path("bunker-workload-selfsigned.pem").read_text().strip()
@@ -1237,25 +1290,23 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
             if "CKA_ID" in line and key_id is None:
                 key_id = line.split("'")[1] if "'" in line else line.split()[-1]
         if not key_id:
-            raise RuntimeError(
-                "Could not extract CKA_ID from tpm2_ptool addkey output: "
-                + key_result.stdout
-            )
+            raise RuntimeError("Could not extract CKA_ID from tpm2_ptool addkey output: " + key_result.stdout)
         logger.debug("    Using CKA_ID: %s", key_id)
 
         subprocess.run(
             [
-                "tpm2_ptool", "addcert",
+                "tpm2_ptool",
+                "addcert",
                 "--label=bunker-wif",
                 f"--key-id={key_id}",
                 "bunker-workload-public.pem",
             ],
             input=config.linux_tpm_pin + "\n",
-            check=True, capture_output=True, text=True,
+            check=True,
+            capture_output=True,
+            text=True,
         )
-        logger.info(
-            "    CA-signed workload cert imported into TPM PKCS#11 store."
-        )
+        logger.info("    CA-signed workload cert imported into TPM PKCS#11 store.")
 
         return bundle
 
@@ -1309,6 +1360,7 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
             "    sudo apt install tpm2-pkcs11-tools gnutls-bin opensc"
         ) from e
 
+
 # --- ECP Binary Resolution ---
 
 
@@ -1335,8 +1387,8 @@ def _find_ecp_binaries() -> tuple[Path, Path, Path]:
 
     # Search locations in priority order.
     search_dirs = [
-        binary_dir / "ecp",       # Bundled alongside binary
-        get_default_ecp_dir(),     # Platform default
+        binary_dir / "ecp",  # Bundled alongside binary
+        get_default_ecp_dir(),  # Platform default
     ]
 
     for ecp_dir in search_dirs:
@@ -1388,9 +1440,7 @@ def generate_os_keystore_cert(config: WorkloadConfig) -> CertificateBundle:
       4. Installs the CA-signed cert back into the OS keystore
       5. Returns the CA cert PEM (trust anchor) + CA CN (for ECP config)
     """
-    logger.info(
-        "Instructing OS to generate non-exportable hardware-backed certificate..."
-    )
+    logger.info("Instructing OS to generate non-exportable hardware-backed certificate...")
     for platform_prefix, generator in _KEYSTORE_GENERATORS.items():
         if sys.platform.startswith(platform_prefix):
             return generator(config)
@@ -1406,24 +1456,29 @@ def main() -> None:
     parser.add_argument("--debug", action="store_true")
     project_group = parser.add_mutually_exclusive_group()
     project_group.add_argument(
-        "--use-project", metavar="PROJECT_ID",
+        "--use-project",
+        metavar="PROJECT_ID",
         help="Reuse an existing GCP project (skip creation & API enablement)",
     )
     project_group.add_argument(
-        "--create-project", metavar="PROJECT_ID",
+        "--create-project",
+        metavar="PROJECT_ID",
         help="Create a new GCP project with this ID",
     )
     sa_group = parser.add_mutually_exclusive_group()
     sa_group.add_argument(
-        "--use-service-account", metavar="SA_EMAIL",
+        "--use-service-account",
+        metavar="SA_EMAIL",
         help="Reuse an existing service account email (skip SA creation)",
     )
     sa_group.add_argument(
-        "--create-service-account", metavar="SA_NAME",
+        "--create-service-account",
+        metavar="SA_NAME",
         help="Create service account with this name",
     )
     sa_group.add_argument(
-        "--no-service-account", action="store_true",
+        "--no-service-account",
+        action="store_true",
         help=(
             "Skip service account creation — WIF credentials authenticate "
             "directly without SA impersonation.  IAM roles must be granted "
@@ -1432,17 +1487,21 @@ def main() -> None:
     )
     pool_group = parser.add_mutually_exclusive_group()
     pool_group.add_argument(
-        "--use-pool", metavar="POOL_ID",
+        "--use-pool",
+        metavar="POOL_ID",
         help="Reuse an existing WIF pool ID (skip pool creation)",
     )
     pool_group.add_argument(
-        "--create-pool", metavar="POOL_ID",
+        "--create-pool",
+        metavar="POOL_ID",
         help="Create WIF pool with this ID",
     )
     algo_choices = list(_KEY_ALGORITHMS.keys())
     algo_help_lines = [f"{k}: {v['desc']}" for k, v in _KEY_ALGORITHMS.items()]
     parser.add_argument(
-        "--key-algorithm", choices=algo_choices, default="es256",
+        "--key-algorithm",
+        choices=algo_choices,
+        default="es256",
         metavar="ALGO",
         help=(
             "Key algorithm for the hardware-backed certificate. "
@@ -1451,7 +1510,8 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--client-secrets-file", metavar="FILE",
+        "--client-secrets-file",
+        metavar="FILE",
         help=(
             "Path to a Google OAuth client_secrets.json file "
             "(Desktop app type).  Create one at: "
@@ -1459,14 +1519,15 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--soft-key", action="store_true",
+        "--soft-key",
+        action="store_true",
         help=(
-            "Use software keys instead of hardware-backed keys (for CI "
-            "testing without a TPM).  NOT for production use."
+            "Use software keys instead of hardware-backed keys (for CI testing without a TPM).  NOT for production use."
         ),
     )
     parser.add_argument(
-        "--use-adc", action="store_true",
+        "--use-adc",
+        action="store_true",
         help=(
             "Use Application Default Credentials instead of browser-based "
             "OAuth.  For CI/CD environments where "
@@ -1475,7 +1536,8 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--folder", metavar="FOLDER_ID",
+        "--folder",
+        metavar="FOLDER_ID",
         help=(
             "GCP folder ID to create the project in.  "
             "Only used when creating a new project (e.g. with --create-project)."
@@ -1494,8 +1556,6 @@ def main() -> None:
         handlers=[handler],
     )
 
-
-
     config = WorkloadConfig()
     # Override config from CLI flags
     if args.use_project:
@@ -1512,13 +1572,10 @@ def main() -> None:
     if args.key_algorithm:
         algo_info = _KEY_ALGORITHMS[args.key_algorithm]
         # Validate algorithm is supported on this platform.
-        platform_ok = any(
-            sys.platform.startswith(p) for p in algo_info["platforms"]
-        )
+        platform_ok = any(sys.platform.startswith(p) for p in algo_info["platforms"])
         if not platform_ok:
             supported = [
-                k for k, v in _KEY_ALGORITHMS.items()
-                if any(sys.platform.startswith(p) for p in v["platforms"])
+                k for k, v in _KEY_ALGORITHMS.items() if any(sys.platform.startswith(p) for p in v["platforms"])
             ]
             parser.error(
                 f"Algorithm '{args.key_algorithm}' is not supported on "
@@ -1538,7 +1595,8 @@ def main() -> None:
         if args.use_project:
             logger.info("=== 1) Using existing project: %s ===", config.project_id)
             project_number = client.api_call(
-                "GET", f"https://{crm_base}/v1/projects/{config.project_id}",
+                "GET",
+                f"https://{crm_base}/v1/projects/{config.project_id}",
             )["projectNumber"]
             logger.info("    Project number: %s", project_number)
         else:
@@ -1560,7 +1618,8 @@ def main() -> None:
             )
             client.wait_for_lro(crm_base, op["name"])
             project_number = client.api_call(
-                "GET", f"https://{crm_base}/v1/projects/{config.project_id}",
+                "GET",
+                f"https://{crm_base}/v1/projects/{config.project_id}",
             )["projectNumber"]
 
             # --- Step 2: Enable APIs ---
@@ -1592,12 +1651,9 @@ def main() -> None:
         logger.info("=== 4) Initializing SA & WIF Infrastructure ===")
 
         pool_res_url = (
-            f"https://{iam_base}/v1/projects/{project_number}"
-            f"/locations/global/workloadIdentityPools/{config.pool_id}"
+            f"https://{iam_base}/v1/projects/{project_number}/locations/global/workloadIdentityPools/{config.pool_id}"
         )
-        provider_res_url = (
-            f"{pool_res_url}/providers/{config.provider_id}"
-        )
+        provider_res_url = f"{pool_res_url}/providers/{config.provider_id}"
 
         def create_sa_task() -> str:
             logger.info("[Thread] Creating Service Account...")
@@ -1642,16 +1698,15 @@ def main() -> None:
             if reuse_pool:
                 try:
                     provs = client.api_call(
-                        "GET", f"{pool_res_url}/providers",
+                        "GET",
+                        f"{pool_res_url}/providers",
                     ).get("workloadIdentityPoolProviders", [])
                     for p in provs:
                         pname = p["name"].split("/")[-1]
-                        if pname.startswith("bunker-x509-prov-") and \
-                           pname != config.provider_id:
+                        if pname.startswith("bunker-x509-prov-") and pname != config.provider_id:
                             logger.info("    Deleting stale provider: %s", pname)
                             try:
-                                del_op = client.api_call("DELETE",
-                                    f"{pool_res_url}/providers/{pname}")
+                                del_op = client.api_call("DELETE", f"{pool_res_url}/providers/{pname}")
                                 client.wait_for_lro(iam_base, del_op["name"])
                             except Exception:
                                 pass
@@ -1663,9 +1718,7 @@ def main() -> None:
             # via SHA-256 fingerprint.  The fingerprint covers the entire
             # DER-encoded cert (subject, key, serial, etc.) so even a
             # compromised CA key cannot produce a second accepted cert.
-            cert_pin_condition = (
-                f'assertion.sha256Fingerprint == "{cert_bundle.sha256_fingerprint}"'
-            )
+            cert_pin_condition = f'assertion.sha256Fingerprint == "{cert_bundle.sha256_fingerprint}"'
             logger.info("    Cert pin condition: %s", cert_pin_condition)
             provider_payload = {
                 "displayName": "WIF Bunker X.509 Provider",
@@ -1683,12 +1736,10 @@ def main() -> None:
             if reuse_pool:
                 logger.info("[Thread] Reusing WIF pool: %s", config.pool_id)
 
-            logger.info("[Thread] Creating WIF X.509 Provider: %s",
-                        config.provider_id)
+            logger.info("[Thread] Creating WIF X.509 Provider: %s", config.provider_id)
             prov_op = client.api_call(
                 "POST",
-                f"{pool_res_url}/providers"
-                f"?workloadIdentityPoolProviderId={config.provider_id}",
+                f"{pool_res_url}/providers?workloadIdentityPoolProviderId={config.provider_id}",
                 provider_payload,
             )
             client.wait_for_lro(iam_base, prov_op["name"])
@@ -1719,12 +1770,10 @@ def main() -> None:
 
         if use_sa:
             # SA-level binding: allow WIF principal to impersonate the SA.
-            sa_iam_url = (
-                f"https://{iam_base}/v1/projects/{config.project_id}"
-                f"/serviceAccounts/{sa_email}:setIamPolicy"
-            )
+            sa_iam_url = f"https://{iam_base}/v1/projects/{config.project_id}/serviceAccounts/{sa_email}:setIamPolicy"
             sa_policy = client.api_call(
-                "POST", sa_iam_url.replace(":setIamPolicy", ":getIamPolicy"),
+                "POST",
+                sa_iam_url.replace(":setIamPolicy", ":getIamPolicy"),
             )
             sa_policy.setdefault("bindings", []).append(
                 {"role": "roles/iam.workloadIdentityUser", "members": [wif_principal]},
@@ -1733,11 +1782,10 @@ def main() -> None:
 
         # Project-level binding: grant to SA (impersonation mode) or
         # directly to the WIF principal (no-SA mode).
-        proj_iam_url = (
-            f"https://{crm_base}/v1/projects/{config.project_id}:setIamPolicy"
-        )
+        proj_iam_url = f"https://{crm_base}/v1/projects/{config.project_id}:setIamPolicy"
         proj_policy = client.api_call(
-            "POST", proj_iam_url.replace(":setIamPolicy", ":getIamPolicy"),
+            "POST",
+            proj_iam_url.replace(":setIamPolicy", ":getIamPolicy"),
         )
         if use_sa:
             proj_member = f"serviceAccount:{sa_email}"
@@ -1756,14 +1804,13 @@ def main() -> None:
         except FileNotFoundError as ecp_err:
             github_os, arch, _, _ = get_ecp_platform_info()
             logger.warning(
-                "    ECP binaries not available for %s/%s — "
-                "skipping ECP config and auth demo (steps 6-7).",
-                github_os, arch,
+                "    ECP binaries not available for %s/%s — skipping ECP config and auth demo (steps 6-7).",
+                github_os,
+                arch,
             )
             logger.warning("    %s", ecp_err)
             logger.info("=== Steps 1-5 completed successfully. ===")
-            logger.info("WIF Bunker setup is complete. ECP auth demo "
-                        "requires a platform with ECP support.")
+            logger.info("WIF Bunker setup is complete. ECP auth demo requires a platform with ECP support.")
             return
 
         # Build ECP certificate_config.json — the format google-auth's
@@ -1799,19 +1846,17 @@ def main() -> None:
                     pkcs11_module = candidate
                     break
             if not pkcs11_module:
-                raise FileNotFoundError(
-                    "Could not find libtpm2_pkcs11.so. "
-                    "Install libtpm2-pkcs11-1."
-                )
+                raise FileNotFoundError("Could not find libtpm2_pkcs11.so. Install libtpm2-pkcs11-1.")
 
             # Discover the PKCS#11 slot ID for our token.
             # ECP requires a numeric slot — doesn't support token_label.
             slot_id = None
             try:
                 slot_result = subprocess.run(
-                    ["pkcs11-tool", "--module", pkcs11_module,
-                     "--list-token-slots"],
-                    capture_output=True, text=True, timeout=10,
+                    ["pkcs11-tool", "--module", pkcs11_module, "--list-token-slots"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
                 )
                 logger.debug("    pkcs11-tool slots:\n%s", slot_result.stdout)
                 # Parse output like:
@@ -1821,9 +1866,7 @@ def main() -> None:
 
                 last_slot_hex = None
                 for line in slot_result.stdout.splitlines():
-                    slot_match = re.search(
-                        r"Slot\s+\d+\s+\(0x([0-9a-fA-F]+)\)", line
-                    )
+                    slot_match = re.search(r"Slot\s+\d+\s+\(0x([0-9a-fA-F]+)\)", line)
                     if slot_match:
                         last_slot_hex = slot_match.group(1)
                     if "bunker-wif" in line and last_slot_hex:
@@ -1835,8 +1878,7 @@ def main() -> None:
             # Fallback: try slot 1 (slot 0 is typically p11-kit trust)
             if slot_id is None:
                 slot_id = "1"
-                logger.warning("    Could not discover PKCS#11 slot ID, "
-                               "defaulting to slot %s", slot_id)
+                logger.warning("    Could not discover PKCS#11 slot ID, defaulting to slot %s", slot_id)
 
             logger.info("    Using PKCS#11 slot: 0x%s", slot_id)
 
@@ -1857,8 +1899,6 @@ def main() -> None:
         logger.info("    Workload cert PEM written: %s", workload_cert_path)
         logger.info("    Trust chain PEM written:   %s", trust_chain_path)
 
-
-
         # The "workload" section provides cert_path only (no key_path)
         # because the private key is in the Secure Enclave / TPM.
         # - cert_path: google-auth reads this for the STS subject token
@@ -1877,7 +1917,8 @@ def main() -> None:
         }
         cert_config_path = Path.cwd() / "certificate_config.json"
         write_secure_file(
-            cert_config_path, json.dumps(certificate_config, indent=2),
+            cert_config_path,
+            json.dumps(certificate_config, indent=2),
         )
         logger.info("    ECP certificate_config.json written: %s", cert_config_path)
 
@@ -1901,8 +1942,7 @@ def main() -> None:
         }
         if use_sa:
             adc_config["service_account_impersonation_url"] = (
-                f"https://iamcredentials.googleapis.com/v1/projects/-"
-                f"/serviceAccounts/{sa_email}:generateAccessToken"
+                f"https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/{sa_email}:generateAccessToken"
             )
         adc_path = Path.cwd() / "adc.json"
         write_secure_file(adc_path, json.dumps(adc_config, indent=2))
@@ -1958,10 +1998,10 @@ def main() -> None:
                     _bin_data = _ecp_bin.read_bytes()
                     log.warning("    ECP binary: %s (%d KB)", _ecp_bin, len(_bin_data) // 1024)
                     if sys.platform == "darwin":
-                        log.warning("    Contains SecCertificateCopyData (patched): %s",
-                                    b"SecCertificateCopyData" in _bin_data)
-                        log.warning("    Contains SecItemExport (unpatched): %s",
-                                    b"SecItemExport" in _bin_data)
+                        log.warning(
+                            "    Contains SecCertificateCopyData (patched): %s", b"SecCertificateCopyData" in _bin_data
+                        )
+                        log.warning("    Contains SecItemExport (unpatched): %s", b"SecItemExport" in _bin_data)
                 else:
                     log.warning("    ECP binary NOT FOUND: %s", _ecp_bin)
             except Exception as _e:
@@ -1972,10 +2012,11 @@ def main() -> None:
                 _ecp_bin_path = str(Path(json.loads(_cfg_text)["libs"]["ecp"]))
                 _result = subprocess.run(
                     [_ecp_bin_path, str(config_path)],
-                    capture_output=True, text=True, timeout=10,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
                 )
-                log.warning("    ECP signer stderr: %s",
-                            _result.stderr[:500] if _result.stderr else "(empty)")
+                log.warning("    ECP signer stderr: %s", _result.stderr[:500] if _result.stderr else "(empty)")
             except subprocess.TimeoutExpired:
                 log.warning("    ECP signer listening for RPC (OK)")
             except Exception as _e:
@@ -1986,10 +2027,11 @@ def main() -> None:
                 try:
                     _id_result = subprocess.run(
                         ["security", "find-identity", "-v", "-p", "ssl-client"],
-                        capture_output=True, text=True, timeout=5,
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
                     )
-                    log.warning("    Keychain SSL-client identities:\n%s",
-                                _id_result.stdout)
+                    log.warning("    Keychain SSL-client identities:\n%s", _id_result.stdout)
                 except Exception as _e:
                     log.warning("    find-identity error: %s", _e)
 
@@ -2006,23 +2048,25 @@ def main() -> None:
 
             # Pre-load ECP DLLs on Windows.
             if sys.platform == "win32":
-
                 for lib in (ecp_client_lib, tls_offload_lib):
                     try:
                         ctypes.WinDLL(str(lib))
                     except OSError:
                         pass
 
-
             _ecp_lib = ctypes.CDLL(str(ecp_client_lib))
             _ecp_lib.GetCertPemForPython.argtypes = [
-                ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_char_p,
+                ctypes.c_int,
             ]
             _ecp_lib.GetCertPemForPython.restype = ctypes.c_int
 
             # First call with buf=NULL to get required size.
             _cert_len = _ecp_lib.GetCertPemForPython(
-                str(cert_config_path).encode(), None, 0,
+                str(cert_config_path).encode(),
+                None,
+                0,
             )
             if _cert_len <= 0:
                 logger.error("    FAIL: ECP returned cert_len=%d", _cert_len)
@@ -2033,7 +2077,9 @@ def main() -> None:
             # Second call to retrieve the actual PEM.
             _cert_buf = ctypes.create_string_buffer(_cert_len + 1)
             _ecp_lib.GetCertPemForPython(
-                str(cert_config_path).encode(), _cert_buf, _cert_len + 1,
+                str(cert_config_path).encode(),
+                _cert_buf,
+                _cert_len + 1,
             )
             _cert_pem_bytes = _cert_buf.value
             _cert_pem = _cert_pem_bytes.decode("utf-8", errors="replace")
@@ -2041,14 +2087,13 @@ def main() -> None:
 
             # Parse and show cert details.
             try:
-
                 _parsed = cx509.load_pem_x509_certificate(_cert_pem_bytes)
                 _pub_key = _parsed.public_key()
                 _key_type = type(_pub_key).__name__
                 logger.info("    Cert subject:   %s", _parsed.subject)
                 logger.info("    Cert issuer:    %s", _parsed.issuer)
                 logger.info("    Key algorithm:  %s", _key_type)
-                logger.info("    Cert serial:    %s", format(_parsed.serial_number, 'X'))
+                logger.info("    Cert serial:    %s", format(_parsed.serial_number, "X"))
             except Exception as _parse_err:
                 logger.warning("    Could not parse cert: %s", _parse_err)
 
@@ -2059,10 +2104,11 @@ def main() -> None:
                     try:
                         _ldd = subprocess.run(
                             ["ldd", str(tls_offload_lib)],
-                            capture_output=True, text=True, timeout=5,
+                            capture_output=True,
+                            text=True,
+                            timeout=5,
                         )
-                        logger.debug("    ldd %s:\n%s",
-                                     tls_offload_lib.name, _ldd.stdout)
+                        logger.debug("    ldd %s:\n%s", tls_offload_lib.name, _ldd.stdout)
                     except Exception:
                         pass
 
@@ -2078,8 +2124,6 @@ def main() -> None:
         # OpenSSL. The actual handshake + signing is tested in 7c.
 
         try:
-
-
             _offload = ctypes.CDLL(str(tls_offload_lib))
             logger.info("    TLS offload lib loaded: %s", tls_offload_lib.name)
 
@@ -2087,18 +2131,19 @@ def main() -> None:
                 try:
                     _ldd = subprocess.run(
                         ["ldd", str(tls_offload_lib)],
-                        capture_output=True, text=True, timeout=5,
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
                     )
-                    logger.debug("    ldd %s:\n%s",
-                                 tls_offload_lib.name, _ldd.stdout)
+                    logger.debug("    ldd %s:\n%s", tls_offload_lib.name, _ldd.stdout)
                 except Exception:
                     pass
                 # sha256 so we can compare with gcloud's version
                 try:
                     import hashlib
+
                     _sha = hashlib.sha256(tls_offload_lib.read_bytes()).hexdigest()
-                    logger.debug("    sha256(%s) = %s",
-                                 tls_offload_lib.name, _sha)
+                    logger.debug("    sha256(%s) = %s", tls_offload_lib.name, _sha)
                     logger.debug("    full path: %s", tls_offload_lib)
                 except Exception:
                     pass
@@ -2106,9 +2151,11 @@ def main() -> None:
                 try:
                     _readelf = subprocess.run(
                         ["readelf", "-d", str(tls_offload_lib)],
-                        capture_output=True, text=True, timeout=5,
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
                     )
-                    _needed = [l for l in _readelf.stdout.splitlines() if "NEEDED" in l]
+                    _needed = [line for line in _readelf.stdout.splitlines() if "NEEDED" in line]
                     logger.debug("    NEEDED: %s", _needed)
                 except Exception:
                     pass
@@ -2140,25 +2187,27 @@ def main() -> None:
 
             # Create an SSL context and extract the raw SSL_CTX*.
             _ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-            _ssl_ctx_ptr = ctypes.c_void_p.from_address(
-                id(_ssl_ctx) + ctypes.sizeof(ctypes.c_void_p) * 2
-            )
+            _ssl_ctx_ptr = ctypes.c_void_p.from_address(id(_ssl_ctx) + ctypes.sizeof(ctypes.c_void_p) * 2)
 
             _rc = _offload.ConfigureSslContext(
-                _c_sign, _cert_pem_bytes, _ssl_ctx_ptr,
+                _c_sign,
+                _cert_pem_bytes,
+                _ssl_ctx_ptr,
             )
 
             if _rc == 1:
                 logger.info("    PASS: ConfigureSslContext succeeded (rc=1)")
-                logger.info("    The TLS offload library is compatible with "
-                            "this system's OpenSSL and our cert.")
+                logger.info("    The TLS offload library is compatible with this system's OpenSSL and our cert.")
             else:
                 logger.error("    FAIL: ConfigureSslContext returned %d", _rc)
-                logger.error("    The TLS offload library could not configure "
-                             "the SSL context with the ECP-provided cert.")
-                logger.error("    This indicates an incompatibility between "
-                             "the offload library and this system's OpenSSL, "
-                             "or an issue with the cert format/algorithm.")
+                logger.error(
+                    "    The TLS offload library could not configure the SSL context with the ECP-provided cert."
+                )
+                logger.error(
+                    "    This indicates an incompatibility between "
+                    "the offload library and this system's OpenSSL, "
+                    "or an issue with the cert format/algorithm."
+                )
                 sys.exit(1)
 
         except Exception:
@@ -2168,8 +2217,6 @@ def main() -> None:
         logger.info("=== 7c) Full ADC Auth Flow ===")
 
         try:
-
-
             mtls_session = requests.Session()
             mtls_adapter = _MutualTlsOffloadAdapter(str(cert_config_path))
             mtls_session.mount("https://", mtls_adapter)
@@ -2178,8 +2225,6 @@ def main() -> None:
             # Allow IAM bindings to propagate before attempting auth.
             logger.info("    Waiting 15s for IAM propagation...")
             time.sleep(15)
-
-            from ssl import SSLError
 
             @with_retries(
                 max_attempts=10,
@@ -2202,9 +2247,7 @@ def main() -> None:
                 return target_api_res.json()
 
             proj_result = _verify_adc()
-            logger.info(
-                f"{SYM_OK} API Call Successful! The OS signed the handshake via ECP."
-            )
+            logger.info(f"{SYM_OK} API Call Successful! The OS signed the handshake via ECP.")
             if use_sa:
                 logger.info("   Authenticated SA: %s", sa_email)
             logger.info("   Target Project:   %s", proj_result.get("name"))
@@ -2222,7 +2265,9 @@ if __name__ == "__main__":
         body = e.response.text if e.response is not None else str(e)
         logger.error(
             "%s GCP API call failed (HTTP %s).\n%s",
-            SYM_FAIL, status, body,
+            SYM_FAIL,
+            status,
+            body,
         )
         sys.exit(1)
     except RuntimeError as e:
