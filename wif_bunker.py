@@ -1134,10 +1134,72 @@ def _get_ecp_gcloud_component_info() -> tuple[str, str]:
         return f"enterprise-certificate-proxy-linux-{arch}", arch
 
 
-_GCLOUD_COMPONENTS_URL = (
+# ECP versions known to break SSL_CTX_set1_sigalgs_list on OpenSSL 3.
+# These statically link a BoringSSL that's incompatible with OpenSSL 3's
+# SSL_CTX struct layout. When new ECP versions are released and verified
+# working, remove them from this set.
+_ECP_BROKEN_VERSIONS = {"0.3.18"}
+
+_GCLOUD_COMPONENTS_LATEST_URL = (
     "https://dl.google.com/dl/cloudsdk/channels/rapid/components-2.json"
 )
+_GCLOUD_COMPONENTS_VERSIONED_URL = (
+    "https://dl.google.com/dl/cloudsdk/channels/rapid/components-v{}.json"
+)
 _GCLOUD_CDN_BASE = "https://dl.google.com/dl/cloudsdk/channels/rapid/"
+
+
+def _resolve_ecp_manifest() -> dict:
+    """Fetches a gcloud component manifest with a working ECP version.
+
+    Tries the latest manifest first. If the ECP version is known-broken,
+    walks back through recent gcloud SDK versions (decrementing by 2)
+    until a working version is found.
+    """
+    component_id, _ = _get_ecp_gcloud_component_info()
+
+    def _get_ecp_version(manifest: dict) -> str | None:
+        for comp in manifest.get("components", []):
+            if comp.get("id") == component_id:
+                return comp.get("version", {}).get("version_string")
+        return None
+
+    # Try latest manifest first.
+    logger.info("    Fetching gcloud component manifest...")
+    resp = requests.get(_GCLOUD_COMPONENTS_LATEST_URL, timeout=30)
+    resp.raise_for_status()
+    manifest = resp.json()
+    ecp_ver = _get_ecp_version(manifest)
+    gcloud_ver = manifest.get("version", "?")
+
+    if ecp_ver and ecp_ver not in _ECP_BROKEN_VERSIONS:
+        logger.info("    Latest gcloud SDK %s has ECP %s (OK)", gcloud_ver, ecp_ver)
+        return manifest
+
+    logger.warning("    Latest ECP %s is known-broken, searching older gcloud versions...",
+                    ecp_ver)
+
+    # Walk back through recent gcloud SDK versions (even numbers only).
+    base_ver = int(gcloud_ver.split(".")[0]) if gcloud_ver != "?" else 578
+    for major in range(base_ver - 2, base_ver - 20, -2):
+        ver_str = f"{major}.0.0"
+        try:
+            url = _GCLOUD_COMPONENTS_VERSIONED_URL.format(ver_str)
+            r = requests.get(url, timeout=15)
+            if r.status_code != 200:
+                continue
+            m = r.json()
+            v = _get_ecp_version(m)
+            if v and v not in _ECP_BROKEN_VERSIONS:
+                logger.info("    gcloud SDK %s has ECP %s (OK)", ver_str, v)
+                return m
+            logger.debug("    gcloud SDK %s has ECP %s (broken)", ver_str, v)
+        except Exception:
+            continue
+
+    # Give up — use latest and hope for the best.
+    logger.warning("    Could not find a working ECP version, using latest %s", ecp_ver)
+    return manifest
 
 
 def _download_ecp_from_gcloud_components(ecp_dir: Path) -> None:
@@ -1162,10 +1224,7 @@ def _download_ecp_from_gcloud_components(ecp_dir: Path) -> None:
 
     component_id, _ = _get_ecp_gcloud_component_info()
 
-    logger.info("    Fetching gcloud component manifest...")
-    resp = requests.get(_GCLOUD_COMPONENTS_URL, timeout=30)
-    resp.raise_for_status()
-    manifest = resp.json()
+    manifest = _resolve_ecp_manifest()
 
     # Find our platform-specific component.
     component = None
@@ -1242,8 +1301,9 @@ def _ensure_ecp_binaries() -> tuple[Path, Path, Path]:
     """Locates ECP binaries, downloading from gcloud component CDN if needed.
 
     Search order:
-      1. Cached download in persistent install directory
-      2. Download from gcloud component CDN
+      1. gcloud SDK's installed ECP component (in-place)
+      2. Cached download in persistent install directory
+      3. Download from gcloud component CDN
 
     Returns:
         (ecp_binary, ecp_client_lib, tls_offload_lib) paths.
@@ -1259,7 +1319,20 @@ def _ensure_ecp_binaries() -> tuple[Path, Path, Path]:
 
     ecp_bin = client = offload = None
 
-    # 1. Check cached install directory.
+    # 1. Check gcloud SDK (in-place).
+    gcloud_path = shutil.which("gcloud")
+    if gcloud_path:
+        gcloud_sdk_root = Path(gcloud_path).resolve().parent.parent
+        gcloud_ecp_dir = gcloud_sdk_root / "platform" / "enterprise_cert"
+        if gcloud_ecp_dir.is_dir():
+            gcloud_ecp_bin = gcloud_sdk_root / "bin" / ecp_bin_name
+            gcloud_client = gcloud_ecp_dir / libecp_name
+            gcloud_offload = gcloud_ecp_dir / tls_offload_name
+            if gcloud_ecp_bin.exists() and gcloud_client.exists() and gcloud_offload.exists():
+                logger.info("    Using gcloud SDK ECP binaries from %s", gcloud_ecp_dir)
+                ecp_bin, client, offload = gcloud_ecp_bin, gcloud_client, gcloud_offload
+
+    # 2. Check cached install directory.
     if not ecp_bin:
         cached_bin = ecp_install_dir / ecp_bin_name
         cached_client = ecp_install_dir / libecp_name
@@ -1268,7 +1341,7 @@ def _ensure_ecp_binaries() -> tuple[Path, Path, Path]:
             logger.info("    Using cached ECP binaries from %s", ecp_install_dir)
             ecp_bin, client, offload = cached_bin, cached_client, cached_offload
 
-    # 2. Download from gcloud component CDN.
+    # 3. Download from gcloud component CDN.
     if not ecp_bin:
         logger.info("    ECP binaries not found — downloading from gcloud CDN...")
         _download_ecp_from_gcloud_components(ecp_install_dir)

@@ -56,46 +56,19 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
-      # Diagnose: why does libtls_offload.so work from gcloud SDK but not
-      # standalone? Install the component AND compare with CDN download.
-      - name: "Linux: ECP environment diagnostics"
+      # Test: upgrade gcloud to latest and install ECP to verify
+      # whether 0.3.18 is truly broken or if our CDN flattening was.
+      - name: "Linux: Upgrade gcloud + install ECP"
         if: runner.os == 'Linux'
         run: |
-          # Install via gcloud so we can study the working environment
+          gcloud components update --quiet
           gcloud components install enterprise-certificate-proxy --quiet
-
+          echo "gcloud version: $(gcloud version 2>/dev/null | head -1)"
           GCLOUD_ROOT="$(dirname "$(dirname "$(which gcloud)")")"
           ECP_DIR="$GCLOUD_ROOT/platform/enterprise_cert"
-
-          echo "=== gcloud SDK ECP location ==="
-          ls -la "$ECP_DIR/"
-
-          echo "=== ldd on gcloud's libtls_offload.so ==="
-          ldd "$ECP_DIR/libtls_offload.so" || true
-
-          echo "=== sha256 of gcloud's libtls_offload.so ==="
-          sha256sum "$ECP_DIR/libtls_offload.so"
-
-          echo "=== LD_LIBRARY_PATH ==="
-          echo "${LD_LIBRARY_PATH:-<not set>}"
-
-          echo "=== gcloud SDK lib directory ==="
-          ls "$GCLOUD_ROOT/lib/" 2>/dev/null | head -20 || echo "<no lib dir>"
-
-          echo "=== OpenSSL libs in gcloud SDK ==="
-          find "$GCLOUD_ROOT" -name "libssl*" -o -name "libcrypto*" 2>/dev/null || echo "<none>"
-
-          echo "=== System OpenSSL ==="
-          openssl version
-          python3 -c "import ssl; print('Python ssl:', ssl.OPENSSL_VERSION)"
-
-          echo "=== readelf NEEDED entries ==="
-          readelf -d "$ECP_DIR/libtls_offload.so" 2>/dev/null | grep NEEDED || echo "<none>"
-
-          echo "=== nm: SSL_CTX_set1_sigalgs_list symbol ==="
-          nm -D "$ECP_DIR/libtls_offload.so" 2>/dev/null | grep -i sigalgs || echo "<not exported>"
-          nm "$ECP_DIR/libtls_offload.so" 2>/dev/null | grep -i sigalgs | head -5 || echo "<not in symtab>"
-
+          echo "ECP files:"
+          ls -la "$ECP_DIR/" 2>/dev/null || echo "NOT FOUND"
+          sha256sum "$ECP_DIR/libtls_offload.so" 2>/dev/null || true
 
       # ── Setup: Linux Software TPM ──
       - name: "Linux: Setup Software TPM (swtpm)"
@@ -276,8 +249,7 @@ jobs:
             --use-adc \
             --create-project="${{ steps.config.outputs.project_id }}" \
             --folder="${{ secrets.SANDBOX_FOLDER_ID }}" \
-            ${{ matrix.soft_key_flag }} \
-            ${{ runner.os == 'Linux' && '--debug' || '' }}
+            ${{ matrix.soft_key_flag }}
 
       # ── Step 3: WIF Bunker reuse run (detects existing resources) ──
       - name: "WIF Bunker: Reuse existing"
