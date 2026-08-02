@@ -1,7 +1,8 @@
 # win_dialog_accept.ps1 — Background process for CI that auto-clicks
-# Windows certificate "Security Warning" dialogs and captures screenshots.
+# Windows certificate Security Warning dialogs and captures screenshots.
 #
-# Based on the SendKeys pattern from GAM's ssd.mjs:
+# Handles BOTH the import and removal dialogs for Root store operations.
+# Uses the same SendKeys pattern as GAM's ssd.mjs:
 #   https://github.com/GAM-team/GAM/blob/main/src/tools/ssd.mjs
 
 param(
@@ -14,8 +15,6 @@ if (-not $ScreenshotDir) { $ScreenshotDir = $PWD }
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-# Use Win32 API for precise window matching instead of AppActivate
-# which does substring matching and can grab wrong windows (e.g. OOBE).
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -58,10 +57,19 @@ function Take-Screenshot($label) {
     }
 }
 
-function Find-SecurityWarningDialog {
-    # Find a window with EXACT title "Security Warning" that is a dialog
-    # (class #32770). This avoids matching the OOBE or other windows.
+# Certificate root store dialogs are standard #32770 dialogs.
+# Import shows "Security Warning", removal may show a different title.
+# Match any #32770 dialog with known cert-related titles.
+$CertDialogTitles = @(
+    "Security Warning",
+    "Root Certificate Store",
+    "Certificate",
+    "Windows Security"
+)
+
+function Find-CertDialog {
     $found = $null
+    $foundTitle = $null
     $callback = [Win32+EnumWindowsProc] {
         param($hWnd, $lParam)
         if (-not [Win32]::IsWindowVisible($hWnd)) { return $true }
@@ -74,55 +82,84 @@ function Find-SecurityWarningDialog {
         [Win32]::GetClassName($hWnd, $classBuf, 256) | Out-Null
         $class = $classBuf.ToString()
 
-        # The cert root store security warning is a standard dialog (#32770)
-        # with exact title "Security Warning"
-        if ($title -eq "Security Warning" -and $class -eq "#32770") {
+        if ($class -eq "#32770" -and $title -in $CertDialogTitles) {
             Set-Variable -Name found -Value $hWnd -Scope 1
+            Set-Variable -Name foundTitle -Value $title -Scope 1
             return $false  # stop enumerating
         }
         return $true  # continue
     }
     [Win32]::EnumWindows($callback, [IntPtr]::Zero) | Out-Null
-    return $found
+    return @{ hwnd = $found; title = $foundTitle }
 }
 
 Write-Output "Dialog auto-accept started (timeout: ${TimeoutSeconds}s)"
 Write-Output "Screenshots dir: $ScreenshotDir"
-Write-Output "Looking for exact title 'Security Warning' with class '#32770'"
+Write-Output "Watching for #32770 dialogs: $($CertDialogTitles -join ', ')"
 
+function Dump-AllWindows {
+    # List all visible windows with title, class, hwnd for diagnostics
+    $windows = @()
+    $dumpCallback = [Win32+EnumWindowsProc] {
+        param($hWnd, $lParam)
+        if (-not [Win32]::IsWindowVisible($hWnd)) { return $true }
+        $tb = New-Object System.Text.StringBuilder 256
+        [Win32]::GetWindowText($hWnd, $tb, 256) | Out-Null
+        $t = $tb.ToString()
+        if ($t -eq "") { return $true }  # skip untitled windows
+        $cb = New-Object System.Text.StringBuilder 256
+        [Win32]::GetClassName($hWnd, $cb, 256) | Out-Null
+        $c = $cb.ToString()
+        $script:windows += "    hwnd=$hWnd class='$c' title='$t'"
+        return $true
+    }
+    $script:windows = @()
+    [Win32]::EnumWindows($dumpCallback, [IntPtr]::Zero) | Out-Null
+    Write-Output "  === Visible windows ($($script:windows.Count)) ==="
+    foreach ($w in $script:windows) { Write-Output $w }
+    Write-Output "  === end ==="
+}
+
+$wshell = New-Object -ComObject wscript.shell
 $elapsed = 0
 $clickCount = 0
 
 Take-Screenshot "dialog_00_start"
 
 while ($elapsed -lt $TimeoutSeconds) {
-    $hwnd = Find-SecurityWarningDialog
-    if ($hwnd) {
+    $result = Find-CertDialog
+    if ($result.hwnd) {
         $clickCount++
-        Write-Output "Dialog #$clickCount found (hwnd=$hwnd) at ${elapsed}s"
+        Write-Output "Dialog #$clickCount found: '$($result.title)' (hwnd=$($result.hwnd)) at ${elapsed}s"
         Take-Screenshot "dialog_${clickCount}_found"
 
         # Bring the dialog to front and focus it
-        [Win32]::SetForegroundWindow($hwnd) | Out-Null
+        [Win32]::SetForegroundWindow($result.hwnd) | Out-Null
         Start-Sleep -Milliseconds 500
 
-        # Send Tab+Enter to click Yes (Yes is not the default button)
-        $wshell = New-Object -ComObject wscript.shell
+        # Send Tab+Enter to click Yes
         $wshell.SendKeys('{TAB}{ENTER}')
-        Write-Output "  Sent Tab+Enter"
+        Write-Output "  Sent Tab+Enter to '$($result.title)'"
 
         Start-Sleep -Milliseconds 1000
         Take-Screenshot "dialog_${clickCount}_after"
+        Dump-AllWindows
+
+        # Brief pause to let the dialog close before polling again
+        Start-Sleep -Seconds 2
+        $elapsed += 2
     }
 
     Start-Sleep -Seconds 1
     $elapsed++
 
-    # Periodic screenshots every 30s
+    # Periodic screenshots + window dump every 30s
     if ($elapsed % 30 -eq 0) {
         Take-Screenshot "dialog_poll_${elapsed}s"
+        Dump-AllWindows
     }
 }
 
 Take-Screenshot "dialog_final"
+Dump-AllWindows
 Write-Output "Dialog auto-accept finished ($clickCount dialog(s) clicked in ${elapsed}s)"

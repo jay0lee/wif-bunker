@@ -769,25 +769,27 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
             "    CA-signed cert associated with TPM key in CurrentUser store."
         )
 
-        # 6. Remove the ephemeral CA from trusted root store (cleanup).
-        #    Use certutil -delstore which runs silently, unlike PowerShell
-        #    Remove-Item which triggers another Security Warning dialog.
+        # 6. Remove the ephemeral CA from trusted root store.
+        #    On Windows, this triggers a Security Warning dialog
+        #    requiring user confirmation (same as import).
+        logger.info("    Removing ephemeral CA from trusted root store...")
         subprocess.run(
             ["certutil", "-user", "-delstore", "Root", ca_thumbprint],
             capture_output=True, text=True,
         )
-        # Verify removal.
         verify_result = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps_verify_ca],
+            ["powershell", "-NoProfile", "-Command",
+             f"@(Get-ChildItem Cert:\\CurrentUser\\Root | "
+             f"Where-Object Thumbprint -eq '{ca_thumbprint}').Count"],
             capture_output=True, text=True,
         )
         if verify_result.stdout.strip() == "0":
             logger.info("    Ephemeral CA removed from trusted root store.")
         else:
             logger.warning(
-                "    Ephemeral CA was NOT removed — you may want to "
-                "manually remove it from Cert:\\CurrentUser\\Root "
-                "(thumbprint: %s).", ca_thumbprint,
+                "    Ephemeral CA may still be in Cert:\\CurrentUser\\Root "
+                "(thumbprint: %s). Remove it manually if needed.",
+                ca_thumbprint,
             )
 
         return bundle

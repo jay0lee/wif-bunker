@@ -184,18 +184,35 @@ jobs:
 
           echo "Stale cleanup complete."
 
-      # ── Windows ARM64: kill OOBE CloudExperienceHost ──
-      # GHA Windows ARM64 runners show an OOBE "Choose privacy settings"
-      # dialog that steals focus. Kill the host process directly.
-      # (proven pattern from GAM-team/GAM commit 0b1fee6)
-      - name: "Windows ARM64: Kill OOBE"
-        if: runner.os == 'Windows'
+      # ── Windows ARM64: click through OOBE privacy wizard ──
+      # GHA Windows ARM64 runners show a 2-page OOBE privacy dialog.
+      # Can't be killed or minimized — must click through it.
+      # (matches GAM-team/GAM ssd.mjs current production code)
+      - name: "Windows ARM64: Dismiss OOBE"
+        if: runner.os == 'Windows' && runner.arch == 'ARM64'
         shell: pwsh
         run: |
-          taskkill /F /IM CloudExperienceHost.exe /T 2>$null
-          Write-Host "OOBE kill attempted (exit: $LASTEXITCODE)."
+          $wshell = New-Object -ComObject wscript.shell
           Start-Sleep -Seconds 3
-          exit 0
+          # Page 1: Tab past toggles to "Next" button, then Enter
+          for ($i = 0; $i -lt 7; $i++) {
+            $wshell.SendKeys('{TAB}')
+            Start-Sleep -Milliseconds 200
+          }
+          $wshell.SendKeys('{ENTER}')
+          Write-Host "OOBE Page 1: clicked Next"
+          Start-Sleep -Seconds 3
+          # Page 2: Tab past toggles to "Accept" button, then Enter
+          for ($i = 0; $i -lt 7; $i++) {
+            $wshell.SendKeys('{TAB}')
+            Start-Sleep -Milliseconds 200
+          }
+          $wshell.SendKeys('{ENTER}')
+          Write-Host "OOBE Page 2: clicked Accept"
+          Start-Sleep -Seconds 3
+          # Dismiss the Start menu that may appear after OOBE
+          $wshell.SendKeys('{ESC}')
+          Write-Host "OOBE dismissed."
 
       # ── Step 2: WIF Bunker fresh run (creates project, SA, pool, provider) ──
       - name: "WIF Bunker: Fresh setup"
