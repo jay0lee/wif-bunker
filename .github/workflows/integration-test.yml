@@ -220,6 +220,11 @@ jobs:
           $wshell.SendKeys('{ESC}')
           Write-Host "OOBE dismissed."
 
+      # ── Download ECP binaries ──
+      - name: "Download ECP binaries"
+        shell: bash
+        run: python get_ecp.py
+
       # ── Step 2: WIF Bunker fresh run (creates project, SA, pool, provider) ──
       - name: "WIF Bunker: Fresh setup"
         shell: bash

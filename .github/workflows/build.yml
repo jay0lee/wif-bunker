@@ -1,0 +1,116 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform_name: linux
+            arch: x86_64
+            ecp_arch: linux_amd64
+          - os: macos-15
+            platform_name: macos
+            arch: arm64
+            ecp_arch: darwin_arm64
+          - os: windows-2025
+            platform_name: windows
+            arch: x86_64
+            ecp_arch: windows_amd64
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install pyinstaller .
+
+      - name: Run PyInstaller
+        # Run PyInstaller first so it doesn't wipe out the ecp folder if we downloaded it first
+        run: pyinstaller wif-bunker.spec
+
+      - name: Download ECP
+        run: python get_ecp.py --output dist/wif-bunker/ecp
+
+      - name: Smoke Test (Unix)
+        if: matrix.platform_name != 'windows'
+        run: dist/wif-bunker/wif-bunker --help
+
+      - name: Smoke Test (Windows)
+        if: matrix.platform_name == 'windows'
+        run: dist\wif-bunker\wif-bunker.exe --help
+
+      - name: Extract Version
+        id: get_version
+        shell: bash
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION="0.0.0-dev"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Package Linux
+        if: matrix.platform_name == 'linux'
+        run: tar -czf wif-bunker-${{ steps.get_version.outputs.version }}-linux-x86_64.tar.gz -C dist wif-bunker/
+
+      - name: Package macOS
+        if: matrix.platform_name == 'macos'
+        run: tar -czf wif-bunker-${{ steps.get_version.outputs.version }}-macos-arm64.tar.gz -C dist wif-bunker/
+
+      - name: Package Windows (Inno Setup)
+        if: matrix.platform_name == 'windows'
+        run: |
+          # Inno Setup is typically pre-installed on GitHub Actions windows runners in 'C:\Program Files (x86)\Inno Setup 6'
+          # We use iscc to compile the script
+          & "C:\Program Files (x86)\Inno Setup 6\iscc.exe" /DVersion=${{ steps.get_version.outputs.version }} packaging\windows\wif-bunker.iss
+
+      - name: Upload Artifacts (Linux/macOS)
+        if: matrix.platform_name != 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: wif-bunker-${{ matrix.platform_name }}-${{ matrix.arch }}
+          path: wif-bunker-*.tar.gz
+
+      - name: Upload Artifacts (Windows)
+        if: matrix.platform_name == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: wif-bunker-${{ matrix.platform_name }}-${{ matrix.arch }}
+          path: packaging\windows\Output\wif-bunker-*-setup.exe
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create Release and Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/*
+          generate_release_notes: true

@@ -14,6 +14,7 @@ import sys
 import time
 import json
 import shutil
+import tempfile
 import argparse
 import logging
 import platform
@@ -740,8 +741,8 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
     _require_command("powershell",
         install_hint="Built-in Windows command — ensure PowerShell is on PATH")
 
-    work_dir = Path.cwd() / f"ctk_work_{config.suffix}"
-    work_dir.mkdir(parents=True, exist_ok=True)
+    _tmpdir = tempfile.TemporaryDirectory(prefix="bunker_")
+    work_dir = Path(_tmpdir.name)
 
     try:
         # 0. Clean up stale bunker-workload certs from previous runs.
@@ -916,6 +917,8 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
             f"  stdout: {(e.stdout or '')[:300]}\n"
             f"  stderr: {stderr[:500]}"
         ) from e
+    finally:
+        _tmpdir.cleanup()
 
 
 def _macos_login_keychain() -> str:
@@ -949,8 +952,8 @@ def _generate_cert_macos(config: WorkloadConfig) -> CertificateBundle:
                 f"Current version: {mac_ver_str}"
             )
 
-    work_dir = Path.cwd() / f"ctk_work_{config.suffix}"
-    work_dir.mkdir(parents=True, exist_ok=True)
+    _tmpdir = tempfile.TemporaryDirectory(prefix="bunker_")
+    work_dir = Path(_tmpdir.name)
 
     try:
         # 0. Clean up stale CTK identities and login keychain certs
@@ -1097,8 +1100,7 @@ def _generate_cert_macos(config: WorkloadConfig) -> CertificateBundle:
             f"  stderr: {stderr[:500]}"
         ) from e
     finally:
-        if work_dir.exists():
-            shutil.rmtree(work_dir, ignore_errors=True)
+        _tmpdir.cleanup()
 
 
 def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
@@ -1295,224 +1297,66 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
 
 # --- ECP Binary Resolution ---
 
-
-def _get_ecp_platform_info() -> tuple[str, str, str, str]:
-    """Returns (github_os, arch, lib_ext, archive_ext) for the current platform."""
-    machine = platform.machine().lower()
-    if machine in ("x86_64", "amd64"):
-        arch = "amd64"
-    elif machine in ("arm64", "aarch64"):
-        arch = "arm64"
-    else:
-        arch = machine
-
-    if sys.platform == "win32":
-        return "windows", arch, ".dll", ".zip"
-    elif sys.platform == "darwin":
-        return "darwin", arch, ".dylib", ".tar.gz"
-    else:
-        return "linux", arch, ".so", ".tar.gz"
+from get_ecp import get_ecp_platform_info, get_ecp_binary_names, get_default_ecp_dir
 
 
-_ECP_GITHUB_REPO = "jay0lee/enterprise-certificate-proxy"
-
-
-def _download_ecp_from_github_release(ecp_dir: Path) -> None:
-    """Downloads ECP binaries from the forked GitHub release."""
-    import io
-    import tarfile
-    import zipfile
-
-    github_os, arch, lib_ext, archive_ext = _get_ecp_platform_info()
-
-    # Use GITHUB_TOKEN if available (CI runners share IPs and hit the
-    # 60 req/hr unauthenticated rate limit quickly).
-    gh_headers = {}
-    gh_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
-    if gh_token:
-        gh_headers["Authorization"] = f"token {gh_token}"
-
-    # Fetch latest release from the fork.
-    api_url = f"https://api.github.com/repos/{_ECP_GITHUB_REPO}/releases/latest"
-    logger.info("    Fetching ECP release from %s...", _ECP_GITHUB_REPO)
-    resp = requests.get(api_url, headers=gh_headers, timeout=30)
-    resp.raise_for_status()
-    release = resp.json()
-    tag = release["tag_name"]
-
-    # Find the two assets we need:
-    #   ecp_*_{os}_{arch}.tar.gz           — ecp binary + libecp
-    #   ecp_*_{os}_{arch}_tls_offload.*    — libtls_offload
-    assets = release.get("assets", [])
-    target_os_arch = f"{github_os}_{arch}"
-
-    signer_asset = None
-    offload_asset = None
-    for a in assets:
-        name = a["name"]
-        if target_os_arch not in name:
-            continue
-        if "tls_offload" in name:
-            offload_asset = a
-        else:
-            signer_asset = a
-
-    if not signer_asset or not offload_asset:
-        available = [a["name"] for a in assets]
-        raise FileNotFoundError(
-            f"ECP release {tag} missing assets for {target_os_arch}.\n"
-            f"Available: {available}"
-        )
-
-    ecp_dir.mkdir(parents=True, exist_ok=True)
-
-    # Download and extract both archives.
-    for asset in (signer_asset, offload_asset):
-        logger.info("    Downloading %s...", asset["name"])
-        dl = requests.get(asset["browser_download_url"], headers=gh_headers, timeout=120)
-        dl.raise_for_status()
-
-        if asset["name"].endswith(".zip"):
-            with zipfile.ZipFile(io.BytesIO(dl.content)) as zf:
-                for member in zf.namelist():
-                    basename = Path(member).name
-                    if not basename:
-                        continue
-                    with zf.open(member) as src:
-                        (ecp_dir / basename).write_bytes(src.read())
-        else:
-            with tarfile.open(fileobj=io.BytesIO(dl.content), mode="r:gz") as tf:
-                for member in tf.getmembers():
-                    if not member.isfile():
-                        continue
-                    src = tf.extractfile(member)
-                    if src:
-                        (ecp_dir / Path(member.name).name).write_bytes(src.read())
-
-    # Make binaries executable on Unix.
-    if sys.platform != "win32":
-        for f in ecp_dir.iterdir():
-            if f.is_file():
-                f.chmod(f.stat().st_mode | 0o755)
-
-    logger.info("    ECP %s installed to %s", tag, ecp_dir)
-
-
-def _ensure_ecp_binaries() -> tuple[Path, Path, Path]:
-    """Locates ECP binaries, downloading from GitHub release if needed.
+def _find_ecp_binaries() -> tuple[Path, Path, Path]:
+    """Locates pre-installed ECP binaries.
 
     Search order:
-      1. Cached download in persistent install directory
-      2. Download from jay0lee/enterprise-certificate-proxy GitHub release
+      1. Bundled alongside the wif-bunker binary (<binary_dir>/ecp/)
+      2. Default platform location (~/.config/bunker-ecp or %LOCALAPPDATA%\\Google\\ECP)
 
     Returns:
         (ecp_binary, ecp_client_lib, tls_offload_lib) paths.
+
+    Raises:
+        FileNotFoundError: if ECP binaries are not found in any location.
     """
-    _, _, lib_ext, _ = _get_ecp_platform_info()
-    exe_ext = ".exe" if sys.platform == "win32" else ""
+    ecp_bin_name, libecp_name, tls_offload_name = get_ecp_binary_names()
 
-    ecp_install_dir = _get_ecp_install_dir()
-
-    ecp_bin_name = f"ecp{exe_ext}"
-    libecp_name = f"libecp{lib_ext}"
-    # Windows uses "tls_offload.dll"; Linux/macOS use "libtls_offload.*"
-    tls_offload_name = f"tls_offload{lib_ext}" if sys.platform == "win32" else f"libtls_offload{lib_ext}"
-
-    ecp_bin = client = offload = None
-
-    # 1. Check cached install directory.
-    cached_bin = ecp_install_dir / ecp_bin_name
-    cached_client = ecp_install_dir / libecp_name
-    cached_offload = ecp_install_dir / tls_offload_name
-    if cached_bin.exists() and cached_client.exists() and cached_offload.exists():
-        logger.info("    Using cached ECP binaries from %s", ecp_install_dir)
-        ecp_bin, client, offload = cached_bin, cached_client, cached_offload
-
-    # 2. Download from GitHub release.
-    if not ecp_bin:
-        logger.info("    ECP binaries not found — downloading from GitHub...")
-        _download_ecp_from_github_release(ecp_install_dir)
-        ecp_bin = ecp_install_dir / ecp_bin_name
-        client = ecp_install_dir / libecp_name
-        offload = ecp_install_dir / tls_offload_name
-        if not (ecp_bin.exists() and client.exists() and offload.exists()):
-            actual = [f.name for f in ecp_install_dir.iterdir()] if ecp_install_dir.is_dir() else []
-            raise FileNotFoundError(
-                f"ECP download succeeded but expected files not found. "
-                f"Actual files: {actual}"
-            )
-
-    # Register directories for DLL resolution.
-    ecp_dirs = {str(p.parent) for p in (ecp_bin, client, offload)}
-    for d in ecp_dirs:
-        _ensure_ecp_on_path(Path(d))
-
-    # On Windows, libtls_offload.dll requires the VC++ Redistributable.
-    # Detect its absence early with a clear error message.
-    if sys.platform == "win32":
-        import ctypes
-        for vcrt in ("VCRUNTIME140.dll", "MSVCP140.dll"):
-            try:
-                ctypes.WinDLL(vcrt)
-            except OSError:
-                raise RuntimeError(
-                    f"ECP requires the Visual C++ Redistributable but "
-                    f"'{vcrt}' was not found.\n"
-                    f"Download and install it from:\n"
-                    f"  https://learn.microsoft.com/en-us/cpp/windows/"
-                    f"latest-supported-vc-redist\n"
-                    f"Then re-run this script."
-                ) from None
-
-    return ecp_bin, client, offload
-
-
-def _get_ecp_install_dir() -> Path:
-    """Returns the standard persistent directory for ECP binaries."""
-    if sys.platform == "win32":
-        local_app_data = os.environ.get(
-            "LOCALAPPDATA", str(Path.home() / "AppData" / "Local"),
-        )
-        return Path(local_app_data) / "Google" / "ECP"
+    # Determine the directory containing the wif-bunker binary.
+    if getattr(sys, "frozen", False):
+        binary_dir = Path(sys.executable).parent
     else:
-        return Path.home() / ".config" / "bunker-ecp"
+        binary_dir = Path(__file__).parent
+
+    # Search locations in priority order.
+    search_dirs = [
+        binary_dir / "ecp",       # Bundled alongside binary
+        get_default_ecp_dir(),     # Platform default
+    ]
+
+    for ecp_dir in search_dirs:
+        ecp_bin = ecp_dir / ecp_bin_name
+        client = ecp_dir / libecp_name
+        offload = ecp_dir / tls_offload_name
+        if ecp_bin.exists() and client.exists() and offload.exists():
+            logger.info("    Using ECP binaries from %s", ecp_dir)
+            _add_ecp_to_path(ecp_dir)
+            return ecp_bin, client, offload
+
+    raise FileNotFoundError(
+        "ECP binaries not found. Install them with:\n"
+        "    python get_ecp.py\n"
+        "\n"
+        f"Searched: {[str(d) for d in search_dirs]}"
+    )
 
 
-def _ensure_ecp_on_path(ecp_dir: Path) -> None:
+def _add_ecp_to_path(ecp_dir: Path) -> None:
     """Ensures the ECP binary directory is discoverable for DLL loading."""
     ecp_dir_str = str(ecp_dir)
 
-    # os.add_dll_directory() is per-process (not inherited) and is the
-    # ONLY mechanism that works on Python 3.8+ for DLL dependency
-    # resolution.  Must be called every time, even if PATH already has it.
+    # os.add_dll_directory() is the ONLY mechanism that works on
+    # Python 3.8+ for DLL dependency resolution on Windows.
     if sys.platform == "win32" and ecp_dir.is_dir():
         os.add_dll_directory(ecp_dir_str)
 
-    # Also add to PATH for the current process (belt and suspenders).
+    # Also add to PATH for the current process.
     current_path = os.environ.get("PATH", "")
     if ecp_dir_str not in current_path:
         os.environ["PATH"] = ecp_dir_str + os.pathsep + current_path
-
-    # Persist to the user's PATH on Windows so any future process can
-    # find the ECP DLLs (e.g. a Python app using google-auth ADC).
-    if sys.platform == "win32":
-        ps_add_path = (
-            f"$userPath = [Environment]::GetEnvironmentVariable('PATH','User'); "
-            f"if ($userPath -notlike '*{ecp_dir_str}*') {{ "
-            f"  [Environment]::SetEnvironmentVariable("
-            f"    'PATH', '{ecp_dir_str};' + $userPath, 'User'"
-            f"  ); "
-            f"  Write-Output 'ADDED' "
-            f"}} else {{ Write-Output 'EXISTS' }}"
-        )
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps_add_path],
-            capture_output=True, text=True,
-        )
-        if "ADDED" in result.stdout:
-            logger.info("    Added %s to user PATH (permanent).", ecp_dir_str)
-
-
 
 
 _KEYSTORE_GENERATORS: dict[str, Callable[[WorkloadConfig], CertificateBundle]] = {
@@ -1895,9 +1739,9 @@ def main() -> None:
         logger.info("=== 6) Generating ECP Certificate Config & ADC ===")
 
         try:
-            ecp_binary, ecp_client_lib, tls_offload_lib = _ensure_ecp_binaries()
+            ecp_binary, ecp_client_lib, tls_offload_lib = _find_ecp_binaries()
         except FileNotFoundError as ecp_err:
-            github_os, arch, _, _ = _get_ecp_platform_info()
+            github_os, arch, _, _ = get_ecp_platform_info()
             logger.warning(
                 "    ECP binaries not available for %s/%s — "
                 "skipping ECP config and auth demo (steps 6-7).",
