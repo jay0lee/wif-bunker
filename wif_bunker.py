@@ -1054,15 +1054,30 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
         bundle, workload_pem = _create_ca_and_sign(se_pem, config)
 
         # 4. Write the CA-signed cert and import into PKCS#11 store
+        #    addcert needs --key-id (CKA_ID from addkey) and prompts for PIN.
         Path("bunker-workload-public.pem").write_text(workload_pem)
+
+        # Extract CKA_ID from addkey output
+        key_id = None
+        for line in key_result.stdout.splitlines():
+            if "CKA_ID" in line and key_id is None:
+                key_id = line.split("'")[1] if "'" in line else line.split()[-1]
+        if not key_id:
+            raise RuntimeError(
+                "Could not extract CKA_ID from tpm2_ptool addkey output: "
+                + key_result.stdout
+            )
+        logger.debug("    Using CKA_ID: %s", key_id)
+
         subprocess.run(
             [
                 "tpm2_ptool", "addcert",
                 "--label=bunker-wif",
-                f"--userpin={config.linux_tpm_pin}",
+                f"--key-id={key_id}",
                 "bunker-workload-public.pem",
             ],
-            check=True, capture_output=True,
+            input=config.linux_tpm_pin + "\n",
+            check=True, capture_output=True, text=True,
         )
         logger.info(
             "    CA-signed workload cert imported into TPM PKCS#11 store."
@@ -1517,10 +1532,6 @@ def main() -> None:
         level=logging.DEBUG if args.debug else logging.INFO,
         handlers=[handler],
     )
-    if args.debug:
-        import http.client as http_client
-
-        http_client.HTTPConnection.debuglevel = 1
 
 
 
