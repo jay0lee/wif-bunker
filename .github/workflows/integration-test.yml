@@ -56,20 +56,6 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
-      # Test: upgrade gcloud to latest and install ECP to verify
-      # whether 0.3.18 is truly broken or if our CDN flattening was.
-      - name: "Linux: Upgrade gcloud + install ECP"
-        if: runner.os == 'Linux'
-        run: |
-          gcloud components update --quiet
-          gcloud components install enterprise-certificate-proxy --quiet
-          echo "gcloud version: $(gcloud version 2>/dev/null | head -1)"
-          GCLOUD_ROOT="$(dirname "$(dirname "$(which gcloud)")")"
-          ECP_DIR="$GCLOUD_ROOT/platform/enterprise_cert"
-          echo "ECP files:"
-          ls -la "$ECP_DIR/" 2>/dev/null || echo "NOT FOUND"
-          sha256sum "$ECP_DIR/libtls_offload.so" 2>/dev/null || true
-
       # ── Setup: Linux Software TPM ──
       - name: "Linux: Setup Software TPM (swtpm)"
         if: runner.os == 'Linux'
@@ -103,17 +89,6 @@ jobs:
           echo "TPM2TOOLS_TCTI=tabrmd:bus_type=session" >> "$GITHUB_ENV"
           echo "TPM2_PKCS11_TCTI=tabrmd:bus_type=session" >> "$GITHUB_ENV"
 
-      # TEMPORARY: Build patched ECP on macOS for Secure Enclave support.
-      # Remove once upstream ECP supports SecCertificateCopyData.
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        if: runner.os == 'macOS'
-        with:
-          go-version: "1.26"
-      - name: "macOS: Build patched ECP"
-        if: runner.os == 'macOS'
-        run: python3 patches/build_patched_ecp.py
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # ── Setup: Python ──
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
@@ -145,12 +120,6 @@ jobs:
             pip install "$WHEEL_URL"
           fi
           pip install .
-
-      # TEMPORARY: Patch google-auth to support hardware-backed keys.
-      # Remove once upstream PRs land in google-auth and ECP.
-      - name: "Patch google-auth (temporary)"
-        shell: bash
-        run: python patches/patch_google_auth.py
 
       # ── Generate unique project ID for this job ──
       - name: Set project ID

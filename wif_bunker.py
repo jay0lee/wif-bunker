@@ -199,12 +199,6 @@ class WorkloadConfig:
     linux_tpm_pin: str = "bunker123"
     key_algorithm: str = "es256"
     soft_key: bool = False  # Use software keys (CI testing, no TPM required)
-    # ECP version: "latest" = newest from gcloud CDN, or pin e.g. "0.3.14".
-    # Linux defaults to 0.3.14 because 0.3.18+ has a sigalgs regression on
-    # OpenSSL 3.  macOS/Windows default to latest (no known issues).
-    ecp_version: str = field(
-        default_factory=lambda: "0.3.14" if sys.platform == "linux" else "latest",
-    )
     suffix: str = field(default_factory=lambda: str(int(time.time())))
     project_id: str = field(init=False)
     workload_cn: str = field(init=False)
@@ -1303,175 +1297,73 @@ def _get_ecp_platform_info() -> tuple[str, str, str, str]:
         return "linux", arch, ".so", ".tar.gz"
 
 
-def _get_ecp_gcloud_component_info() -> tuple[str, str]:
-    """Returns (component_id, arch) for gcloud component manifest lookup."""
-    machine = platform.machine().lower()
-    if machine in ("arm64", "aarch64"):
-        arch = "arm"
-    else:
-        arch = "x86_64"
-
-    if sys.platform == "win32":
-        return f"enterprise-certificate-proxy-windows-{arch}", arch
-    elif sys.platform == "darwin":
-        return f"enterprise-certificate-proxy-darwin-{arch}", arch
-    else:
-        return f"enterprise-certificate-proxy-linux-{arch}", arch
+_ECP_GITHUB_REPO = "jay0lee/enterprise-certificate-proxy"
 
 
-_GCLOUD_COMPONENTS_LATEST_URL = (
-    "https://dl.google.com/dl/cloudsdk/channels/rapid/components-2.json"
-)
-_GCLOUD_COMPONENTS_VERSIONED_URL = (
-    "https://dl.google.com/dl/cloudsdk/channels/rapid/components-v{}.json"
-)
-_GCLOUD_CDN_BASE = "https://dl.google.com/dl/cloudsdk/channels/rapid/"
-
-
-def _resolve_ecp_manifest(requested_version: str = "latest") -> dict:
-    """Fetches a gcloud component manifest for the requested ECP version.
-
-    If requested_version is "latest", returns the newest manifest directly.
-    If requested_version is a specific version (e.g. "0.3.14"), walks
-    gcloud SDK manifests until one shipping that exact version is found.
-    """
-    component_id, _ = _get_ecp_gcloud_component_info()
-
-    def _get_ecp_version(manifest: dict) -> str | None:
-        for comp in manifest.get("components", []):
-            if comp.get("id") == component_id:
-                return comp.get("version", {}).get("version_string")
-        return None
-
-    # Fetch the latest manifest first (we always need it for the base version).
-    logger.info("    Fetching gcloud component manifest...")
-    resp = requests.get(_GCLOUD_COMPONENTS_LATEST_URL, timeout=30)
-    resp.raise_for_status()
-    manifest = resp.json()
-    ecp_ver = _get_ecp_version(manifest)
-    gcloud_ver = manifest.get("version", "?")
-
-    # --- Pinned version mode ---
-    if requested_version != "latest":
-        if ecp_ver == requested_version:
-            logger.info("    Latest gcloud SDK %s has ECP %s (matches requested)",
-                        gcloud_ver, ecp_ver)
-            return manifest
-        logger.info("    Latest ECP is %s, searching for requested %s...",
-                    ecp_ver, requested_version)
-        base_ver = int(gcloud_ver.split(".")[0]) if gcloud_ver != "?" else 578
-        for major in range(base_ver - 2, base_ver - 40, -2):
-            ver_str = f"{major}.0.0"
-            try:
-                url = _GCLOUD_COMPONENTS_VERSIONED_URL.format(ver_str)
-                r = requests.get(url, timeout=15)
-                if r.status_code != 200:
-                    continue
-                m = r.json()
-                v = _get_ecp_version(m)
-                if v == requested_version:
-                    logger.info("    gcloud SDK %s has ECP %s (match)", ver_str, v)
-                    return m
-                logger.debug("    gcloud SDK %s has ECP %s (skip)", ver_str, v)
-            except Exception:
-                continue
-        logger.warning(
-            "    Could not find ECP %s in any gcloud SDK release. "
-            "Using latest (%s) instead.", requested_version, ecp_ver,
-        )
-        return manifest
-
-    # --- Latest mode: use whatever the newest gcloud SDK ships ---
-    logger.info("    Latest gcloud SDK %s has ECP %s", gcloud_ver, ecp_ver)
-    return manifest
-
-
-def _download_ecp_from_gcloud_components(
-    ecp_dir: Path,
-    requested_version: str = "latest",
-) -> None:
-    """Downloads ECP binaries from gcloud's component CDN.
-
-    The gcloud component CDN distributes the same binaries as
-    `gcloud components install enterprise-certificate-proxy`. These
-    are ABI-compatible with the system's OpenSSL (the GitHub release
-    binaries statically link an older OpenSSL that causes ABI
-    mismatches on systems with OpenSSL 3).
-
-    The tarball has structure:
-        bin/ecp
-        platform/enterprise_cert/libecp.{so|dylib|dll}
-        platform/enterprise_cert/libtls_offload.{so|dylib|dll}
-
-    We flatten the relevant files into ecp_dir.
-    """
+def _download_ecp_from_github_release(ecp_dir: Path) -> None:
+    """Downloads ECP binaries from the forked GitHub release."""
     import io
     import tarfile
     import zipfile
 
-    component_id, _ = _get_ecp_gcloud_component_info()
+    github_os, arch, lib_ext, archive_ext = _get_ecp_platform_info()
 
-    manifest = _resolve_ecp_manifest(requested_version)
+    # Fetch latest release from the fork.
+    api_url = f"https://api.github.com/repos/{_ECP_GITHUB_REPO}/releases/latest"
+    logger.info("    Fetching ECP release from %s...", _ECP_GITHUB_REPO)
+    resp = requests.get(api_url, timeout=30)
+    resp.raise_for_status()
+    release = resp.json()
+    tag = release["tag_name"]
 
-    # Find our platform-specific component.
-    component = None
-    for comp in manifest.get("components", []):
-        if comp.get("id") == component_id:
-            component = comp
-            break
+    # Find the two assets we need:
+    #   ecp_*_{os}_{arch}.tar.gz           — ecp binary + libecp
+    #   ecp_*_{os}_{arch}_tls_offload.*    — libtls_offload
+    assets = release.get("assets", [])
+    target_os_arch = f"{github_os}_{arch}"
 
-    if not component or "data" not in component:
+    signer_asset = None
+    offload_asset = None
+    for a in assets:
+        name = a["name"]
+        if target_os_arch not in name:
+            continue
+        if "tls_offload" in name:
+            offload_asset = a
+        else:
+            signer_asset = a
+
+    if not signer_asset or not offload_asset:
+        available = [a["name"] for a in assets]
         raise FileNotFoundError(
-            f"ECP component '{component_id}' not found in gcloud manifest. "
-            f"Available: {[c['id'] for c in manifest.get('components', []) if 'enterprise' in c.get('id', '')]}"
+            f"ECP release {tag} missing assets for {target_os_arch}.\n"
+            f"Available: {available}"
         )
-
-    source_path = component["data"]["source"]
-    download_url = _GCLOUD_CDN_BASE + source_path
-    version = component.get("version", {}).get("version_string", "?")
-    logger.info("    Downloading ECP v%s from gcloud CDN...", version)
-    logger.info("    %s", source_path.split("/")[-1])
-
-    dl_resp = requests.get(download_url, timeout=120, stream=True)
-    dl_resp.raise_for_status()
-    content = dl_resp.content
-
-    # Verify checksum if available.
-    expected_sha256 = component["data"].get("checksum")
-    if expected_sha256:
-        import hashlib
-        actual_sha256 = hashlib.sha256(content).hexdigest()
-        if actual_sha256 != expected_sha256:
-            raise RuntimeError(
-                f"ECP download checksum mismatch: "
-                f"expected {expected_sha256}, got {actual_sha256}"
-            )
-        logger.debug("    SHA-256 checksum verified.")
 
     ecp_dir.mkdir(parents=True, exist_ok=True)
 
-    # Extract and flatten — the tarball has subdirectories
-    # (bin/, platform/enterprise_cert/) but we want everything flat.
-    if source_path.endswith(".zip"):
-        with zipfile.ZipFile(io.BytesIO(content)) as zf:
-            for member in zf.namelist():
-                basename = Path(member).name
-                if not basename or member.endswith("/"):
-                    continue  # Skip directories
-                target = ecp_dir / basename
-                with zf.open(member) as src, open(target, "wb") as dst:
-                    dst.write(src.read())
-    else:
-        with tarfile.open(fileobj=io.BytesIO(content), mode="r:gz") as tf:
-            for member in tf.getmembers():
-                if not member.isfile():
-                    continue
-                basename = Path(member.name).name
-                target = ecp_dir / basename
-                src = tf.extractfile(member)
-                if src:
-                    with open(target, "wb") as dst:
-                        dst.write(src.read())
+    # Download and extract both archives.
+    for asset in (signer_asset, offload_asset):
+        logger.info("    Downloading %s...", asset["name"])
+        dl = requests.get(asset["browser_download_url"], timeout=120)
+        dl.raise_for_status()
+
+        if asset["name"].endswith(".zip"):
+            with zipfile.ZipFile(io.BytesIO(dl.content)) as zf:
+                for member in zf.namelist():
+                    basename = Path(member).name
+                    if not basename:
+                        continue
+                    with zf.open(member) as src:
+                        (ecp_dir / basename).write_bytes(src.read())
+        else:
+            with tarfile.open(fileobj=io.BytesIO(dl.content), mode="r:gz") as tf:
+                for member in tf.getmembers():
+                    if not member.isfile():
+                        continue
+                    src = tf.extractfile(member)
+                    if src:
+                        (ecp_dir / Path(member.name).name).write_bytes(src.read())
 
     # Make binaries executable on Unix.
     if sys.platform != "win32":
@@ -1479,20 +1371,15 @@ def _download_ecp_from_gcloud_components(
             if f.is_file():
                 f.chmod(f.stat().st_mode | 0o755)
 
-    logger.info("    ECP v%s installed to %s", version, ecp_dir)
+    logger.info("    ECP %s installed to %s", tag, ecp_dir)
 
 
-
-
-def _ensure_ecp_binaries(ecp_version: str = "latest") -> tuple[Path, Path, Path]:
-    """Locates ECP binaries, downloading from gcloud component CDN if needed.
-
-    Args:
-        ecp_version: "latest" or a pinned version like "0.3.14".
+def _ensure_ecp_binaries() -> tuple[Path, Path, Path]:
+    """Locates ECP binaries, downloading from GitHub release if needed.
 
     Search order:
-      1. Cached download in persistent install directory (version-specific)
-      2. Download from gcloud component CDN
+      1. Cached download in persistent install directory
+      2. Download from jay0lee/enterprise-certificate-proxy GitHub release
 
     Returns:
         (ecp_binary, ecp_client_lib, tls_offload_lib) paths.
@@ -1500,7 +1387,7 @@ def _ensure_ecp_binaries(ecp_version: str = "latest") -> tuple[Path, Path, Path]
     _, _, lib_ext, _ = _get_ecp_platform_info()
     exe_ext = ".exe" if sys.platform == "win32" else ""
 
-    ecp_install_dir = _get_ecp_install_dir(ecp_version)
+    ecp_install_dir = _get_ecp_install_dir()
 
     ecp_bin_name = f"ecp{exe_ext}"
     libecp_name = f"libecp{lib_ext}"
@@ -1513,13 +1400,13 @@ def _ensure_ecp_binaries(ecp_version: str = "latest") -> tuple[Path, Path, Path]
     cached_client = ecp_install_dir / libecp_name
     cached_offload = ecp_install_dir / tls_offload_name
     if cached_bin.exists() and cached_client.exists() and cached_offload.exists():
-        logger.info("    Using cached ECP v%s binaries from %s", ecp_version, ecp_install_dir)
+        logger.info("    Using cached ECP binaries from %s", ecp_install_dir)
         ecp_bin, client, offload = cached_bin, cached_client, cached_offload
 
-    # 2. Download from gcloud component CDN.
+    # 2. Download from GitHub release.
     if not ecp_bin:
-        logger.info("    ECP binaries not found — downloading from gcloud CDN...")
-        _download_ecp_from_gcloud_components(ecp_install_dir, ecp_version)
+        logger.info("    ECP binaries not found — downloading from GitHub...")
+        _download_ecp_from_github_release(ecp_install_dir)
         ecp_bin = ecp_install_dir / ecp_bin_name
         client = ecp_install_dir / libecp_name
         offload = ecp_install_dir / tls_offload_name
@@ -1529,14 +1416,6 @@ def _ensure_ecp_binaries(ecp_version: str = "latest") -> tuple[Path, Path, Path]
                 f"ECP download succeeded but expected files not found. "
                 f"Actual files: {actual}"
             )
-
-    # Prefer local patched binaries if available (macOS SE development).
-    patched_ecp = Path.cwd() / "ecp_patched"
-    patched_libecp = Path.cwd() / f"libecp_patched{lib_ext}"
-    if patched_ecp.exists():
-        ecp_bin = patched_ecp
-    if patched_libecp.exists():
-        client = patched_libecp
 
     # Register directories for DLL resolution.
     ecp_dirs = {str(p.parent) for p in (ecp_bin, client, offload)}
@@ -1563,19 +1442,15 @@ def _ensure_ecp_binaries(ecp_version: str = "latest") -> tuple[Path, Path, Path]
     return ecp_bin, client, offload
 
 
-def _get_ecp_install_dir(ecp_version: str = "latest") -> Path:
-    """Returns the standard persistent directory for ECP binaries.
-
-    Uses a version-specific subdirectory so pinned and latest versions
-    don't collide in the cache.
-    """
+def _get_ecp_install_dir() -> Path:
+    """Returns the standard persistent directory for ECP binaries."""
     if sys.platform == "win32":
         local_app_data = os.environ.get(
             "LOCALAPPDATA", str(Path.home() / "AppData" / "Local"),
         )
-        return Path(local_app_data) / "Google" / "ECP" / ecp_version
+        return Path(local_app_data) / "Google" / "ECP"
     else:
-        return Path.home() / ".config" / "bunker-ecp" / ecp_version
+        return Path.home() / ".config" / "bunker-ecp"
 
 
 def _ensure_ecp_on_path(ecp_dir: Path) -> None:
@@ -1613,88 +1488,6 @@ def _ensure_ecp_on_path(ecp_dir: Path) -> None:
             logger.info("    Added %s to user PATH (permanent).", ecp_dir_str)
 
 
-def _patch_google_auth_for_hardware_keys() -> None:
-    """Monkey-patch google-auth to support hardware-backed keys.
-
-    google-auth versions <= 2.56 require both cert_path AND key_path in
-    the workload certificate config.  For hardware-backed keys (TPM/SE),
-    there IS no extractable key_path.  This patches two spots:
-
-    1. _mtls_helper._get_workload_cert_and_key_paths — allow missing key_path
-    2. external_account._perform_refresh_token — skip cert=(cert, key)
-       injection when key_path is None (mTLS adapter handles signing)
-    """
-    import google.auth.transport._mtls_helper as _mtls_mod
-    import google.auth.external_account as _ea_mod
-
-    # --- Patch 1: _mtls_helper ---
-    _orig_get_paths = _mtls_mod._get_workload_cert_and_key_paths
-
-    def _patched_get_paths(config_path, include_context_aware=True):
-        """Allow missing key_path for hardware-backed keys."""
-        absolute_path = _mtls_mod._get_cert_config_path(
-            config_path, include_context_aware,
-        )
-        if absolute_path is None:
-            return None, None
-        data = _mtls_mod._load_json_file(absolute_path)
-        cert_configs = data.get("cert_configs", {})
-        workload = cert_configs.get("workload")
-        if workload is None:
-            return None, None
-        cert_path = workload.get("cert_path")
-        key_path = workload.get("key_path")  # None for hardware-backed keys
-        if cert_path is None:
-            from google.auth import exceptions
-            raise exceptions.ClientCertError(
-                f'Workload config missing "cert_path" in {absolute_path}',
-            )
-        return cert_path, key_path
-
-    # Always apply — safe because our versions delegate to the originals
-    # and gracefully handle the hardware-key case.
-    _mtls_mod._get_workload_cert_and_key_paths = _patched_get_paths
-    logger.debug("    Patched _mtls_helper for hardware-backed keys.")
-
-    # --- Patch 2: external_account ---
-    # When key_path is None (hardware-backed), the original code may still
-    # inject cert=(cert_path, None) which causes urllib3's load_cert_chain
-    # to try reading a private key from the cert PEM file.
-    # We can't null _get_mtls_cert_and_key_paths because _get_cert_bytes()
-    # also needs cert_path for subject token retrieval.
-    # Solution: wrap the request callable to silently strip cert= kwargs.
-    _orig_refresh = getattr(_ea_mod.Credentials, "_perform_refresh_token", None)
-    if _orig_refresh:
-        import functools
-
-        @functools.wraps(_orig_refresh)
-        def _patched_refresh(self, request, **kwargs):
-            """Strip cert= injection when key_path is None."""
-            paths_fn = getattr(self, "_get_mtls_cert_and_key_paths", None)
-            if paths_fn:
-                try:
-                    _, key_path = paths_fn()
-                except Exception:
-                    key_path = "unknown"
-                if key_path is None:
-                    # Wrap the request to strip cert= — the mTLS adapter
-                    # handles signing via ECP callbacks instead.
-                    _inner = request
-
-                    class _NoCertRequest:
-                        """Proxy that strips cert= from request calls."""
-                        def __call__(self_req, *args, **kw):
-                            kw.pop("cert", None)
-                            return _inner(*args, **kw)
-
-                        def __getattr__(self_req, name):
-                            return getattr(_inner, name)
-
-                    request = _NoCertRequest()
-            return _orig_refresh(self, request, **kwargs)
-
-        _ea_mod.Credentials._perform_refresh_token = _patched_refresh
-        logger.debug("    Patched external_account for hardware-backed keys.")
 
 
 _KEYSTORE_GENERATORS: dict[str, Callable[[WorkloadConfig], CertificateBundle]] = {
@@ -1806,18 +1599,7 @@ def main() -> None:
             "Only used when creating a new project (e.g. with --create-project)."
         ),
     )
-    _ecp_default = "0.3.14" if sys.platform == "linux" else "latest"
-    parser.add_argument(
-        "--ecp-version", metavar="VERSION", default=_ecp_default,
-        help=(
-            "ECP (Enterprise Certificate Proxy) version to use.  "
-            "'latest' downloads the newest available from the gcloud CDN; "
-            "a specific version like '0.3.14' pins to that release.  "
-            f"Default: {_ecp_default} "
-            "(Linux defaults to 0.3.14 due to OpenSSL 3 compatibility issues "
-            "in 0.3.18+)."
-        ),
-    )
+
     args = parser.parse_args()
 
     if args.use_adc and args.client_secrets_file:
@@ -1844,7 +1626,7 @@ def main() -> None:
         config.pool_id = args.create_pool
     if args.soft_key:
         config.soft_key = True
-    config.ecp_version = args.ecp_version
+
     if args.key_algorithm:
         algo_info = _KEY_ALGORITHMS[args.key_algorithm]
         # Validate algorithm is supported on this platform.
@@ -2088,7 +1870,7 @@ def main() -> None:
         logger.info("=== 6) Generating ECP Certificate Config & ADC ===")
 
         try:
-            ecp_binary, ecp_client_lib, tls_offload_lib = _ensure_ecp_binaries(config.ecp_version)
+            ecp_binary, ecp_client_lib, tls_offload_lib = _ensure_ecp_binaries()
         except FileNotFoundError as ecp_err:
             github_os, arch, _, _ = _get_ecp_platform_info()
             logger.warning(
@@ -2198,8 +1980,8 @@ def main() -> None:
         # The "workload" section provides cert_path only (no key_path)
         # because the private key is in the Secure Enclave / TPM.
         # - cert_path: google-auth reads this for the STS subject token
-        # - key_path absent: our external_account.py patch skips the
-        #   cert=(cert, key) injection that would crash with SSLError
+        # - key_path absent: the forked google-auth (jay0lee) tolerates
+        #   missing key_path and skips cert=(cert, key) injection
         # - ECP handles mTLS signing via configure_mtls_channel()
         cert_configs["workload"] = {"cert_path": str(workload_cert_path)}
         certificate_config = {
@@ -2287,7 +2069,7 @@ def main() -> None:
                 log.warning("    Could not read config: %s", _e)
                 return
 
-            # Check if ECP signer binary contains our patch marker
+            # Check if ECP signer binary has Secure Enclave support
             try:
                 _ecp_bin = Path(json.loads(_cfg_text)["libs"]["ecp"])
                 if _ecp_bin.exists():
@@ -2526,6 +2308,7 @@ def main() -> None:
             time.sleep(15)
 
             from ssl import SSLError
+
             @with_retries(
                 max_attempts=10,
                 retryable_exceptions=(RefreshError, OAuthError, TypeError),
