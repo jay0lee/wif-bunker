@@ -1308,10 +1308,17 @@ def _download_ecp_from_github_release(ecp_dir: Path) -> None:
 
     github_os, arch, lib_ext, archive_ext = _get_ecp_platform_info()
 
+    # Use GITHUB_TOKEN if available (CI runners share IPs and hit the
+    # 60 req/hr unauthenticated rate limit quickly).
+    gh_headers = {}
+    gh_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if gh_token:
+        gh_headers["Authorization"] = f"token {gh_token}"
+
     # Fetch latest release from the fork.
     api_url = f"https://api.github.com/repos/{_ECP_GITHUB_REPO}/releases/latest"
     logger.info("    Fetching ECP release from %s...", _ECP_GITHUB_REPO)
-    resp = requests.get(api_url, timeout=30)
+    resp = requests.get(api_url, headers=gh_headers, timeout=30)
     resp.raise_for_status()
     release = resp.json()
     tag = release["tag_name"]
@@ -1345,7 +1352,7 @@ def _download_ecp_from_github_release(ecp_dir: Path) -> None:
     # Download and extract both archives.
     for asset in (signer_asset, offload_asset):
         logger.info("    Downloading %s...", asset["name"])
-        dl = requests.get(asset["browser_download_url"], timeout=120)
+        dl = requests.get(asset["browser_download_url"], headers=gh_headers, timeout=120)
         dl.raise_for_status()
 
         if asset["name"].endswith(".zip"):
