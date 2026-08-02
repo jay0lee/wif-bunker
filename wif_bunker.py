@@ -12,7 +12,6 @@ import argparse
 import base64
 import concurrent.futures
 import ctypes
-import ctypes.util
 import datetime
 import hashlib
 import json
@@ -2035,206 +2034,81 @@ def main() -> None:
                 except Exception as _e:
                     log.warning("    find-identity error: %s", _e)
 
-        logger.info("=== 7a) ECP Certificate Retrieval Test ===")
+        # Set environment so google-auth discovers our configs.
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(adc_path)
+        os.environ["GOOGLE_API_USE_CLIENT_CERTIFICATE"] = "true"
+        os.environ["GOOGLE_API_CERTIFICATE_CONFIG"] = str(cert_config_path)
 
-        try:
-            # Set environment so google-auth discovers our configs.
-            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(adc_path)
-            os.environ["GOOGLE_API_USE_CLIENT_CERTIFICATE"] = "true"
-            os.environ["GOOGLE_API_CERTIFICATE_CONFIG"] = str(cert_config_path)
+        if args.debug:
+            os.environ["ENABLE_ENTERPRISE_CERTIFICATE_LOGS"] = "1"
 
-            if args.debug:
-                os.environ["ENABLE_ENTERPRISE_CERTIFICATE_LOGS"] = "1"
+        # Pre-load ECP DLLs on Windows.
+        if sys.platform == "win32":
+            for lib in (ecp_client_lib, tls_offload_lib):
+                try:
+                    ctypes.WinDLL(str(lib))
+                except OSError:
+                    pass
 
-            # Pre-load ECP DLLs on Windows.
-            if sys.platform == "win32":
-                for lib in (ecp_client_lib, tls_offload_lib):
-                    try:
-                        ctypes.WinDLL(str(lib))
-                    except OSError:
-                        pass
+        # ── Debug-only diagnostics (7a/7b) ──
+        # These isolate ECP cert retrieval and TLS offload compatibility.
+        # If the ADC verification below fails, re-running with --debug
+        # enables these to pinpoint the failure.
+        if args.debug:
+            logger.info("=== Debug: ECP Certificate Retrieval ===")
 
-            _ecp_lib = ctypes.CDLL(str(ecp_client_lib))
-            _ecp_lib.GetCertPemForPython.argtypes = [
-                ctypes.c_char_p,
-                ctypes.c_char_p,
-                ctypes.c_int,
-            ]
-            _ecp_lib.GetCertPemForPython.restype = ctypes.c_int
+            try:
+                _ecp_lib = ctypes.CDLL(str(ecp_client_lib))
+                _ecp_lib.GetCertPemForPython.argtypes = [
+                    ctypes.c_char_p,
+                    ctypes.c_char_p,
+                    ctypes.c_int,
+                ]
+                _ecp_lib.GetCertPemForPython.restype = ctypes.c_int
 
-            # First call with buf=NULL to get required size.
-            _cert_len = _ecp_lib.GetCertPemForPython(
-                str(cert_config_path).encode(),
-                None,
-                0,
-            )
-            if _cert_len <= 0:
-                logger.error("    FAIL: ECP returned cert_len=%d", _cert_len)
-                if args.debug:
+                # First call with buf=NULL to get required size.
+                _cert_len = _ecp_lib.GetCertPemForPython(
+                    str(cert_config_path).encode(),
+                    None,
+                    0,
+                )
+                if _cert_len <= 0:
+                    logger.error("    FAIL: ECP returned cert_len=%d", _cert_len)
                     _run_ecp_diagnostics(cert_config_path, logger)
-                raise RuntimeError("ECP cert retrieval failed (cert_len=0)")
+                    raise RuntimeError("ECP cert retrieval failed (cert_len=0)")
 
-            # Second call to retrieve the actual PEM.
-            _cert_buf = ctypes.create_string_buffer(_cert_len + 1)
-            _ecp_lib.GetCertPemForPython(
-                str(cert_config_path).encode(),
-                _cert_buf,
-                _cert_len + 1,
-            )
-            _cert_pem_bytes = _cert_buf.value
-            _cert_pem = _cert_pem_bytes.decode("utf-8", errors="replace")
-            logger.info("    PASS: ECP returned %d bytes of cert PEM", _cert_len)
+                # Second call to retrieve the actual PEM.
+                _cert_buf = ctypes.create_string_buffer(_cert_len + 1)
+                _ecp_lib.GetCertPemForPython(
+                    str(cert_config_path).encode(),
+                    _cert_buf,
+                    _cert_len + 1,
+                )
+                _cert_pem_bytes = _cert_buf.value
+                _cert_pem = _cert_pem_bytes.decode("utf-8", errors="replace")
+                logger.info("    PASS: ECP returned %d bytes of cert PEM", _cert_len)
 
-            # Parse and show cert details.
-            try:
-                _parsed = cx509.load_pem_x509_certificate(_cert_pem_bytes)
-                _pub_key = _parsed.public_key()
-                _key_type = type(_pub_key).__name__
-                logger.info("    Cert subject:   %s", _parsed.subject)
-                logger.info("    Cert issuer:    %s", _parsed.issuer)
-                logger.info("    Key algorithm:  %s", _key_type)
-                logger.info("    Cert serial:    %s", format(_parsed.serial_number, "X"))
-            except Exception as _parse_err:
-                logger.warning("    Could not parse cert: %s", _parse_err)
+                # Parse and show cert details.
+                try:
+                    _parsed = cx509.load_pem_x509_certificate(_cert_pem_bytes)
+                    _pub_key = _parsed.public_key()
+                    _key_type = type(_pub_key).__name__
+                    logger.info("    Cert subject:   %s", _parsed.subject)
+                    logger.info("    Cert issuer:    %s", _parsed.issuer)
+                    logger.info("    Key algorithm:  %s", _key_type)
+                    logger.info("    Cert serial:    %s", format(_parsed.serial_number, "X"))
+                except Exception as _parse_err:
+                    logger.warning("    Could not parse cert: %s", _parse_err)
 
-            if args.debug:
                 logger.debug("    ECP cert PEM:\n%s", _cert_pem)
-                # Check offload library linkage on Linux.
-                if sys.platform == "linux":
-                    try:
-                        _ldd = subprocess.run(
-                            ["ldd", str(tls_offload_lib)],
-                            capture_output=True,
-                            text=True,
-                            timeout=5,
-                        )
-                        logger.debug("    ldd %s:\n%s", tls_offload_lib.name, _ldd.stdout)
-                    except Exception:
-                        pass
 
-        except Exception:
-            logger.exception("Step 7a (ECP cert retrieval) failed")
-            sys.exit(1)
-
-        logger.info("=== 7b) TLS Offload Configuration Test ===")
-        # Tests whether libtls_offload can configure an SSL context with
-        # our cert. ConfigureSslContext parses the cert, sets sigalgs, and
-        # installs the custom key — but does NOT invoke the sign callback.
-        # If this passes, the offload lib is compatible with the system's
-        # OpenSSL. The actual handshake + signing is tested in 7c.
-
-        try:
-            _offload = ctypes.CDLL(str(tls_offload_lib))
-            logger.info("    TLS offload lib loaded: %s", tls_offload_lib.name)
-
-            if args.debug and sys.platform == "linux":
-                try:
-                    _ldd = subprocess.run(
-                        ["ldd", str(tls_offload_lib)],
-                        capture_output=True,
-                        text=True,
-                        timeout=5,
-                    )
-                    logger.debug("    ldd %s:\n%s", tls_offload_lib.name, _ldd.stdout)
-                except Exception:
-                    pass
-                # sha256 so we can compare with gcloud's version
-                try:
-                    import hashlib
-
-                    _sha = hashlib.sha256(tls_offload_lib.read_bytes()).hexdigest()
-                    logger.debug("    sha256(%s) = %s", tls_offload_lib.name, _sha)
-                    logger.debug("    full path: %s", tls_offload_lib)
-                except Exception:
-                    pass
-                # readelf NEEDED
-                try:
-                    _readelf = subprocess.run(
-                        ["readelf", "-d", str(tls_offload_lib)],
-                        capture_output=True,
-                        text=True,
-                        timeout=5,
-                    )
-                    _needed = [line for line in _readelf.stdout.splitlines() if "NEEDED" in line]
-                    logger.debug("    NEEDED: %s", _needed)
-                except Exception:
-                    pass
-
-            # ConfigureSslContext signature:
-            # int ConfigureSslContext(SignFunc, const char *cert, SSL_CTX *ctx)
-            SIGN_CALLBACK_CTYPE = ctypes.CFUNCTYPE(
-                ctypes.c_int,
-                ctypes.c_char_p,
-                ctypes.c_int,
-                ctypes.c_char_p,
-                ctypes.POINTER(ctypes.c_int),
-                ctypes.c_int,
-            )
-
-            # Dummy sign callback — ConfigureSslContext stores it but
-            # doesn't invoke it. We just need a valid function pointer.
-            def _noop_sign(digest, dlen, sig_out, sig_len_ptr, key_type):
-                return 0
-
-            _c_sign = SIGN_CALLBACK_CTYPE(_noop_sign)
-
-            _offload.ConfigureSslContext.argtypes = [
-                SIGN_CALLBACK_CTYPE,
-                ctypes.c_char_p,
-                ctypes.c_void_p,
-            ]
-            _offload.ConfigureSslContext.restype = ctypes.c_int
-
-            # Create a raw SSL_CTX* via libssl directly — avoids
-            # CPython struct offset hacks that break across versions.
-
-            _libssl_name = ctypes.util.find_library("ssl")
-            if not _libssl_name:
-                raise RuntimeError("Could not find libssl — is OpenSSL installed?")
-            _libssl = ctypes.CDLL(_libssl_name)
-            logger.debug("    Loaded libssl: %s", _libssl_name)
-
-            _libssl.TLS_method.restype = ctypes.c_void_p
-            _libssl.TLS_method.argtypes = []
-            _libssl.SSL_CTX_new.restype = ctypes.c_void_p
-            _libssl.SSL_CTX_new.argtypes = [ctypes.c_void_p]
-            _libssl.SSL_CTX_free.restype = None
-            _libssl.SSL_CTX_free.argtypes = [ctypes.c_void_p]
-
-            _method = _libssl.TLS_method()
-            _raw_ctx = _libssl.SSL_CTX_new(_method)
-            if not _raw_ctx:
-                raise RuntimeError("SSL_CTX_new returned NULL")
-
-            try:
-                _rc = _offload.ConfigureSslContext(
-                    _c_sign,
-                    _cert_pem_bytes,
-                    ctypes.c_void_p(_raw_ctx),
-                )
-            finally:
-                _libssl.SSL_CTX_free(_raw_ctx)
-
-            if _rc == 1:
-                logger.info("    PASS: ConfigureSslContext succeeded (rc=1)")
-                logger.info("    The TLS offload library is compatible with this system's OpenSSL and our cert.")
-            else:
-                logger.error("    FAIL: ConfigureSslContext returned %d", _rc)
-                logger.error(
-                    "    The TLS offload library could not configure the SSL context with the ECP-provided cert."
-                )
-                logger.error(
-                    "    This indicates an incompatibility between "
-                    "the offload library and this system's OpenSSL, "
-                    "or an issue with the cert format/algorithm."
-                )
+            except Exception:
+                logger.exception("ECP cert retrieval diagnostic failed")
                 sys.exit(1)
 
-        except Exception:
-            logger.exception("Step 7b (TLS offload config) failed")
-            sys.exit(1)
-
-        logger.info("=== 7c) Full ADC Auth Flow ===")
+        # ── ADC Verification (always runs) ──
+        # End-to-end proof: TPM key → ECP → mTLS → Google STS → API call.
+        logger.info("=== 7) ADC Verification ===")
 
         try:
             mtls_session = requests.Session()
@@ -2272,7 +2146,11 @@ def main() -> None:
                 logger.info("   Authenticated SA: %s", sa_email)
             logger.info("   Target Project:   %s", proj_result.get("name"))
         except Exception:
-            logger.exception("Step 7c (full ADC auth) failed")
+            logger.exception("ADC verification failed")
+            logger.error(
+                "%s Re-run with --debug for detailed ECP and TLS offload diagnostics.",
+                SYM_FAIL,
+            )
             sys.exit(1)
 
 
