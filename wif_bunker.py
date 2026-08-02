@@ -113,6 +113,81 @@ _KEY_ALGORITHMS: dict[str, dict] = {
 }
 
 
+# --- Subprocess Helpers ---
+def _require_command(name: str, *, package: str = "", install_hint: str = "") -> str:
+    """Verify an external command is available on PATH.
+
+    Returns the resolved path.  Raises RuntimeError with install
+    instructions if the command is not found.
+    """
+    path = shutil.which(name)
+    if path:
+        return path
+    msg = f"Required command '{name}' not found on PATH."
+    if package:
+        msg += f"\n  Package: {package}"
+    if install_hint:
+        msg += f"\n  Install: {install_hint}"
+    raise RuntimeError(msg)
+
+
+def _check_tpm_linux() -> None:
+    """Pre-validate TPM availability on Linux.
+
+    Checks for hardware TPM device, tpm2-abrmd service, or software TPM.
+    Raises RuntimeError with actionable guidance if no TPM is accessible.
+    """
+    # 1. Hardware TPM device node
+    tpm_device = Path("/dev/tpmrm0")
+    if tpm_device.exists():
+        return  # Hardware TPM available
+
+    # 2. Check if tpm2-abrmd service is running (systemd)
+    try:
+        abrmd = subprocess.run(
+            ["systemctl", "is-active", "--quiet", "tpm2-abrmd"],
+            capture_output=True, timeout=5,
+        )
+        if abrmd.returncode == 0:
+            return  # tpm2-abrmd is running and managing a TPM
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass  # systemctl not available or timed out
+
+    # 3. Check for software TPM (swtpm) via TCTI env or port probe
+    if os.environ.get("TPM2TOOLS_TCTI"):
+        return  # User has explicitly configured a TCTI (e.g. swtpm)
+    try:
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(1)
+            s.connect(("127.0.0.1", 2321))
+            return  # swtpm is listening on the default port
+    except (OSError, ConnectionRefusedError):
+        pass
+
+    raise RuntimeError(
+        "No TPM device or service found.\n"
+        "\n"
+        "  wif_bunker requires a TPM 2.0 for hardware-backed keys.\n"
+        "\n"
+        "  Options:\n"
+        "    1. Hardware TPM — ensure the tpm2-abrmd service is running:\n"
+        "         sudo systemctl start tpm2-abrmd\n"
+        "\n"
+        "    2. Software TPM (development/testing) — install and start swtpm:\n"
+        "         sudo apt install swtpm swtpm-tools\n"
+        "         mkdir -p /tmp/swtpm\n"
+        "         swtpm socket --tpmstate dir=/tmp/swtpm --tpm2 "
+        "--server type=tcp,port=2321 --ctrl type=tcp,port=2322 &\n"
+        "         export TPM2TOOLS_TCTI='swtpm:host=127.0.0.1,port=2321'\n"
+        "\n"
+        "    3. Use --soft-key for software-only keys (no TPM required).\n"
+        "       NOTE: --soft-key does NOT provide hardware TPM protection.\n"
+        "       Keys are stored in software and are exportable. Use only for\n"
+        "       development and testing, never for production workloads."
+    )
+
+
 # --- Runtime Configuration ---
 @dataclass
 class WorkloadConfig:
@@ -657,6 +732,14 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
       3. Ephemeral CA signs the CSR            → CA-signed workload cert
       4. certreq -accept issued.cer            → associates CA cert with TPM key
     """
+    # Pre-validate required commands.
+    _require_command("certreq",
+        install_hint="Built-in Windows command — should be at C:\\Windows\\System32\\certreq.exe")
+    _require_command("certutil",
+        install_hint="Built-in Windows command — should be at C:\\Windows\\System32\\certutil.exe")
+    _require_command("powershell",
+        install_hint="Built-in Windows command — ensure PowerShell is on PATH")
+
     work_dir = Path.cwd() / f"ctk_work_{config.suffix}"
     work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -795,10 +878,26 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
         return bundle
 
     except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or "").strip()
+        cmd_name = e.cmd[0] if isinstance(e.cmd, list) else str(e.cmd)
+        if "NTE_DEVICE_NOT_FOUND" in stderr:
+            raise RuntimeError(
+                f"No TPM device found (command: {cmd_name}).\n"
+                "Windows could not find a TPM on this system.\n"
+                "\n"
+                "  Use --soft-key for software-only keys (no TPM required).\n"
+                "  NOTE: --soft-key does NOT provide hardware TPM protection."
+            ) from e
+        if "NTE_NOT_SUPPORTED" in stderr:
+            raise RuntimeError(
+                f"TPM does not support the requested algorithm (command: {cmd_name}).\n"
+                "  Try a different --key-algorithm (e.g. es256 or rsa2048)."
+            ) from e
         raise RuntimeError(
-            f"Windows TPM certificate generation failed: "
-            f"{e.cmd} → exit {e.returncode}\n"
-            f"stdout: {e.stdout}\nstderr: {e.stderr}"
+            f"Windows certificate generation failed (command: {cmd_name}, "
+            f"exit code: {e.returncode}).\n"
+            f"  stdout: {(e.stdout or '')[:300]}\n"
+            f"  stderr: {stderr[:500]}"
         ) from e
 
 
@@ -818,6 +917,12 @@ def _generate_cert_macos(config: WorkloadConfig) -> CertificateBundle:
       5. Ephemeral CA signs the CSR  → CA-signed workload cert
       6. sc_auth import-ctk-certificate → replace self-signed cert with CA-signed
     """
+    # Pre-validate required commands.
+    _require_command("security",
+        install_hint="Built-in macOS command — should always be at /usr/bin/security")
+    _require_command("sc_auth",
+        install_hint="Built-in macOS command — requires macOS 10.15+. Check /usr/bin/sc_auth")
+
     mac_ver_str = platform.mac_ver()[0]
     if mac_ver_str:
         major_ver = int(mac_ver_str.split(".")[0])
@@ -955,9 +1060,24 @@ def _generate_cert_macos(config: WorkloadConfig) -> CertificateBundle:
         return bundle
 
     except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or "").strip()
+        cmd_name = e.cmd[0] if isinstance(e.cmd, list) else str(e.cmd)
+        if "-25293" in stderr or "errSecAuthFailed" in stderr:
+            raise RuntimeError(
+                f"Secure Enclave key generation denied (command: {cmd_name}).\n"
+                "macOS blocked access to the Secure Enclave.\n"
+                "\n"
+                "  Possible causes:\n"
+                "    - Running in a VM without SE support\n"
+                "    - User denied the biometric/passcode prompt\n"
+                "\n"
+                "  Use --soft-key for software-only keys (no SE required).\n"
+                "  NOTE: --soft-key does NOT provide hardware protection."
+            ) from e
         raise RuntimeError(
-            f"macOS Secure Enclave generation failed: "
-            f"{e.stderr or 'Unknown error'}"
+            f"macOS certificate generation failed (command: {cmd_name}, "
+            f"exit code: {e.returncode}).\n"
+            f"  stderr: {stderr[:500]}"
         ) from e
     finally:
         if work_dir.exists():
@@ -966,6 +1086,21 @@ def _generate_cert_macos(config: WorkloadConfig) -> CertificateBundle:
 
 def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
     """Generates a TPM 2.0-backed certificate via PKCS#11 toolchain (Ubuntu 24+)."""
+    # Pre-validate required commands.
+    _require_command("tpm2_ptool", package="tpm2-pkcs11-tools",
+        install_hint="sudo apt install tpm2-pkcs11-tools")
+    _require_command("p11tool", package="gnutls-bin",
+        install_hint="sudo apt install gnutls-bin")
+    _require_command("pkcs11-tool", package="opensc",
+        install_hint="sudo apt install opensc")
+    # Also need certtool from gnutls-bin for CSR generation.
+    _require_command("certtool", package="gnutls-bin",
+        install_hint="sudo apt install gnutls-bin")
+
+    # Check TPM availability (unless using software keys).
+    if not config.soft_key:
+        _check_tpm_linux()
+
     tpm_store = Path.home() / ".tpm2_pkcs11"
     os.environ["TPM2_PKCS11_STORE"] = str(tpm_store)
     tpm_store.mkdir(parents=True, exist_ok=True)
@@ -1092,9 +1227,53 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
         return bundle
 
     except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or "").strip()
+        cmd_name = e.cmd[0] if isinstance(e.cmd, list) else str(e.cmd)
+        # Parse known error patterns for actionable guidance.
+        if "Could not load tcti" in stderr or "No standard TCTI" in stderr:
+            raise RuntimeError(
+                f"TPM communication failed (command: {cmd_name}).\n"
+                "The TPM tools are installed but cannot connect to a TPM device.\n"
+                "\n"
+                "  Options:\n"
+                "    1. Start the TPM resource manager:\n"
+                "         sudo systemctl start tpm2-abrmd\n"
+                "\n"
+                "    2. For development, start a software TPM:\n"
+                "         swtpm socket --tpmstate dir=/tmp/swtpm --tpm2 "
+                "--server type=tcp,port=2321 --ctrl type=tcp,port=2322 &\n"
+                "         export TPM2TOOLS_TCTI='swtpm:host=127.0.0.1,port=2321'\n"
+                "\n"
+                "    3. Use --soft-key for software-only keys (no TPM required).\n"
+                "       NOTE: --soft-key does NOT provide hardware TPM protection.\n"
+                "       Keys are stored in software and are exportable."
+            ) from e
+        if "timed out" in stderr and "Tabrmd" in stderr:
+            raise RuntimeError(
+                f"tpm2-abrmd service timed out (command: {cmd_name}).\n"
+                "The TPM resource manager service is installed but not responding.\n"
+                "\n"
+                "  Try: sudo systemctl restart tpm2-abrmd\n"
+                "\n"
+                "  If using a software TPM, set the TCTI environment variable:\n"
+                "    export TPM2TOOLS_TCTI='swtpm:host=127.0.0.1,port=2321'"
+            ) from e
+        if "/dev/tpmrm0" in stderr or "/dev/tpm0" in stderr:
+            raise RuntimeError(
+                f"No TPM device found (command: {cmd_name}).\n"
+                "The system does not have /dev/tpmrm0 or /dev/tpm0.\n"
+                "\n"
+                "  Use --soft-key for software-only keys (no TPM required).\n"
+                "  NOTE: --soft-key does NOT provide hardware TPM protection."
+            ) from e
+        # Fallback: include the raw error with the failing command.
         raise RuntimeError(
-            f"Linux TPM initialization failed. Ensure tpm2-pkcs11-tools and "
-            f"gnutls-bin are installed.\nError: {e.stderr or 'Unknown error'}"
+            f"Linux TPM operation failed (command: {cmd_name}, "
+            f"exit code: {e.returncode}).\n"
+            f"  stderr: {stderr[:500]}\n"
+            "\n"
+            "  Ensure tpm2-pkcs11-tools and gnutls-bin are installed:\n"
+            "    sudo apt install tpm2-pkcs11-tools gnutls-bin opensc"
         ) from e
 
 # --- ECP Binary Resolution ---
@@ -1301,9 +1480,8 @@ def _ensure_ecp_binaries() -> tuple[Path, Path, Path]:
     """Locates ECP binaries, downloading from gcloud component CDN if needed.
 
     Search order:
-      1. gcloud SDK's installed ECP component (in-place)
-      2. Cached download in persistent install directory
-      3. Download from gcloud component CDN
+      1. Cached download in persistent install directory
+      2. Download from gcloud component CDN (skipping broken versions)
 
     Returns:
         (ecp_binary, ecp_client_lib, tls_offload_lib) paths.
@@ -1319,29 +1497,15 @@ def _ensure_ecp_binaries() -> tuple[Path, Path, Path]:
 
     ecp_bin = client = offload = None
 
-    # 1. Check gcloud SDK (in-place).
-    gcloud_path = shutil.which("gcloud")
-    if gcloud_path:
-        gcloud_sdk_root = Path(gcloud_path).resolve().parent.parent
-        gcloud_ecp_dir = gcloud_sdk_root / "platform" / "enterprise_cert"
-        if gcloud_ecp_dir.is_dir():
-            gcloud_ecp_bin = gcloud_sdk_root / "bin" / ecp_bin_name
-            gcloud_client = gcloud_ecp_dir / libecp_name
-            gcloud_offload = gcloud_ecp_dir / tls_offload_name
-            if gcloud_ecp_bin.exists() and gcloud_client.exists() and gcloud_offload.exists():
-                logger.info("    Using gcloud SDK ECP binaries from %s", gcloud_ecp_dir)
-                ecp_bin, client, offload = gcloud_ecp_bin, gcloud_client, gcloud_offload
+    # 1. Check cached install directory.
+    cached_bin = ecp_install_dir / ecp_bin_name
+    cached_client = ecp_install_dir / libecp_name
+    cached_offload = ecp_install_dir / tls_offload_name
+    if cached_bin.exists() and cached_client.exists() and cached_offload.exists():
+        logger.info("    Using cached ECP binaries from %s", ecp_install_dir)
+        ecp_bin, client, offload = cached_bin, cached_client, cached_offload
 
-    # 2. Check cached install directory.
-    if not ecp_bin:
-        cached_bin = ecp_install_dir / ecp_bin_name
-        cached_client = ecp_install_dir / libecp_name
-        cached_offload = ecp_install_dir / tls_offload_name
-        if cached_bin.exists() and cached_client.exists() and cached_offload.exists():
-            logger.info("    Using cached ECP binaries from %s", ecp_install_dir)
-            ecp_bin, client, offload = cached_bin, cached_client, cached_offload
-
-    # 3. Download from gcloud component CDN.
+    # 2. Download from gcloud component CDN.
     if not ecp_bin:
         logger.info("    ECP binaries not found — downloading from gcloud CDN...")
         _download_ecp_from_gcloud_components(ecp_install_dir)
