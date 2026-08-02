@@ -805,6 +805,15 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
         # 4. Install CA cert into trusted root store so certreq -accept
         #    can validate the chain.  This triggers a Windows security
         #    dialog — the user must click Yes.  We verify afterward.
+        logger.warning("")
+        logger.warning("    ╔══════════════════════════════════════════════════════════╗")
+        logger.warning("    ║  ATTENTION: A Windows Security dialog will appear.      ║")
+        logger.warning("    ║  You MUST click YES to install the ephemeral CA cert.    ║")
+        logger.warning("    ║                                                          ║")
+        logger.warning("    ║  ⚠  The dialog may appear BEHIND this window.            ║")
+        logger.warning("    ║     Check your taskbar for a 'Security Warning' prompt.  ║")
+        logger.warning("    ╚══════════════════════════════════════════════════════════╝")
+        logger.warning("")
         ca_cert_obj = cx509.load_pem_x509_certificate(
             bundle.trust_anchor_pem.encode()
         )
@@ -855,6 +864,14 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
         # 6. Remove the ephemeral CA from trusted root store.
         #    On Windows, this triggers a Security Warning dialog
         #    requiring user confirmation (same as import).
+        logger.warning("")
+        logger.warning("    ╔══════════════════════════════════════════════════════════╗")
+        logger.warning("    ║  ATTENTION: Another Windows Security dialog will appear. ║")
+        logger.warning("    ║  Click YES to remove the ephemeral CA (cleanup step).    ║")
+        logger.warning("    ║                                                          ║")
+        logger.warning("    ║  ⚠  Check your taskbar if you don't see it.              ║")
+        logger.warning("    ╚══════════════════════════════════════════════════════════╝")
+        logger.warning("")
         logger.info("    Removing ephemeral CA from trusted root store...")
         subprocess.run(
             ["certutil", "-user", "-delstore", "Root", ca_thumbprint],
