@@ -17,7 +17,7 @@ if sa_email:
 
 # Smoke test: list accessible projects
 resp = authed_session.get(
-    "https://cloudresourcemanager.googleapis.com/v1/projects",
+    "https://cloudresourcemanager.googleapis.com/v1/projects?filter=lifecycleState%3AACTIVE&pageSize=5",
 )
 projects = resp.json().get("projects", [])
 print(f"\nAccessible projects ({len(projects)}):")
