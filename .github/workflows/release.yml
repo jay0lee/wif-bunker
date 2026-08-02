@@ -64,6 +64,9 @@ jobs:
         shell: bash
         run: |
           IFS='.' read -r YEAR MONTH DAY HHMM <<< "$VERSION"
+          # Strip leading zeros — Python rejects 08/09 as invalid octal
+          MONTH=$((10#$MONTH))
+          DAY=$((10#$DAY))
           sed -e "s/{YEAR}/$YEAR/g" \
               -e "s/{MONTH}/$MONTH/g" \
               -e "s/{DAY}/$DAY/g" \
