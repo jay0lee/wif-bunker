@@ -1,4 +1,5 @@
 """Minimal ADC test — proves Application Default Credentials work."""
+
 import google.auth
 import google.auth.transport.requests
 
