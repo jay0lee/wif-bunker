@@ -8,21 +8,25 @@ from __future__ import annotations
 
 __version__ = "dev"  # Replaced by build process with datetime version
 
+import argparse
 import base64
+import concurrent.futures
+import ctypes
 import datetime
 import hashlib
-import os
-import sys
-import time
 import json
-import shutil
-import tempfile
-import argparse
 import logging
+import os
 import platform
+import re
+import shutil
+import ssl
 import subprocess
+import sys
+import tempfile
 import threading
-import concurrent.futures
+import time
+import traceback
 from dataclasses import dataclass, field
 from functools import wraps
 from pathlib import Path
@@ -33,14 +37,13 @@ from cryptography import x509 as cx509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.x509.oid import NameOID
-import google.auth
-import google.auth.transport.requests
 from google.auth import default as google_auth_default
 from google.auth.exceptions import RefreshError, OAuthError
 from google.auth.transport.requests import (
     Request as GoogleAuthRequest,
     _MutualTlsOffloadAdapter,
 )
+from get_ecp import get_ecp_platform_info, get_ecp_binary_names, get_default_ecp_dir
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +83,9 @@ SYM_ARROW = "\u2192" if _UNICODE else "->"       # →
 MAX_BACKOFF_SECONDS = 60
 LRO_TIMEOUT_SECONDS = 300
 
+
+# WIF maximum certificate lifetime (Google enforced).
+_WIF_MAX_CERT_LIFETIME_DAYS = 390
 
 # --- Key Algorithm Definitions ---
 # Maps user-facing algorithm names to platform-specific parameters.
@@ -652,7 +658,7 @@ def _create_ca_and_sign(
         .public_key(ca_key.public_key())
         .serial_number(cx509.random_serial_number())
         .not_valid_before(now)
-        .not_valid_after(now + datetime.timedelta(days=390))  # WIF max
+        .not_valid_after(now + datetime.timedelta(days=_WIF_MAX_CERT_LIFETIME_DAYS))
         .add_extension(
             cx509.BasicConstraints(ca=True, path_length=0), critical=True,
         )
@@ -680,7 +686,7 @@ def _create_ca_and_sign(
         .public_key(workload_pub_key)
         .serial_number(cx509.random_serial_number())
         .not_valid_before(now)
-        .not_valid_after(now + datetime.timedelta(days=390))  # WIF max
+        .not_valid_after(now + datetime.timedelta(days=_WIF_MAX_CERT_LIFETIME_DAYS))
         .add_extension(
             cx509.BasicConstraints(ca=False, path_length=None), critical=True,
         )
@@ -769,8 +775,9 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
         if config.soft_key:
             provider = "Microsoft Software Key Storage Provider"
             logger.warning(
-                f"    {SYM_WARN}  --soft-key: using software keys (NOT TPM-backed). "
-                "For production use, remove --soft-key to use the TPM."
+                "    %s  --soft-key: using software keys (NOT TPM-backed). "
+                "For production use, remove --soft-key to use the TPM.",
+                SYM_WARN,
             )
         else:
             provider = "Microsoft Platform Crypto Provider"
@@ -1304,8 +1311,6 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
 
 # --- ECP Binary Resolution ---
 
-from get_ecp import get_ecp_platform_info, get_ecp_binary_names, get_default_ecp_dir
-
 
 def _find_ecp_binaries() -> tuple[Path, Path, Path]:
     """Locates pre-installed ECP binaries.
@@ -1813,7 +1818,7 @@ def main() -> None:
                 #   Slot 0 (0x1): bunker-wif
                 #     token label : bunker-wif
                 # The label may appear on the Slot line itself.
-                import re
+
                 last_slot_hex = None
                 for line in slot_result.stdout.splitlines():
                     slot_match = re.search(
@@ -2001,14 +2006,14 @@ def main() -> None:
 
             # Pre-load ECP DLLs on Windows.
             if sys.platform == "win32":
-                import ctypes
+
                 for lib in (ecp_client_lib, tls_offload_lib):
                     try:
                         ctypes.WinDLL(str(lib))
                     except OSError:
                         pass
 
-            import ctypes
+
             _ecp_lib = ctypes.CDLL(str(ecp_client_lib))
             _ecp_lib.GetCertPemForPython.argtypes = [
                 ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int,
@@ -2036,7 +2041,7 @@ def main() -> None:
 
             # Parse and show cert details.
             try:
-                from cryptography import x509 as cx509
+
                 _parsed = cx509.load_pem_x509_certificate(_cert_pem_bytes)
                 _pub_key = _parsed.public_key()
                 _key_type = type(_pub_key).__name__
@@ -2061,10 +2066,8 @@ def main() -> None:
                     except Exception:
                         pass
 
-        except Exception as e:
-            import traceback
-            logger.error("Step 7a (ECP cert retrieval) failed: %s", e)
-            logger.error("Full traceback:\n%s", traceback.format_exc())
+        except Exception:
+            logger.exception("Step 7a (ECP cert retrieval) failed")
             sys.exit(1)
 
         logger.info("=== 7b) TLS Offload Configuration Test ===")
@@ -2075,8 +2078,7 @@ def main() -> None:
         # OpenSSL. The actual handshake + signing is tested in 7c.
 
         try:
-            import ssl
-            import ctypes
+
 
             _offload = ctypes.CDLL(str(tls_offload_lib))
             logger.info("    TLS offload lib loaded: %s", tls_offload_lib.name)
@@ -2159,18 +2161,16 @@ def main() -> None:
                              "or an issue with the cert format/algorithm.")
                 sys.exit(1)
 
-        except Exception as e:
-            import traceback
-            logger.error("Step 7b (TLS offload config) failed: %s", e)
-            logger.error("Full traceback:\n%s", traceback.format_exc())
+        except Exception:
+            logger.exception("Step 7b (TLS offload config) failed")
             sys.exit(1)
 
         logger.info("=== 7c) Full ADC Auth Flow ===")
 
         try:
-            import requests as req_lib
 
-            mtls_session = req_lib.Session()
+
+            mtls_session = requests.Session()
             mtls_adapter = _MutualTlsOffloadAdapter(str(cert_config_path))
             mtls_session.mount("https://", mtls_adapter)
             mtls_request = GoogleAuthRequest(session=mtls_session)
@@ -2208,10 +2208,8 @@ def main() -> None:
             if use_sa:
                 logger.info("   Authenticated SA: %s", sa_email)
             logger.info("   Target Project:   %s", proj_result.get("name"))
-        except Exception as e:
-            import traceback
-            logger.error("Step 7c (full ADC auth) failed: %s", e)
-            logger.error("Full traceback:\n%s", traceback.format_exc())
+        except Exception:
+            logger.exception("Step 7c (full ADC auth) failed")
             sys.exit(1)
 
 

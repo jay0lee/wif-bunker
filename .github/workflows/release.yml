@@ -80,6 +80,8 @@ jobs:
 
       - name: Download ECP
         run: python get_ecp.py --output dist/wif-bunker/ecp
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
 
       - name: Smoke test (Unix)
         if: matrix.platform_name != 'windows'

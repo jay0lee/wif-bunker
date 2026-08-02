@@ -238,6 +238,8 @@ jobs:
       - name: "Download ECP binaries"
         shell: bash
         run: python get_ecp.py
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
 
       # ── Step 2: WIF Bunker fresh run (creates project, SA, pool, provider) ──
       - name: "WIF Bunker: Fresh setup"
