@@ -1,0 +1,216 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  # ── Job 0: Generate a single version for all jobs ──
+  version:
+    name: Generate version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.gen.outputs.version }}
+    steps:
+      - name: Generate datetime version
+        id: gen
+        run: |
+          VERSION=$(date -u +%Y.%m.%d.%H%M)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+  # ── Job 1: Build on all platforms ──
+  build:
+    name: Build (${{ matrix.platform_name }})
+    needs: version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform_name: linux
+            arch: x86_64
+          - os: macos-15
+            platform_name: macos
+            arch: arm64
+          - os: windows-2025
+            platform_name: windows
+            arch: x86_64
+
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Inject version
+        shell: bash
+        run: |
+          sed -i.bak "s/__version__ = \"dev\"/__version__ = \"$VERSION\"/" wif_bunker.py
+          rm -f wif_bunker.py.bak
+          grep __version__ wif_bunker.py
+
+      - name: Generate Windows version info
+        if: matrix.platform_name == 'windows'
+        shell: bash
+        run: |
+          IFS='.' read -r YEAR MONTH DAY HHMM <<< "$VERSION"
+          sed -e "s/{YEAR}/$YEAR/g" \
+              -e "s/{MONTH}/$MONTH/g" \
+              -e "s/{DAY}/$DAY/g" \
+              -e "s/{HHMM}/$HHMM/g" \
+              -e "s/{VERSION_STR}/$VERSION/g" \
+              packaging/windows/version_info.txt.in > version_info.txt
+          cat version_info.txt
+
+      - name: Install dependencies
+        run: pip install pyinstaller .
+
+      - name: Run PyInstaller
+        run: pyinstaller wif-bunker.spec
+
+      - name: Download ECP
+        run: python get_ecp.py --output dist/wif-bunker/ecp
+
+      - name: Smoke test (Unix)
+        if: matrix.platform_name != 'windows'
+        run: |
+          dist/wif-bunker/wif-bunker --version
+          dist/wif-bunker/wif-bunker --help
+
+      - name: Smoke test (Windows)
+        if: matrix.platform_name == 'windows'
+        run: |
+          dist\wif-bunker\wif-bunker.exe --version
+          dist\wif-bunker\wif-bunker.exe --help
+
+      - name: Package (Linux)
+        if: matrix.platform_name == 'linux'
+        run: tar -czf wif-bunker-${VERSION}-linux-x86_64.tar.gz -C dist wif-bunker/
+
+      - name: Package (macOS)
+        if: matrix.platform_name == 'macos'
+        run: tar -czf wif-bunker-${VERSION}-macos-arm64.tar.gz -C dist wif-bunker/
+
+      - name: Package (Windows — InnoSetup)
+        if: matrix.platform_name == 'windows'
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\iscc.exe" /DVersion=$env:VERSION packaging\windows\wif-bunker.iss
+
+      - name: Upload artifact (Linux/macOS)
+        if: matrix.platform_name != 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: wif-bunker-${{ matrix.platform_name }}-${{ matrix.arch }}
+          path: wif-bunker-*.tar.gz
+
+      - name: Upload artifact (Windows)
+        if: matrix.platform_name == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: wif-bunker-${{ matrix.platform_name }}-${{ matrix.arch }}
+          path: packaging\windows\Output\wif-bunker-*-setup.exe
+
+      # ── Attestation: cryptographic proof this artifact was built here ──
+      - name: Attest build provenance (Linux/macOS)
+        if: matrix.platform_name != 'windows'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: wif-bunker-*.tar.gz
+
+      - name: Attest build provenance (Windows)
+        if: matrix.platform_name == 'windows'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: packaging\windows\Output\wif-bunker-*-setup.exe
+
+      # ── SBOM: software bill of materials ──
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: dist/wif-bunker/
+          artifact-name: sbom-${{ matrix.platform_name }}-${{ matrix.arch }}.spdx.json
+          output-file: sbom-${{ matrix.platform_name }}-${{ matrix.arch }}.spdx.json
+          format: spdx-json
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ matrix.platform_name }}-${{ matrix.arch }}
+          path: sbom-${{ matrix.platform_name }}-${{ matrix.arch }}.spdx.json
+
+  # ── Job 2: Integration test with built binary ──
+  integration-test:
+    needs: build
+    uses: ./.github/workflows/integration-test.yml
+    with:
+      wif_bunker_cmd: './wif-bunker'
+    secrets:
+      WIF_PROVIDER: ${{ secrets.WIF_PROVIDER }}
+      WIF_SERVICE_ACCOUNT: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+      SANDBOX_FOLDER_ID: ${{ secrets.SANDBOX_FOLDER_ID }}
+
+  # ── Job 3: Tag + Release (only if tests pass) ──
+  release:
+    name: Publish Release
+    needs: [version, build, integration-test]
+    runs-on: ubuntu-latest
+
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create tag
+        run: |
+          git tag "v${VERSION}"
+          git push origin "v${VERSION}"
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate SHA256 checksums
+        run: |
+          cd artifacts
+          sha256sum * > ../SHA256SUMS.txt
+          cat ../SHA256SUMS.txt
+
+      - name: Attest checksums
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.version.outputs.version }}
+          name: WIF Bunker ${{ needs.version.outputs.version }}
+          files: |
+            artifacts/*
+            SHA256SUMS.txt
+          generate_release_notes: true
+          body: |
+            ## Verify
+
+            **Checksums:**
+            ```
+            sha256sum -c SHA256SUMS.txt
+            ```
+
+            **Attestation:**
+            ```
+            gh attestation verify PATH/TO/ARTIFACT -R jay0lee/wif-bunker
+            ```

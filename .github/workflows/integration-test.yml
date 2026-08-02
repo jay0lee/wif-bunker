@@ -4,6 +4,20 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      wif_bunker_cmd:
+        description: 'Command to invoke wif-bunker (e.g. python wif_bunker.py or ./wif-bunker)'
+        required: false
+        default: 'python wif_bunker.py'
+        type: string
+    secrets:
+      WIF_PROVIDER:
+        required: true
+      WIF_SERVICE_ACCOUNT:
+        required: true
+      SANDBOX_FOLDER_ID:
+        required: true
 
 # Only allow one integration test at a time to avoid project name collisions
 concurrency:
@@ -237,7 +251,7 @@ jobs:
             DIALOG_PID=$!
             echo "Dialog auto-accept PID: $DIALOG_PID"
           fi
-          python wif_bunker.py \
+          ${{ inputs.wif_bunker_cmd || 'python wif_bunker.py' }} \
             --use-adc \
             --create-project="${{ steps.config.outputs.project_id }}" \
             --folder="${{ secrets.SANDBOX_FOLDER_ID }}" \
@@ -251,7 +265,7 @@ jobs:
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             powershell -NoProfile -File .github/scripts/win_dialog_accept.ps1 &
           fi
-          python wif_bunker.py \
+          ${{ inputs.wif_bunker_cmd || 'python wif_bunker.py' }} \
             --use-adc \
             --use-project="${{ steps.config.outputs.project_id }}" \
             --use-pool=bunker-wif-pool \
@@ -295,7 +309,7 @@ jobs:
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             powershell -NoProfile -File .github/scripts/win_dialog_accept.ps1 &
           fi
-          python wif_bunker.py \
+          ${{ inputs.wif_bunker_cmd || 'python wif_bunker.py' }} \
             --use-adc \
             --use-project="${{ steps.config.outputs.project_id }}" \
             --use-pool=bunker-wif-pool \

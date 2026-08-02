@@ -6,6 +6,8 @@ WIF Bunker — Hardware-backed X.509 Workload Identity Federation (ADC)
 
 from __future__ import annotations
 
+__version__ = "dev"  # Replaced by build process with datetime version
+
 import base64
 import datetime
 import hashlib
@@ -31,7 +33,14 @@ from cryptography import x509 as cx509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.x509.oid import NameOID
+import google.auth
+import google.auth.transport.requests
+from google.auth import default as google_auth_default
 from google.auth.exceptions import RefreshError, OAuthError
+from google.auth.transport.requests import (
+    Request as GoogleAuthRequest,
+    _MutualTlsOffloadAdapter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -332,12 +341,10 @@ class GCPClient:
         self._token_lock = threading.Lock()
 
         if use_adc:
-            import google.auth
-            import google.auth.transport.requests
-            self._credentials, _ = google.auth.default(
+            self._credentials, _ = google_auth_default(
                 scopes=self._OAUTH_SCOPES,
             )
-            self._auth_request = google.auth.transport.requests.Request()
+            self._auth_request = GoogleAuthRequest()
             self._credentials.refresh(self._auth_request)
             self._token = None
             # Log the identity we're authenticated as.
@@ -1390,6 +1397,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="WIF Bunker — Hardware-backed X.509 Workload Identity Federation",
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--debug", action="store_true")
     project_group = parser.add_mutually_exclusive_group()
     project_group.add_argument(
@@ -2160,17 +2168,12 @@ def main() -> None:
         logger.info("=== 7c) Full ADC Auth Flow ===")
 
         try:
-            from google.auth import default
-            from google.auth.transport.requests import (
-                Request as AuthRequest,
-                _MutualTlsOffloadAdapter,
-            )
             import requests as req_lib
 
             mtls_session = req_lib.Session()
             mtls_adapter = _MutualTlsOffloadAdapter(str(cert_config_path))
             mtls_session.mount("https://", mtls_adapter)
-            mtls_request = AuthRequest(session=mtls_session)
+            mtls_request = GoogleAuthRequest(session=mtls_session)
 
             # Allow IAM bindings to propagate before attempting auth.
             logger.info("    Waiting 15s for IAM propagation...")
@@ -2184,7 +2187,7 @@ def main() -> None:
                 retry_msg="Waiting for STS propagation",
             )
             def _verify_adc():
-                adc_creds, _ = default(
+                adc_creds, _ = google_auth_default(
                     scopes=["https://www.googleapis.com/auth/cloud-platform"],
                     request=mtls_request,
                 )

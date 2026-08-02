@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Lint & Syntax Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Syntax check
+        run: python -m py_compile wif_bunker.py get_ecp.py minimal-adc.py
+
+  build:
+    name: Build (${{ matrix.platform_name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform_name: linux
+            arch: x86_64
+          - os: macos-15
+            platform_name: macos
+            arch: arm64
+          - os: windows-2025
+            platform_name: windows
+            arch: x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install pyinstaller .
+
+      - name: Run PyInstaller
+        run: pyinstaller wif-bunker.spec
+
+      - name: Download ECP
+        run: python get_ecp.py --output dist/wif-bunker/ecp
+
+      - name: Smoke test (Unix)
+        if: matrix.platform_name != 'windows'
+        run: dist/wif-bunker/wif-bunker --help
+
+      - name: Smoke test (Windows)
+        if: matrix.platform_name == 'windows'
+        run: dist\wif-bunker\wif-bunker.exe --help
+
+      - name: Verify ECP bundled
+        shell: bash
+        run: |
+          if [ "${{ matrix.platform_name }}" = "windows" ]; then
+            ls dist/wif-bunker/ecp/ecp.exe dist/wif-bunker/ecp/libecp.dll dist/wif-bunker/ecp/tls_offload.dll
+          elif [ "${{ matrix.platform_name }}" = "macos" ]; then
+            ls dist/wif-bunker/ecp/ecp dist/wif-bunker/ecp/libecp.dylib dist/wif-bunker/ecp/libtls_offload.dylib
+          else
+            ls dist/wif-bunker/ecp/ecp dist/wif-bunker/ecp/libecp.so dist/wif-bunker/ecp/libtls_offload.so
+          fi
