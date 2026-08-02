@@ -977,6 +977,12 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
         )
         logger.debug("    tpm2_ptool init: %s", init_result.stdout.strip())
 
+        # Remove existing token if present (reuse flow).
+        subprocess.run(
+            ["tpm2_ptool", "rmtoken", "--label=bunker-wif"],
+            capture_output=True, text=True,
+        )  # Ignore errors — token may not exist yet.
+
         token_result = subprocess.run(
             [
                 "tpm2_ptool", "addtoken", "--pid=1",
@@ -1852,28 +1858,21 @@ def main() -> None:
                     capture_output=True, text=True, timeout=10,
                 )
                 logger.debug("    pkcs11-tool slots:\n%s", slot_result.stdout)
-                # Parse output like: "Slot 0 (0x1): ..."
-                # Look for the line containing our token label
+                # Parse output like:
+                #   Slot 0 (0x1): bunker-wif
+                #     token label : bunker-wif
+                # The label may appear on the Slot line itself.
+                import re
+                last_slot_hex = None
                 for line in slot_result.stdout.splitlines():
-                    if "bunker-wif" in line:
-                        # Found token — slot ID is on the preceding line
+                    slot_match = re.search(
+                        r"Slot\s+\d+\s+\(0x([0-9a-fA-F]+)\)", line
+                    )
+                    if slot_match:
+                        last_slot_hex = slot_match.group(1)
+                    if "bunker-wif" in line and last_slot_hex:
+                        slot_id = last_slot_hex
                         break
-                    if line.strip().startswith("Slot"):
-                        # Extract slot ID: "Slot 0 (0x1):" -> "0x1" or "0"
-                        import re
-                        m = re.search(r"Slot\s+\d+\s+\(0x([0-9a-fA-F]+)\)", line)
-                        if m:
-                            last_slot_hex = m.group(1)
-                        else:
-                            m2 = re.search(r"Slot\s+(\d+)", line)
-                            if m2:
-                                last_slot_hex = hex(int(m2.group(1)))[2:]
-                else:
-                    last_slot_hex = None
-
-                # If we found the token, use the last slot we parsed
-                if "bunker-wif" in slot_result.stdout and last_slot_hex:
-                    slot_id = last_slot_hex
             except Exception as e:
                 logger.debug("    pkcs11-tool slot discovery failed: %s", e)
 
