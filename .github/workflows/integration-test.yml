@@ -11,6 +11,11 @@ on:
         required: false
         default: 'python wif_bunker.py'
         type: string
+      use_built_binary:
+        description: 'Set true to download and test a pre-built binary artifact (ECP bundled)'
+        required: false
+        default: false
+        type: boolean
     secrets:
       WIF_PROVIDER:
         required: true
@@ -37,6 +42,7 @@ jobs:
           - os: ubuntu-24.04
             name: Linux x64
             soft_key_flag: ""
+            artifact_name: wif-bunker-linux-x86_64
           # Linux ARM64 disabled: ECP doesn't publish linux/arm64 binaries.
           # Re-enable when googleapis/enterprise-certificate-proxy adds ARM64.
           # - os: ubuntu-24.04-arm
@@ -45,9 +51,11 @@ jobs:
           - os: macos-15
             name: macOS ARM64 (Apple Silicon)
             soft_key_flag: ""
+            artifact_name: wif-bunker-macos-arm64
           - os: windows-2025
             name: Windows x64
             soft_key_flag: "--soft-key"
+            artifact_name: wif-bunker-windows-x86_64
           # Windows ARM64 disabled: ECP (enterprise-certificate-proxy) doesn't
           # publish ARM64 binaries, and ARM64 Python can't load x86_64 DLLs.
           # Re-enable when googleapis/enterprise-certificate-proxy adds ARM64.
@@ -234,8 +242,32 @@ jobs:
           $wshell.SendKeys('{ESC}')
           Write-Host "OOBE dismissed."
 
-      # ── Download ECP binaries ──
+      # ── Download built binary (release testing) ──
+      - name: "Download built binary (Linux/macOS)"
+        if: inputs.use_built_binary && runner.os != 'Windows'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: artifact
+
+      - name: "Download built binary (Windows)"
+        if: inputs.use_built_binary && runner.os == 'Windows'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}-raw
+          path: wif-bunker
+
+      - name: "Extract built binary (Linux/macOS)"
+        if: inputs.use_built_binary && runner.os != 'Windows'
+        shell: bash
+        run: |
+          tar -xzf artifact/*.tar.gz
+          chmod +x wif-bunker/wif-bunker
+          ls -la wif-bunker/
+
+      # ── Download ECP binaries (source testing only — built binary has them bundled) ──
       - name: "Download ECP binaries"
+        if: ${{ !inputs.use_built_binary }}
         shell: bash
         run: python get_ecp.py
         env:

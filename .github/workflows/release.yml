@@ -125,6 +125,15 @@ jobs:
           name: wif-bunker-${{ matrix.platform_name }}-${{ matrix.arch }}
           path: packaging\windows\Output\wif-bunker-*-setup.exe
 
+      # Upload raw build directory for integration testing (InnoSetup
+      # installer can't be silently extracted in CI).
+      - name: Upload raw binary (Windows — for integration test)
+        if: matrix.platform_name == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: wif-bunker-${{ matrix.platform_name }}-${{ matrix.arch }}-raw
+          path: dist/wif-bunker/
+
       # ── Attestation: cryptographic proof this artifact was built here ──
       - name: Attest build provenance (Linux/macOS)
         if: matrix.platform_name != 'windows'
@@ -158,7 +167,8 @@ jobs:
     needs: build
     uses: ./.github/workflows/integration-test.yml
     with:
-      wif_bunker_cmd: './wif-bunker'
+      wif_bunker_cmd: './wif-bunker/wif-bunker'
+      use_built_binary: true
     secrets:
       WIF_PROVIDER: ${{ secrets.WIF_PROVIDER }}
       WIF_SERVICE_ACCOUNT: ${{ secrets.WIF_SERVICE_ACCOUNT }}
