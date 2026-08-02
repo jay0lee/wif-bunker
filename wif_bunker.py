@@ -1398,7 +1398,8 @@ def _ensure_ecp_binaries() -> tuple[Path, Path, Path]:
 
     ecp_bin_name = f"ecp{exe_ext}"
     libecp_name = f"libecp{lib_ext}"
-    tls_offload_name = f"libtls_offload{lib_ext}"
+    # Windows uses "tls_offload.dll"; Linux/macOS use "libtls_offload.*"
+    tls_offload_name = f"tls_offload{lib_ext}" if sys.platform == "win32" else f"libtls_offload{lib_ext}"
 
     ecp_bin = client = offload = None
 
