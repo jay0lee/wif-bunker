@@ -2038,7 +2038,7 @@ def main() -> None:
                 except Exception as _e:
                     log.warning("    find-identity error: %s", _e)
 
-        logger.info("=== 7) Executing Full ADC Auth Flow Demo ===")
+        logger.info("=== 7a) ECP Certificate Retrieval Test ===")
 
         try:
             # Set environment so google-auth discovers our configs.
@@ -2046,11 +2046,179 @@ def main() -> None:
             os.environ["GOOGLE_API_USE_CLIENT_CERTIFICATE"] = "true"
             os.environ["GOOGLE_API_CERTIFICATE_CONFIG"] = str(cert_config_path)
 
-            # Build a Request with the ECP mTLS adapter so that default()'s
-            # internal token exchange presents the SE-backed client cert.
-            # The cert was imported into the login keychain (step 3) so ECP's
-            # GetCertPemForPython / SignForPython can find it via
-            # SecItemCopyMatching.  macOS auto-associates it with the SE key.
+            if args.debug:
+                os.environ["ENABLE_ENTERPRISE_CERTIFICATE_LOGS"] = "1"
+
+            # Pre-load ECP DLLs on Windows.
+            if sys.platform == "win32":
+                import ctypes
+                for lib in (ecp_client_lib, tls_offload_lib):
+                    try:
+                        ctypes.WinDLL(str(lib))
+                    except OSError:
+                        pass
+
+            import ctypes
+            _ecp_lib = ctypes.CDLL(str(ecp_client_lib))
+            _ecp_lib.GetCertPemForPython.argtypes = [
+                ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int,
+            ]
+            _ecp_lib.GetCertPemForPython.restype = ctypes.c_int
+
+            # First call with buf=NULL to get required size.
+            _cert_len = _ecp_lib.GetCertPemForPython(
+                str(cert_config_path).encode(), None, 0,
+            )
+            if _cert_len <= 0:
+                logger.error("    FAIL: ECP returned cert_len=%d", _cert_len)
+                if args.debug:
+                    _run_ecp_diagnostics(cert_config_path, logger)
+                raise RuntimeError("ECP cert retrieval failed (cert_len=0)")
+
+            # Second call to retrieve the actual PEM.
+            _cert_buf = ctypes.create_string_buffer(_cert_len + 1)
+            _ecp_lib.GetCertPemForPython(
+                str(cert_config_path).encode(), _cert_buf, _cert_len + 1,
+            )
+            _cert_pem_bytes = _cert_buf.value
+            _cert_pem = _cert_pem_bytes.decode("utf-8", errors="replace")
+            logger.info("    PASS: ECP returned %d bytes of cert PEM", _cert_len)
+
+            # Parse and show cert details.
+            try:
+                from cryptography import x509 as cx509
+                _parsed = cx509.load_pem_x509_certificate(_cert_pem_bytes)
+                _pub_key = _parsed.public_key()
+                _key_type = type(_pub_key).__name__
+                logger.info("    Cert subject:   %s", _parsed.subject)
+                logger.info("    Cert issuer:    %s", _parsed.issuer)
+                logger.info("    Key algorithm:  %s", _key_type)
+                logger.info("    Cert serial:    %s", format(_parsed.serial_number, 'X'))
+            except Exception as _parse_err:
+                logger.warning("    Could not parse cert: %s", _parse_err)
+
+            if args.debug:
+                logger.debug("    ECP cert PEM:\n%s", _cert_pem)
+                # Check offload library linkage on Linux.
+                if sys.platform == "linux":
+                    try:
+                        _ldd = subprocess.run(
+                            ["ldd", str(tls_offload_lib)],
+                            capture_output=True, text=True, timeout=5,
+                        )
+                        logger.debug("    ldd %s:\n%s",
+                                     tls_offload_lib.name, _ldd.stdout)
+                    except Exception:
+                        pass
+
+        except Exception as e:
+            import traceback
+            logger.error("Step 7a (ECP cert retrieval) failed: %s", e)
+            logger.error("Full traceback:\n%s", traceback.format_exc())
+            sys.exit(1)
+
+        logger.info("=== 7b) Raw mTLS Handshake Test ===")
+
+        try:
+            import ssl
+            import socket
+
+            _offload = ctypes.CDLL(str(tls_offload_lib))
+            logger.info("    TLS offload lib loaded: %s", tls_offload_lib.name)
+
+            # Set up function signature for ConfigureSslContext.
+            # int ConfigureSslContext(SignFunc, const char *cert, SSL_CTX *ctx)
+            SIGN_CALLBACK_CTYPE = ctypes.CFUNCTYPE(
+                ctypes.c_int,           # return
+                ctypes.c_char_p,        # digest
+                ctypes.c_int,           # digest_len
+                ctypes.c_char_p,        # signature (output)
+                ctypes.POINTER(ctypes.c_int),  # signature_len (output)
+                ctypes.c_int,           # key_type
+            )
+
+            # Create a sign callback that delegates to ECP's SignForPython.
+            _ecp_lib.SignForPython.argtypes = [
+                ctypes.c_char_p,  # config_path
+                ctypes.c_char_p,  # digest
+                ctypes.c_int,     # digest_len
+                ctypes.c_char_p,  # signature (output)
+                ctypes.c_int,     # sig_buf_len
+            ]
+            _ecp_lib.SignForPython.restype = ctypes.c_int
+
+            def _sign_callback(digest, digest_len, sig_out, sig_len_ptr, key_type):
+                sig_buf_len = 256
+                sig_buf = ctypes.create_string_buffer(sig_buf_len)
+                actual_len = _ecp_lib.SignForPython(
+                    str(cert_config_path).encode(),
+                    digest, digest_len,
+                    sig_buf, sig_buf_len,
+                )
+                if actual_len <= 0:
+                    logger.error("    ECP SignForPython returned %d", actual_len)
+                    return 0
+                ctypes.memmove(sig_out, sig_buf, actual_len)
+                sig_len_ptr[0] = actual_len
+                return 1
+
+            _c_sign_callback = SIGN_CALLBACK_CTYPE(_sign_callback)
+
+            _offload.ConfigureSslContext.argtypes = [
+                SIGN_CALLBACK_CTYPE,
+                ctypes.c_char_p,
+                ctypes.c_void_p,
+            ]
+            _offload.ConfigureSslContext.restype = ctypes.c_int
+
+            # Create a real SSL context and extract the raw SSL_CTX*.
+            _ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            _ssl_ctx.load_default_certs()
+
+            # Get SSL_CTX* pointer from the SSLContext object.
+            # CPython layout: SSLContext object has ctx pointer at offset 2.
+            _ssl_ctx_ptr = ctypes.c_void_p.from_address(
+                id(_ssl_ctx) + ctypes.sizeof(ctypes.c_void_p) * 2
+            )
+            logger.debug("    SSL_CTX* = %s", hex(_ssl_ctx_ptr.value or 0))
+
+            # Call ConfigureSslContext with our cert and sign callback.
+            logger.info("    Calling ConfigureSslContext...")
+            _rc = _offload.ConfigureSslContext(
+                _c_sign_callback,
+                _cert_pem_bytes,
+                _ssl_ctx_ptr,
+            )
+
+            if _rc != 1:
+                logger.error("    FAIL: ConfigureSslContext returned %d", _rc)
+                raise RuntimeError(
+                    f"ConfigureSslContext failed (rc={_rc}). "
+                    "The TLS offload library could not configure the SSL context "
+                    "with the ECP-provided certificate."
+                )
+
+            logger.info("    PASS: ConfigureSslContext succeeded")
+
+            # Try a raw mTLS handshake — no google-auth, no ADC.
+            _mtls_host = "sts.mtls.googleapis.com"
+            logger.info("    Testing raw mTLS handshake to %s:443...", _mtls_host)
+            with socket.create_connection((_mtls_host, 443), timeout=15) as _sock:
+                with _ssl_ctx.wrap_socket(_sock, server_hostname=_mtls_host) as _ssock:
+                    _peer_cert = _ssock.getpeercert()
+                    logger.info("    PASS: mTLS handshake succeeded")
+                    logger.info("    Server: %s", _peer_cert.get("subject", "?"))
+                    logger.debug("    TLS version: %s", _ssock.version())
+
+        except Exception as e:
+            import traceback
+            logger.error("Step 7b (raw mTLS handshake) failed: %s", e)
+            logger.error("Full traceback:\n%s", traceback.format_exc())
+            sys.exit(1)
+
+        logger.info("=== 7c) Full ADC Auth Flow ===")
+
+        try:
             from google.auth import default
             from google.auth.transport.requests import (
                 Request as AuthRequest,
@@ -2058,59 +2226,10 @@ def main() -> None:
             )
             import requests as req_lib
 
-            # Pre-load ECP DLLs so ctypes.CDLL can resolve dependencies.
-            # On Windows, ctypes.CDLL(winmode=0) uses legacy DLL search which
-            # doesn't honour os.add_dll_directory().  Loading all ECP DLLs
-            # from the same directory ensures they can find each other.
-            if sys.platform == "win32":
-                import ctypes
-                for lib in (ecp_client_lib, tls_offload_lib):
-                    try:
-                        ctypes.WinDLL(str(lib))
-                    except OSError:
-                        pass  # Will fail properly in _MutualTlsOffloadAdapter
-
-            if args.debug:
-                os.environ["ENABLE_ENTERPRISE_CERTIFICATE_LOGS"] = "1"
-
-            # Diagnostic: verify ECP libs can load and work.
-            import ctypes
-            _ecp_lib = ctypes.CDLL(str(ecp_client_lib))
-            _ecp_lib.GetCertPemForPython.argtypes = [
-                ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int,
-            ]
-            _ecp_lib.GetCertPemForPython.restype = ctypes.c_int
-            _cert_len = _ecp_lib.GetCertPemForPython(
-                str(cert_config_path).encode(), None, 0,
-            )
-            logger.debug("    ECP GetCertPemForPython returned cert_len=%d", _cert_len)
-            if _cert_len == 0:
-                logger.warning("    ECP cert_len=0 — cert lookup failed.")
-                if args.debug:
-                    _run_ecp_diagnostics(
-                        cert_config_path, logger,
-                    )
-            if _cert_len > 0:
-                logger.debug("    ECP cert loaded successfully (%d bytes)", _cert_len)
-
-            _offload = ctypes.CDLL(str(tls_offload_lib))
-            logger.debug("    TLS offload lib loaded: %s", tls_offload_lib)
-
             mtls_session = req_lib.Session()
             mtls_adapter = _MutualTlsOffloadAdapter(str(cert_config_path))
             mtls_session.mount("https://", mtls_adapter)
             mtls_request = AuthRequest(session=mtls_session)
-
-            # Quick SSL connectivity test.
-            logger.debug("    Testing SSL handshake to sts.mtls.googleapis.com...")
-            try:
-                test_resp = mtls_session.get(
-                    "https://sts.mtls.googleapis.com/",
-                    timeout=15,
-                )
-                logger.debug("    SSL test status: %s", test_resp.status_code)
-            except Exception as ssl_test_err:
-                logger.debug("    SSL test failed: %s", ssl_test_err)
 
             # Allow IAM bindings to propagate before attempting auth.
             logger.info("    Waiting 15s for IAM propagation...")
@@ -2145,9 +2264,8 @@ def main() -> None:
                 logger.info("   Authenticated SA: %s", sa_email)
             logger.info("   Target Project:   %s", proj_result.get("name"))
         except Exception as e:
-            # Log full traceback for SSL/auth failures
             import traceback
-            logger.error("Step 7 (ECP auth demo) failed: %s", e)
+            logger.error("Step 7c (full ADC auth) failed: %s", e)
             logger.error("Full traceback:\n%s", traceback.format_exc())
             sys.exit(1)
 
