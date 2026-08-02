@@ -1824,11 +1824,29 @@ def main() -> None:
                 },
             }
         else:
+            # Find the PKCS#11 module path dynamically.
+            pkcs11_module = None
+            for candidate in [
+                "/usr/lib/x86_64-linux-gnu/pkcs11/libtpm2_pkcs11.so",
+                "/usr/lib/aarch64-linux-gnu/pkcs11/libtpm2_pkcs11.so",
+                "/usr/lib/x86_64-linux-gnu/libtpm2_pkcs11.so.1",
+                "/usr/lib/aarch64-linux-gnu/libtpm2_pkcs11.so.1",
+                "/usr/lib/pkcs11/libtpm2_pkcs11.so",
+            ]:
+                if Path(candidate).exists():
+                    pkcs11_module = candidate
+                    break
+            if not pkcs11_module:
+                raise FileNotFoundError(
+                    "Could not find libtpm2_pkcs11.so. "
+                    "Install libtpm2-pkcs11-1."
+                )
+
             cert_configs = {
                 "pkcs11": {
-                    "module": "/usr/lib/x86_64-linux-gnu/libtpm2_pkcs11.so.1",
-                    "slot": "0",
-                    "label": "bunker-wif",
+                    "module": pkcs11_module,
+                    "token_label": "bunker-wif",
+                    "label": config.workload_cn,
                     "user_pin": config.linux_tpm_pin,
                 },
             }
