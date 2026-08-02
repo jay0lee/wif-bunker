@@ -246,11 +246,27 @@ jobs:
           export GOOGLE_APPLICATION_CREDENTIALS="$PWD/adc.json"
           export GOOGLE_API_USE_CLIENT_CERTIFICATE=true
           export GOOGLE_API_CERTIFICATE_CONFIG="$PWD/certificate_config.json"
-          export EXPECTED_SA_EMAIL="bunker-wif-sa@${{ steps.config.outputs.project_id }}.iam.gserviceaccount.com"
           # Clear GHA's OIDC credential file to prove we're using bunker creds
           unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE 2>/dev/null || true
 
-          python minimal-adc.py
+          python minimal-adc.py | tee /tmp/adc_output.txt
+
+          # Validate we're actually using X.509 WIF, not GHA's OIDC
+          echo ""
+          echo "=== CI Validation ==="
+          EXPECTED_SA="bunker-wif-sa@${{ steps.config.outputs.project_id }}.iam.gserviceaccount.com"
+          if grep -q "ExternalAccount\|Impersonated" /tmp/adc_output.txt; then
+            echo "✓ Credential type is ExternalAccount (X.509 WIF, not GHA OIDC)"
+          else
+            echo "✗ FAIL: Unexpected credential type — may be using GHA OIDC!"
+            exit 1
+          fi
+          if grep -q "$EXPECTED_SA" /tmp/adc_output.txt; then
+            echo "✓ Authenticated as expected SA: $EXPECTED_SA"
+          else
+            echo "✗ FAIL: Did not authenticate as $EXPECTED_SA"
+            exit 1
+          fi
 
       # ── Step 4: WIF Bunker reuse without service account ──
       - name: "WIF Bunker: Reuse (no service account)"
@@ -277,7 +293,18 @@ jobs:
           export GOOGLE_API_CERTIFICATE_CONFIG="$PWD/certificate_config.json"
           unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE 2>/dev/null || true
 
-          python minimal-adc.py
+          python minimal-adc.py | tee /tmp/adc_output_nosa.txt
+
+          # Validate credential type (no SA email to check in this mode)
+          echo ""
+          echo "=== CI Validation ==="
+          if grep -q "ExternalAccount\|Impersonated" /tmp/adc_output_nosa.txt; then
+            echo "✓ Credential type is ExternalAccount (X.509 WIF, not GHA OIDC)"
+          else
+            echo "✗ FAIL: Unexpected credential type — may be using GHA OIDC!"
+            exit 1
+          fi
+
 
       # ── Upload Windows screenshots for dialog debugging ──
       - name: "Upload debug screenshots"
