@@ -235,7 +235,7 @@ class CertificateBundle:
 
 # --- Pythonic Retry & File Helpers ---
 def with_retries(
-    max_attempts: int = 10,
+    max_attempts: int = 25,
     expected_errors: tuple[int, ...] = (403, 404),
     custom_error_text: str | None = None,
     retryable_exceptions: tuple[type[Exception], ...] = (),
@@ -2594,4 +2594,20 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except requests.exceptions.HTTPError as e:
+        # Clean exit on HTTP errors — show API response, no traceback.
+        status = e.response.status_code if e.response is not None else "?"
+        body = e.response.text if e.response is not None else str(e)
+        logger.error(
+            "%s GCP API call failed (HTTP %s).\n%s",
+            SYM_FAIL, status, body,
+        )
+        sys.exit(1)
+    except RuntimeError as e:
+        logger.error("%s %s", SYM_FAIL, e)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        logger.info("\nInterrupted.")
+        sys.exit(130)
