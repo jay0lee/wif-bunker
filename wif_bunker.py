@@ -1241,6 +1241,10 @@ def _download_ecp_from_gcloud_components(ecp_dir: Path) -> None:
 def _ensure_ecp_binaries() -> tuple[Path, Path, Path]:
     """Locates ECP binaries, downloading from gcloud component CDN if needed.
 
+    Search order:
+      1. Cached download in persistent install directory
+      2. Download from gcloud component CDN
+
     Returns:
         (ecp_binary, ecp_client_lib, tls_offload_lib) paths.
     """
@@ -1253,22 +1257,30 @@ def _ensure_ecp_binaries() -> tuple[Path, Path, Path]:
     libecp_name = f"libecp{lib_ext}"
     tls_offload_name = f"libtls_offload{lib_ext}"
 
-    ecp_bin = ecp_install_dir / ecp_bin_name
-    client = ecp_install_dir / libecp_name
-    offload = ecp_install_dir / tls_offload_name
+    ecp_bin = client = offload = None
 
-    # Download from gcloud component CDN if not already cached.
-    if not (ecp_bin.exists() and client.exists() and offload.exists()):
+    # 1. Check cached install directory.
+    if not ecp_bin:
+        cached_bin = ecp_install_dir / ecp_bin_name
+        cached_client = ecp_install_dir / libecp_name
+        cached_offload = ecp_install_dir / tls_offload_name
+        if cached_bin.exists() and cached_client.exists() and cached_offload.exists():
+            logger.info("    Using cached ECP binaries from %s", ecp_install_dir)
+            ecp_bin, client, offload = cached_bin, cached_client, cached_offload
+
+    # 2. Download from gcloud component CDN.
+    if not ecp_bin:
         logger.info("    ECP binaries not found — downloading from gcloud CDN...")
         _download_ecp_from_gcloud_components(ecp_install_dir)
+        ecp_bin = ecp_install_dir / ecp_bin_name
+        client = ecp_install_dir / libecp_name
+        offload = ecp_install_dir / tls_offload_name
         if not (ecp_bin.exists() and client.exists() and offload.exists()):
             actual = [f.name for f in ecp_install_dir.iterdir()] if ecp_install_dir.is_dir() else []
             raise FileNotFoundError(
                 f"ECP download succeeded but expected files not found. "
                 f"Actual files: {actual}"
             )
-    else:
-        logger.info("    Using cached ECP binaries from %s", ecp_install_dir)
 
     # Prefer local patched binaries if available (macOS SE development).
     patched_ecp = Path.cwd() / "ecp_patched"
@@ -2153,6 +2165,25 @@ def main() -> None:
                     )
                     logger.debug("    ldd %s:\n%s",
                                  tls_offload_lib.name, _ldd.stdout)
+                except Exception:
+                    pass
+                # sha256 so we can compare with gcloud's version
+                try:
+                    import hashlib
+                    _sha = hashlib.sha256(tls_offload_lib.read_bytes()).hexdigest()
+                    logger.debug("    sha256(%s) = %s",
+                                 tls_offload_lib.name, _sha)
+                    logger.debug("    full path: %s", tls_offload_lib)
+                except Exception:
+                    pass
+                # readelf NEEDED
+                try:
+                    _readelf = subprocess.run(
+                        ["readelf", "-d", str(tls_offload_lib)],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    _needed = [l for l in _readelf.stdout.splitlines() if "NEEDED" in l]
+                    logger.debug("    NEEDED: %s", _needed)
                 except Exception:
                     pass
 

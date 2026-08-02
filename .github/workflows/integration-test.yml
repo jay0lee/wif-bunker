@@ -56,6 +56,47 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
+      # Diagnose: why does libtls_offload.so work from gcloud SDK but not
+      # standalone? Install the component AND compare with CDN download.
+      - name: "Linux: ECP environment diagnostics"
+        if: runner.os == 'Linux'
+        run: |
+          # Install via gcloud so we can study the working environment
+          gcloud components install enterprise-certificate-proxy --quiet
+
+          GCLOUD_ROOT="$(dirname "$(dirname "$(which gcloud)")")"
+          ECP_DIR="$GCLOUD_ROOT/platform/enterprise_cert"
+
+          echo "=== gcloud SDK ECP location ==="
+          ls -la "$ECP_DIR/"
+
+          echo "=== ldd on gcloud's libtls_offload.so ==="
+          ldd "$ECP_DIR/libtls_offload.so" || true
+
+          echo "=== sha256 of gcloud's libtls_offload.so ==="
+          sha256sum "$ECP_DIR/libtls_offload.so"
+
+          echo "=== LD_LIBRARY_PATH ==="
+          echo "${LD_LIBRARY_PATH:-<not set>}"
+
+          echo "=== gcloud SDK lib directory ==="
+          ls "$GCLOUD_ROOT/lib/" 2>/dev/null | head -20 || echo "<no lib dir>"
+
+          echo "=== OpenSSL libs in gcloud SDK ==="
+          find "$GCLOUD_ROOT" -name "libssl*" -o -name "libcrypto*" 2>/dev/null || echo "<none>"
+
+          echo "=== System OpenSSL ==="
+          openssl version
+          python3 -c "import ssl; print('Python ssl:', ssl.OPENSSL_VERSION)"
+
+          echo "=== readelf NEEDED entries ==="
+          readelf -d "$ECP_DIR/libtls_offload.so" 2>/dev/null | grep NEEDED || echo "<none>"
+
+          echo "=== nm: SSL_CTX_set1_sigalgs_list symbol ==="
+          nm -D "$ECP_DIR/libtls_offload.so" 2>/dev/null | grep -i sigalgs || echo "<not exported>"
+          nm "$ECP_DIR/libtls_offload.so" 2>/dev/null | grep -i sigalgs | head -5 || echo "<not in symtab>"
+
+
       # ── Setup: Linux Software TPM ──
       - name: "Linux: Setup Software TPM (swtpm)"
         if: runner.os == 'Linux'
@@ -235,7 +276,8 @@ jobs:
             --use-adc \
             --create-project="${{ steps.config.outputs.project_id }}" \
             --folder="${{ secrets.SANDBOX_FOLDER_ID }}" \
-            ${{ matrix.soft_key_flag }}
+            ${{ matrix.soft_key_flag }} \
+            ${{ runner.os == 'Linux' && '--debug' || '' }}
 
       # ── Step 3: WIF Bunker reuse run (detects existing resources) ──
       - name: "WIF Bunker: Reuse existing"
