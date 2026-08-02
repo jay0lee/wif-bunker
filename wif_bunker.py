@@ -12,6 +12,7 @@ import argparse
 import base64
 import concurrent.futures
 import ctypes
+import ctypes.util
 import datetime
 import hashlib
 import json
@@ -20,7 +21,6 @@ import os
 import platform
 import re
 import shutil
-import ssl
 import subprocess
 import sys
 import tempfile
@@ -2185,15 +2185,35 @@ def main() -> None:
             ]
             _offload.ConfigureSslContext.restype = ctypes.c_int
 
-            # Create an SSL context and extract the raw SSL_CTX*.
-            _ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-            _ssl_ctx_ptr = ctypes.c_void_p.from_address(id(_ssl_ctx) + ctypes.sizeof(ctypes.c_void_p) * 2)
+            # Create a raw SSL_CTX* via libssl directly — avoids
+            # CPython struct offset hacks that break across versions.
 
-            _rc = _offload.ConfigureSslContext(
-                _c_sign,
-                _cert_pem_bytes,
-                _ssl_ctx_ptr,
-            )
+            _libssl_name = ctypes.util.find_library("ssl")
+            if not _libssl_name:
+                raise RuntimeError("Could not find libssl — is OpenSSL installed?")
+            _libssl = ctypes.CDLL(_libssl_name)
+            logger.debug("    Loaded libssl: %s", _libssl_name)
+
+            _libssl.TLS_method.restype = ctypes.c_void_p
+            _libssl.TLS_method.argtypes = []
+            _libssl.SSL_CTX_new.restype = ctypes.c_void_p
+            _libssl.SSL_CTX_new.argtypes = [ctypes.c_void_p]
+            _libssl.SSL_CTX_free.restype = None
+            _libssl.SSL_CTX_free.argtypes = [ctypes.c_void_p]
+
+            _method = _libssl.TLS_method()
+            _raw_ctx = _libssl.SSL_CTX_new(_method)
+            if not _raw_ctx:
+                raise RuntimeError("SSL_CTX_new returned NULL")
+
+            try:
+                _rc = _offload.ConfigureSslContext(
+                    _c_sign,
+                    _cert_pem_bytes,
+                    ctypes.c_void_p(_raw_ctx),
+                )
+            finally:
+                _libssl.SSL_CTX_free(_raw_ctx)
 
             if _rc == 1:
                 logger.info("    PASS: ConfigureSslContext succeeded (rc=1)")
