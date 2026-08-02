@@ -2117,52 +2117,48 @@ def main() -> None:
             logger.error("Full traceback:\n%s", traceback.format_exc())
             sys.exit(1)
 
-        logger.info("=== 7b) Raw mTLS Handshake Test ===")
+        logger.info("=== 7b) TLS Offload Configuration Test ===")
+        # Tests whether libtls_offload can configure an SSL context with
+        # our cert. ConfigureSslContext parses the cert, sets sigalgs, and
+        # installs the custom key — but does NOT invoke the sign callback.
+        # If this passes, the offload lib is compatible with the system's
+        # OpenSSL. The actual handshake + signing is tested in 7c.
 
         try:
             import ssl
-            import socket
+            import ctypes
 
             _offload = ctypes.CDLL(str(tls_offload_lib))
             logger.info("    TLS offload lib loaded: %s", tls_offload_lib.name)
 
-            # Set up function signature for ConfigureSslContext.
+            if args.debug and sys.platform == "linux":
+                try:
+                    _ldd = subprocess.run(
+                        ["ldd", str(tls_offload_lib)],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    logger.debug("    ldd %s:\n%s",
+                                 tls_offload_lib.name, _ldd.stdout)
+                except Exception:
+                    pass
+
+            # ConfigureSslContext signature:
             # int ConfigureSslContext(SignFunc, const char *cert, SSL_CTX *ctx)
             SIGN_CALLBACK_CTYPE = ctypes.CFUNCTYPE(
-                ctypes.c_int,           # return
-                ctypes.c_char_p,        # digest
-                ctypes.c_int,           # digest_len
-                ctypes.c_char_p,        # signature (output)
-                ctypes.POINTER(ctypes.c_int),  # signature_len (output)
-                ctypes.c_int,           # key_type
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.POINTER(ctypes.c_int),
+                ctypes.c_int,
             )
 
-            # Create a sign callback that delegates to ECP's SignForPython.
-            _ecp_lib.SignForPython.argtypes = [
-                ctypes.c_char_p,  # config_path
-                ctypes.c_char_p,  # digest
-                ctypes.c_int,     # digest_len
-                ctypes.c_char_p,  # signature (output)
-                ctypes.c_int,     # sig_buf_len
-            ]
-            _ecp_lib.SignForPython.restype = ctypes.c_int
+            # Dummy sign callback — ConfigureSslContext stores it but
+            # doesn't invoke it. We just need a valid function pointer.
+            def _noop_sign(digest, dlen, sig_out, sig_len_ptr, key_type):
+                return 0
 
-            def _sign_callback(digest, digest_len, sig_out, sig_len_ptr, key_type):
-                sig_buf_len = 256
-                sig_buf = ctypes.create_string_buffer(sig_buf_len)
-                actual_len = _ecp_lib.SignForPython(
-                    str(cert_config_path).encode(),
-                    digest, digest_len,
-                    sig_buf, sig_buf_len,
-                )
-                if actual_len <= 0:
-                    logger.error("    ECP SignForPython returned %d", actual_len)
-                    return 0
-                ctypes.memmove(sig_out, sig_buf, actual_len)
-                sig_len_ptr[0] = actual_len
-                return 1
-
-            _c_sign_callback = SIGN_CALLBACK_CTYPE(_sign_callback)
+            _c_sign = SIGN_CALLBACK_CTYPE(_noop_sign)
 
             _offload.ConfigureSslContext.argtypes = [
                 SIGN_CALLBACK_CTYPE,
@@ -2171,48 +2167,32 @@ def main() -> None:
             ]
             _offload.ConfigureSslContext.restype = ctypes.c_int
 
-            # Create a real SSL context and extract the raw SSL_CTX*.
+            # Create an SSL context and extract the raw SSL_CTX*.
             _ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-            _ssl_ctx.load_default_certs()
-
-            # Get SSL_CTX* pointer from the SSLContext object.
-            # CPython layout: SSLContext object has ctx pointer at offset 2.
             _ssl_ctx_ptr = ctypes.c_void_p.from_address(
                 id(_ssl_ctx) + ctypes.sizeof(ctypes.c_void_p) * 2
             )
-            logger.debug("    SSL_CTX* = %s", hex(_ssl_ctx_ptr.value or 0))
 
-            # Call ConfigureSslContext with our cert and sign callback.
-            logger.info("    Calling ConfigureSslContext...")
             _rc = _offload.ConfigureSslContext(
-                _c_sign_callback,
-                _cert_pem_bytes,
-                _ssl_ctx_ptr,
+                _c_sign, _cert_pem_bytes, _ssl_ctx_ptr,
             )
 
-            if _rc != 1:
+            if _rc == 1:
+                logger.info("    PASS: ConfigureSslContext succeeded (rc=1)")
+                logger.info("    The TLS offload library is compatible with "
+                            "this system's OpenSSL and our cert.")
+            else:
                 logger.error("    FAIL: ConfigureSslContext returned %d", _rc)
-                raise RuntimeError(
-                    f"ConfigureSslContext failed (rc={_rc}). "
-                    "The TLS offload library could not configure the SSL context "
-                    "with the ECP-provided certificate."
-                )
-
-            logger.info("    PASS: ConfigureSslContext succeeded")
-
-            # Try a raw mTLS handshake — no google-auth, no ADC.
-            _mtls_host = "sts.mtls.googleapis.com"
-            logger.info("    Testing raw mTLS handshake to %s:443...", _mtls_host)
-            with socket.create_connection((_mtls_host, 443), timeout=15) as _sock:
-                with _ssl_ctx.wrap_socket(_sock, server_hostname=_mtls_host) as _ssock:
-                    _peer_cert = _ssock.getpeercert()
-                    logger.info("    PASS: mTLS handshake succeeded")
-                    logger.info("    Server: %s", _peer_cert.get("subject", "?"))
-                    logger.debug("    TLS version: %s", _ssock.version())
+                logger.error("    The TLS offload library could not configure "
+                             "the SSL context with the ECP-provided cert.")
+                logger.error("    This indicates an incompatibility between "
+                             "the offload library and this system's OpenSSL, "
+                             "or an issue with the cert format/algorithm.")
+                sys.exit(1)
 
         except Exception as e:
             import traceback
-            logger.error("Step 7b (raw mTLS handshake) failed: %s", e)
+            logger.error("Step 7b (TLS offload config) failed: %s", e)
             logger.error("Full traceback:\n%s", traceback.format_exc())
             sys.exit(1)
 
