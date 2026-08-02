@@ -121,8 +121,6 @@ jobs:
             echo "Installing cryptography wheel: $WHEEL_URL"
             pip install "$WHEEL_URL"
           fi
-          # google-cloud-python monorepo has paths > 260 chars; enable long paths on Windows
-          git config --system core.longpaths true
           pip install .
 
       # ── Generate unique project ID for this job ──
