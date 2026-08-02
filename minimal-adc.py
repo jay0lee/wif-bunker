@@ -1,31 +1,19 @@
 """Minimal ADC test — proves Application Default Credentials work."""
 import google.auth
 import google.auth.transport.requests
-from google.auth.external_account import Credentials as ExternalAccountCredentials
 
-# Load ADC — google-auth auto-creates mTLS transport for hw-backed keys
+# Load and use ADC
 creds, project = google.auth.default(
-    scopes=["https://www.googleapis.com/auth/cloud-platform",
-            "https://www.googleapis.com/auth/userinfo.email"],
+    scopes=["https://www.googleapis.com/auth/cloud-platform"],
 )
 authed_session = google.auth.transport.requests.AuthorizedSession(creds)
-print(f"Credential type: {type(creds).__name__}")
 
-# Identity check — bare WIF principals (no SA impersonation) can't call tokeninfo;
-# all other credential types (user, service account, SA-impersonated WIF) can.
-is_bare_wif = (isinstance(creds, ExternalAccountCredentials)
-               and creds.service_account_email is None)
-if is_bare_wif:
-    print(f"Authenticated as: WIF principal (no SA impersonation)")
-    print(f"  Token present: {bool(creds.token)}")
-else:
-    resp = authed_session.get(
-        f"https://oauth2.googleapis.com/tokeninfo?access_token={creds.token}",
-    )
-    info = resp.json()
-    print(f"Authenticated as: {info.get('email', 'unknown')}")
-    print(f"  Scope:   {info.get('scope', '')}")
-    print(f"  Expires: {info.get('expires_in', '?')}s")
+# Print what we know about the credentials
+cred_type = type(creds)
+print(f"Credential type: {cred_type.__module__}.{cred_type.__name__}")
+sa_email = getattr(creds, "service_account_email", None)
+if sa_email:
+    print(f"Service account: {sa_email}")
 
 # Smoke test: list accessible projects
 resp = authed_session.get(
