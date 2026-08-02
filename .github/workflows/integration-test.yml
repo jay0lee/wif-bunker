@@ -237,6 +237,48 @@ jobs:
             --use-service-account="bunker-wif-sa@${{ steps.config.outputs.project_id }}.iam.gserviceaccount.com" \
             ${{ matrix.soft_key_flag }}
 
+      # ── Step 3b: ADC integration test (with service account) ──
+      - name: "ADC Test: With service account"
+        shell: bash
+        run: |
+          echo "=== Testing ADC with X.509 WIF (service account) ==="
+          # Point ADC to WIF Bunker's credentials, NOT the GHA OIDC creds
+          export GOOGLE_APPLICATION_CREDENTIALS="$PWD/adc.json"
+          export GOOGLE_API_USE_CLIENT_CERTIFICATE=true
+          export GOOGLE_API_CERTIFICATE_CONFIG="$PWD/certificate_config.json"
+          export EXPECTED_SA_EMAIL="bunker-wif-sa@${{ steps.config.outputs.project_id }}.iam.gserviceaccount.com"
+          # Clear GHA's OIDC credential file to prove we're using bunker creds
+          unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE 2>/dev/null || true
+
+          python minimal-adc.py
+
+      # ── Step 4: WIF Bunker reuse without service account ──
+      - name: "WIF Bunker: Reuse (no service account)"
+        shell: bash
+        run: |
+          echo "=== Running WIF Bunker (reuse, no service account) ==="
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            powershell -NoProfile -File .github/scripts/win_dialog_accept.ps1 &
+          fi
+          python wif_bunker.py \
+            --use-adc \
+            --use-project="${{ steps.config.outputs.project_id }}" \
+            --use-pool=bunker-wif-pool \
+            --no-service-account \
+            ${{ matrix.soft_key_flag }}
+
+      # ── Step 4b: ADC integration test (no service account) ──
+      - name: "ADC Test: No service account"
+        shell: bash
+        run: |
+          echo "=== Testing ADC with X.509 WIF (no service account) ==="
+          export GOOGLE_APPLICATION_CREDENTIALS="$PWD/adc.json"
+          export GOOGLE_API_USE_CLIENT_CERTIFICATE=true
+          export GOOGLE_API_CERTIFICATE_CONFIG="$PWD/certificate_config.json"
+          unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE 2>/dev/null || true
+
+          python minimal-adc.py
+
       # ── Upload Windows screenshots for dialog debugging ──
       - name: "Upload debug screenshots"
         if: always() && runner.os == 'Windows'
