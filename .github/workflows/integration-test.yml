@@ -23,9 +23,11 @@ jobs:
           - os: ubuntu-24.04
             name: Linux x64
             soft_key_flag: ""
-          - os: ubuntu-24.04-arm
-            name: Linux ARM64
-            soft_key_flag: ""
+          # Linux ARM64 disabled: ECP doesn't publish linux/arm64 binaries.
+          # Re-enable when googleapis/enterprise-certificate-proxy adds ARM64.
+          # - os: ubuntu-24.04-arm
+          #   name: Linux ARM64
+          #   soft_key_flag: ""
           - os: macos-15
             name: macOS ARM64 (Apple Silicon)
             soft_key_flag: ""
@@ -233,8 +235,7 @@ jobs:
             --use-adc \
             --create-project="${{ steps.config.outputs.project_id }}" \
             --folder="${{ secrets.SANDBOX_FOLDER_ID }}" \
-            ${{ matrix.soft_key_flag }} \
-            ${{ runner.os == 'Linux' && '--debug' || '' }}
+            ${{ matrix.soft_key_flag }}
 
       # ── Step 3: WIF Bunker reuse run (detects existing resources) ──
       - name: "WIF Bunker: Reuse existing"
