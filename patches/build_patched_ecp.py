@@ -136,15 +136,21 @@ def main():
 \t\t}
 \t}'''
 
-        new_loop = '''\tfmt.Fprintf(os.Stderr, "ECP: findMatchingIdentities: SecItemCopyMatching returned %d identities, looking for issuer=%q\\n", int(C.CFArrayGetCount(signingIdents)), issuerCN)
+        new_loop = '''\tif os.Getenv("ENABLE_ENTERPRISE_CERTIFICATE_LOGS") != "" {
+\t\tfmt.Fprintf(os.Stderr, "ECP: findMatchingIdentities: %d identities found, looking for issuer=%q\\n", int(C.CFArrayGetCount(signingIdents)), issuerCN)
+\t}
 \tfor i := 0; i < int(C.CFArrayGetCount(signingIdents)); i++ {
 \t\tidentDict := C.CFArrayGetValueAtIndex(signingIdents, C.CFIndex(i))
 \t\txc, err := identityToX509(C.SecIdentityRef(identDict))
 \t\tif err != nil {
-\t\t\tfmt.Fprintf(os.Stderr, "ECP:   identity[%d]: identityToX509 error: %v\\n", i, err)
+\t\t\tif os.Getenv("ENABLE_ENTERPRISE_CERTIFICATE_LOGS") != "" {
+\t\t\t\tfmt.Fprintf(os.Stderr, "ECP:   identity[%d]: error: %v\\n", i, err)
+\t\t\t}
 \t\t\tcontinue // Skip this identity if there's an error
 \t\t}
-\t\tfmt.Fprintf(os.Stderr, "ECP:   identity[%d]: CN=%q, Issuer.CN=%q\\n", i, xc.Subject.CommonName, xc.Issuer.CommonName)
+\t\tif os.Getenv("ENABLE_ENTERPRISE_CERTIFICATE_LOGS") != "" {
+\t\t\tfmt.Fprintf(os.Stderr, "ECP:   identity[%d]: CN=%q, Issuer.CN=%q\\n", i, xc.Subject.CommonName, xc.Issuer.CommonName)
+\t\t}
 \t\tif xc.Issuer.CommonName == issuerCN {
 \t\t\tleafs = append(leafs, xc)
 \t\t\tleafIdents = append(leafIdents, C.SecIdentityRef(identDict))
@@ -159,7 +165,9 @@ def main():
 
         # ── Patch 3: Log Cred() result ──
         old_cred_err = '''\t\treturn nil, fmt.Errorf("no key found with issuer common name %q", issuerCN)'''
-        new_cred_err = '''\t\tfmt.Fprintf(os.Stderr, "ECP: Cred(): no key found with issuer CN=%q (keychainType=%q)\\n", issuerCN, keychainType)
+        new_cred_err = '''\t\tif os.Getenv("ENABLE_ENTERPRISE_CERTIFICATE_LOGS") != "" {
+\t\t\tfmt.Fprintf(os.Stderr, "ECP: Cred(): no key found with issuer CN=%q (keychainType=%q)\\n", issuerCN, keychainType)
+\t\t}
 \t\treturn nil, fmt.Errorf("no key found with issuer common name %q", issuerCN)'''
 
         if old_cred_err in content:

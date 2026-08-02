@@ -770,13 +770,10 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
         )
 
         # 6. Remove the ephemeral CA from trusted root store (cleanup).
-        ps_remove_ca = (
-            f"Get-ChildItem Cert:\\CurrentUser\\Root | "
-            f"Where-Object {{ $_.Thumbprint -eq '{ca_thumbprint}' }} | "
-            f"Remove-Item -Force"
-        )
+        #    Use certutil -delstore which runs silently, unlike PowerShell
+        #    Remove-Item which triggers another Security Warning dialog.
         subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps_remove_ca],
+            ["certutil", "-user", "-delstore", "Root", ca_thumbprint],
             capture_output=True, text=True,
         )
         # Verify removal.
@@ -1867,6 +1864,60 @@ def main() -> None:
         logger.info("  %s", " ".join(reuse_parts))
 
         # --- Step 7: Full ADC Auth Flow Demo (ECP-backed mTLS) ---
+
+        def _run_ecp_diagnostics(config_path, log):
+            """Deep ECP diagnostics (only called with --debug when cert_len=0)."""
+            log.warning("    Running ECP diagnostics (--debug)...")
+            try:
+                with open(config_path) as _f:
+                    _cfg_text = _f.read()
+                log.warning("    certificate_config.json:\n%s", _cfg_text)
+            except Exception as _e:
+                log.warning("    Could not read config: %s", _e)
+                return
+
+            # Check if ECP signer binary contains our patch marker
+            try:
+                _ecp_bin = Path(json.loads(_cfg_text)["libs"]["ecp"])
+                if _ecp_bin.exists():
+                    _bin_data = _ecp_bin.read_bytes()
+                    log.warning("    ECP binary: %s (%d KB)", _ecp_bin, len(_bin_data) // 1024)
+                    if sys.platform == "darwin":
+                        log.warning("    Contains SecCertificateCopyData (patched): %s",
+                                    b"SecCertificateCopyData" in _bin_data)
+                        log.warning("    Contains SecItemExport (unpatched): %s",
+                                    b"SecItemExport" in _bin_data)
+                else:
+                    log.warning("    ECP binary NOT FOUND: %s", _ecp_bin)
+            except Exception as _e:
+                log.warning("    Binary check error: %s", _e)
+
+            # Run signer binary directly to capture its stderr
+            try:
+                _ecp_bin_path = str(Path(json.loads(_cfg_text)["libs"]["ecp"]))
+                _result = subprocess.run(
+                    [_ecp_bin_path, str(config_path)],
+                    capture_output=True, text=True, timeout=10,
+                )
+                log.warning("    ECP signer stderr: %s",
+                            _result.stderr[:500] if _result.stderr else "(empty)")
+            except subprocess.TimeoutExpired:
+                log.warning("    ECP signer listening for RPC (OK)")
+            except Exception as _e:
+                log.warning("    ECP signer error: %s", _e)
+
+            # Check keychain identities (macOS)
+            if sys.platform == "darwin":
+                try:
+                    _id_result = subprocess.run(
+                        ["security", "find-identity", "-v", "-p", "ssl-client"],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    log.warning("    Keychain SSL-client identities:\n%s",
+                                _id_result.stdout)
+                except Exception as _e:
+                    log.warning("    find-identity error: %s", _e)
+
         logger.info("=== 7) Executing Full ADC Auth Flow Demo ===")
 
         try:
@@ -1899,8 +1950,8 @@ def main() -> None:
                     except OSError:
                         pass  # Will fail properly in _MutualTlsOffloadAdapter
 
-            # Enable ECP debug logging so we can see what it's doing.
-            os.environ["ENABLE_ENTERPRISE_CERTIFICATE_LOGS"] = "1"
+            if args.debug:
+                os.environ["ENABLE_ENTERPRISE_CERTIFICATE_LOGS"] = "1"
 
             # Diagnostic: verify ECP libs can load and work.
             import ctypes
@@ -1912,95 +1963,34 @@ def main() -> None:
             _cert_len = _ecp_lib.GetCertPemForPython(
                 str(cert_config_path).encode(), None, 0,
             )
-            logger.info("    ECP GetCertPemForPython returned cert_len=%d", _cert_len)
-            if _cert_len == 0 and sys.platform == "darwin":
-                # Diagnostic: dump config, verify binary, check keychain
-                logger.warning("    ECP cert_len=0 — running diagnostics...")
-                try:
-                    with open(cert_config_path) as _f:
-                        _cfg_text = _f.read()
-                    logger.warning("    certificate_config.json:\n%s", _cfg_text)
-                except Exception as _e:
-                    logger.warning("    Could not read config: %s", _e)
-
-                # Check if ECP signer binary contains our patch marker
-                try:
-                    _ecp_bin = Path(json.loads(_cfg_text)["libs"]["ecp"])
-                    if _ecp_bin.exists():
-                        _bin_data = _ecp_bin.read_bytes()
-                        _has_patch = b"SecCertificateCopyData" in _bin_data
-                        _has_old = b"SecItemExport" in _bin_data
-                        logger.warning("    ECP binary: %s (%d KB)", _ecp_bin, len(_bin_data) // 1024)
-                        logger.warning("    Contains SecCertificateCopyData (patched): %s", _has_patch)
-                        logger.warning("    Contains SecItemExport (unpatched): %s", _has_old)
-                    else:
-                        logger.warning("    ECP binary NOT FOUND: %s", _ecp_bin)
-                except Exception as _e:
-                    logger.warning("    Binary check error: %s", _e)
-
-                # Run signer binary directly to capture its stderr
-                try:
-                    _ecp_bin_path = str(Path(json.loads(_cfg_text)["libs"]["ecp"]))
-                    _result = subprocess.run(
-                        [_ecp_bin_path, str(cert_config_path)],
-                        capture_output=True, text=True, timeout=10,
+            logger.debug("    ECP GetCertPemForPython returned cert_len=%d", _cert_len)
+            if _cert_len == 0:
+                logger.warning("    ECP cert_len=0 — cert lookup failed.")
+                if args.debug:
+                    _run_ecp_diagnostics(
+                        cert_config_path, logger,
                     )
-                    logger.warning("    ECP signer stdout: %s", _result.stdout[:500] if _result.stdout else "(empty)")
-                    logger.warning("    ECP signer stderr: %s", _result.stderr[:500] if _result.stderr else "(empty)")
-                    logger.warning("    ECP signer returncode: %d", _result.returncode)
-                except subprocess.TimeoutExpired:
-                    logger.warning("    ECP signer started OK (timed out waiting = it's listening for RPC)")
-                except Exception as _e:
-                    logger.warning("    ECP signer direct run error: %s", _e)
-
-                # Check keychain identities
-                try:
-                    _id_result = subprocess.run(
-                        ["security", "find-identity", "-v", "-p", "ssl-client"],
-                        capture_output=True, text=True, timeout=5,
-                    )
-                    logger.warning("    Keychain SSL-client identities:\n%s", _id_result.stdout)
-                    if _id_result.stderr:
-                        logger.warning("    find-identity stderr: %s", _id_result.stderr)
-                except Exception as _e:
-                    logger.warning("    find-identity error: %s", _e)
             if _cert_len > 0:
-                _buf = ctypes.create_string_buffer(_cert_len)
-                _ecp_lib.GetCertPemForPython(
-                    str(cert_config_path).encode(), _buf, _cert_len,
-                )
-                logger.info("    ECP cert PEM (first 80 chars): %s", bytes(_buf)[:80])
+                logger.debug("    ECP cert loaded successfully (%d bytes)", _cert_len)
 
             _offload = ctypes.CDLL(str(tls_offload_lib))
-            logger.info("    TLS offload lib loaded: %s", tls_offload_lib)
-            logger.info("    ConfigureSslContext symbol: %s",
-                        hasattr(_offload, "ConfigureSslContext"))
+            logger.debug("    TLS offload lib loaded: %s", tls_offload_lib)
 
             mtls_session = req_lib.Session()
             mtls_adapter = _MutualTlsOffloadAdapter(str(cert_config_path))
             mtls_session.mount("https://", mtls_adapter)
             mtls_request = AuthRequest(session=mtls_session)
 
-            # Quick SSL connectivity test to get detailed error info.
-            logger.info("    Testing SSL handshake to sts.mtls.googleapis.com...")
+            # Quick SSL connectivity test.
+            logger.debug("    Testing SSL handshake to sts.mtls.googleapis.com...")
             try:
                 test_resp = mtls_session.get(
                     "https://sts.mtls.googleapis.com/",
                     timeout=15,
                 )
-                logger.info("    SSL test status: %s", test_resp.status_code)
+                logger.debug("    SSL test status: %s", test_resp.status_code)
             except Exception as ssl_test_err:
-                logger.warning("    SSL test failed: %s", ssl_test_err)
-                # Dump full chain for debugging
-                cause = ssl_test_err
-                depth = 0
-                while cause:
-                    logger.warning("    SSL error chain [%d]: %s: %s",
-                                   depth, type(cause).__name__, cause)
-                    cause = getattr(cause, '__cause__', None) or getattr(cause, '__context__', None)
-                    depth += 1
-                    if depth > 10:
-                        break
+                logger.debug("    SSL test failed: %s", ssl_test_err)
 
             # Allow IAM bindings to propagate before attempting auth.
             logger.info("    Waiting 15s for IAM propagation...")

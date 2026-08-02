@@ -39,9 +39,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.name }}
 
-    env:
-      ENABLE_ENTERPRISE_CERTIFICATE_LOGS: "1"
-
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
@@ -195,13 +192,10 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          try {
-            taskkill /F /IM CloudExperienceHost.exe /T 2>$null
-            Write-Host "Successfully terminated CloudExperienceHost (OOBE)."
-          } catch {
-            Write-Host "CloudExperienceHost was not running or could not be killed."
-          }
-          Start-Sleep -Seconds 3  # Let desktop settle
+          taskkill /F /IM CloudExperienceHost.exe /T 2>$null
+          Write-Host "OOBE kill attempted (exit: $LASTEXITCODE)."
+          Start-Sleep -Seconds 3
+          exit 0
 
       # ── Step 2: WIF Bunker fresh run (creates project, SA, pool, provider) ──
       - name: "WIF Bunker: Fresh setup"
