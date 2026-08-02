@@ -1842,10 +1842,53 @@ def main() -> None:
                     "Install libtpm2-pkcs11-1."
                 )
 
+            # Discover the PKCS#11 slot ID for our token.
+            # ECP requires a numeric slot — doesn't support token_label.
+            slot_id = None
+            try:
+                slot_result = subprocess.run(
+                    ["pkcs11-tool", "--module", pkcs11_module,
+                     "--list-token-slots"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                logger.debug("    pkcs11-tool slots:\n%s", slot_result.stdout)
+                # Parse output like: "Slot 0 (0x1): ..."
+                # Look for the line containing our token label
+                for line in slot_result.stdout.splitlines():
+                    if "bunker-wif" in line:
+                        # Found token — slot ID is on the preceding line
+                        break
+                    if line.strip().startswith("Slot"):
+                        # Extract slot ID: "Slot 0 (0x1):" -> "0x1" or "0"
+                        import re
+                        m = re.search(r"Slot\s+\d+\s+\(0x([0-9a-fA-F]+)\)", line)
+                        if m:
+                            last_slot_hex = m.group(1)
+                        else:
+                            m2 = re.search(r"Slot\s+(\d+)", line)
+                            if m2:
+                                last_slot_hex = hex(int(m2.group(1)))[2:]
+                else:
+                    last_slot_hex = None
+
+                # If we found the token, use the last slot we parsed
+                if "bunker-wif" in slot_result.stdout and last_slot_hex:
+                    slot_id = last_slot_hex
+            except Exception as e:
+                logger.debug("    pkcs11-tool slot discovery failed: %s", e)
+
+            # Fallback: try slot 1 (slot 0 is typically p11-kit trust)
+            if slot_id is None:
+                slot_id = "1"
+                logger.warning("    Could not discover PKCS#11 slot ID, "
+                               "defaulting to slot %s", slot_id)
+
+            logger.info("    Using PKCS#11 slot: 0x%s", slot_id)
+
             cert_configs = {
                 "pkcs11": {
                     "module": pkcs11_module,
-                    "token_label": "bunker-wif",
+                    "slot": slot_id,
                     "label": config.workload_cn,
                     "user_pin": config.linux_tpm_pin,
                 },
