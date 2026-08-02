@@ -972,26 +972,55 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
 
     try:
         # 1. Initialize TPM PKCS#11 token and generate hardware-backed key
-        subprocess.run(
-            ["tpm2_ptool", "init"], check=True, capture_output=True,
+        init_result = subprocess.run(
+            ["tpm2_ptool", "init"], check=True, capture_output=True, text=True,
         )
-        subprocess.run(
+        logger.debug("    tpm2_ptool init: %s", init_result.stdout.strip())
+
+        token_result = subprocess.run(
             [
                 "tpm2_ptool", "addtoken", "--pid=1",
                 f"--sopin={config.linux_tpm_pin}",
                 f"--userpin={config.linux_tpm_pin}",
                 "--label=bunker-wif",
             ],
-            check=True, capture_output=True,
+            check=True, capture_output=True, text=True,
         )
-        subprocess.run(
+        logger.debug("    tpm2_ptool addtoken: %s", token_result.stdout.strip())
+
+        key_result = subprocess.run(
             [
                 "tpm2_ptool", "addkey", f"--algorithm={config.key_algo_config['linux_tpm2']}",
                 "--label=bunker-wif",
+                f"--key-label={config.workload_cn}",
                 f"--userpin={config.linux_tpm_pin}",
             ],
-            check=True, capture_output=True,
+            check=True, capture_output=True, text=True,
         )
+        logger.debug("    tpm2_ptool addkey: %s", key_result.stdout.strip())
+
+        # Verify the token is visible via p11-kit before calling certtool
+        try:
+            p11_result = subprocess.run(
+                ["p11tool", "--list-tokens"],
+                capture_output=True, text=True, timeout=10,
+            )
+            logger.debug("    p11tool --list-tokens:\n%s", p11_result.stdout)
+            if "bunker-wif" not in p11_result.stdout:
+                logger.warning("    Token 'bunker-wif' not visible to p11tool!")
+                # Try listing via pkcs11-tool as fallback diagnostic
+                try:
+                    pkcs11_result = subprocess.run(
+                        ["pkcs11-tool", "--module",
+                         "/usr/lib/x86_64-linux-gnu/pkcs11/libtpm2_pkcs11.so",
+                         "-T"],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    logger.debug("    pkcs11-tool -T:\n%s", pkcs11_result.stdout)
+                except Exception:
+                    pass
+        except Exception as p11_err:
+            logger.debug("    p11tool check failed: %s", p11_err)
 
         # 2. Generate a temporary self-signed cert to extract the public key
         cert_cfg = (
@@ -1000,6 +1029,10 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
             f"tls_www_client\n"
         )
         write_secure_file("cert.cfg", cert_cfg)
+
+        # Set GNUTLS_PIN so certtool can access the token without
+        # relying solely on pin-value in the PKCS#11 URI.
+        os.environ["GNUTLS_PIN"] = config.linux_tpm_pin
 
         pkcs11_uri = (
             f"pkcs11:token=bunker-wif;object={config.workload_cn};"
@@ -1745,7 +1778,20 @@ def main() -> None:
         # --- Step 6: ECP & ADC Config Generation ---
         logger.info("=== 6) Generating ECP Certificate Config & ADC ===")
 
-        ecp_binary, ecp_client_lib, tls_offload_lib = _ensure_ecp_binaries()
+        try:
+            ecp_binary, ecp_client_lib, tls_offload_lib = _ensure_ecp_binaries()
+        except FileNotFoundError as ecp_err:
+            github_os, arch, _, _ = _get_ecp_platform_info()
+            logger.warning(
+                "    ECP binaries not available for %s/%s — "
+                "skipping ECP config and auth demo (steps 6-7).",
+                github_os, arch,
+            )
+            logger.warning("    %s", ecp_err)
+            logger.info("=== Steps 1-5 completed successfully. ===")
+            logger.info("WIF Bunker setup is complete. ECP auth demo "
+                        "requires a platform with ECP support.")
+            return
 
         # Build ECP certificate_config.json — the format google-auth's
         # _custom_tls_signer.py expects.  The "libs" section tells it where
