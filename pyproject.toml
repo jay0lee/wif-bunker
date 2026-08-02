@@ -6,7 +6,7 @@ requires-python = ">=3.10"
 dependencies = [
     "requests>=2.31",
     "cryptography>=42.0",
-    "google-auth @ https://github.com/jay0lee/google-cloud-python/releases/download/google-auth-v2.56.2-bunker1/google_auth-2.56.2+bunker1-py3-none-any.whl",
+    "google-auth @ https://github.com/jay0lee/google-cloud-python/releases/download/google-auth-v2.56.2-bunker2/google_auth-2.56.2+bunker2-py3-none-any.whl",
 ]
 
 [project.scripts]
