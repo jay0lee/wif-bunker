@@ -1319,12 +1319,6 @@ def _get_ecp_gcloud_component_info() -> tuple[str, str]:
         return f"enterprise-certificate-proxy-linux-{arch}", arch
 
 
-# ECP versions known to break SSL_CTX_set1_sigalgs_list on OpenSSL 3.
-# These statically link a BoringSSL that's incompatible with OpenSSL 3's
-# SSL_CTX struct layout. When new ECP versions are released and verified
-# working, remove them from this set.
-_ECP_BROKEN_VERSIONS = {"0.3.18"}
-
 _GCLOUD_COMPONENTS_LATEST_URL = (
     "https://dl.google.com/dl/cloudsdk/channels/rapid/components-2.json"
 )
@@ -1337,8 +1331,7 @@ _GCLOUD_CDN_BASE = "https://dl.google.com/dl/cloudsdk/channels/rapid/"
 def _resolve_ecp_manifest(requested_version: str = "latest") -> dict:
     """Fetches a gcloud component manifest for the requested ECP version.
 
-    If requested_version is "latest", picks the newest non-broken version,
-    walking back through gcloud SDK releases if necessary.
+    If requested_version is "latest", returns the newest manifest directly.
     If requested_version is a specific version (e.g. "0.3.14"), walks
     gcloud SDK manifests until one shipping that exact version is found.
     """
@@ -1388,34 +1381,8 @@ def _resolve_ecp_manifest(requested_version: str = "latest") -> dict:
         )
         return manifest
 
-    # --- Latest mode: skip known-broken versions ---
-    if ecp_ver and ecp_ver not in _ECP_BROKEN_VERSIONS:
-        logger.info("    Latest gcloud SDK %s has ECP %s (OK)", gcloud_ver, ecp_ver)
-        return manifest
-
-    logger.warning("    Latest ECP %s is known-broken, searching older gcloud versions...",
-                    ecp_ver)
-
-    # Walk back through recent gcloud SDK versions (even numbers only).
-    base_ver = int(gcloud_ver.split(".")[0]) if gcloud_ver != "?" else 578
-    for major in range(base_ver - 2, base_ver - 20, -2):
-        ver_str = f"{major}.0.0"
-        try:
-            url = _GCLOUD_COMPONENTS_VERSIONED_URL.format(ver_str)
-            r = requests.get(url, timeout=15)
-            if r.status_code != 200:
-                continue
-            m = r.json()
-            v = _get_ecp_version(m)
-            if v and v not in _ECP_BROKEN_VERSIONS:
-                logger.info("    gcloud SDK %s has ECP %s (OK)", ver_str, v)
-                return m
-            logger.debug("    gcloud SDK %s has ECP %s (broken)", ver_str, v)
-        except Exception:
-            continue
-
-    # Give up — use latest and hope for the best.
-    logger.warning("    Could not find a working ECP version, using latest %s", ecp_ver)
+    # --- Latest mode: use whatever the newest gcloud SDK ships ---
+    logger.info("    Latest gcloud SDK %s has ECP %s", gcloud_ver, ecp_ver)
     return manifest
 
 
