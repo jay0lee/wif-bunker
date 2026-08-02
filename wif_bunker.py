@@ -199,6 +199,12 @@ class WorkloadConfig:
     linux_tpm_pin: str = "bunker123"
     key_algorithm: str = "es256"
     soft_key: bool = False  # Use software keys (CI testing, no TPM required)
+    # ECP version: "latest" = newest from gcloud CDN, or pin e.g. "0.3.14".
+    # Linux defaults to 0.3.14 because 0.3.18+ has a sigalgs regression on
+    # OpenSSL 3.  macOS/Windows default to latest (no known issues).
+    ecp_version: str = field(
+        default_factory=lambda: "0.3.14" if sys.platform == "linux" else "latest",
+    )
     suffix: str = field(default_factory=lambda: str(int(time.time())))
     project_id: str = field(init=False)
     workload_cn: str = field(init=False)
@@ -1328,12 +1334,13 @@ _GCLOUD_COMPONENTS_VERSIONED_URL = (
 _GCLOUD_CDN_BASE = "https://dl.google.com/dl/cloudsdk/channels/rapid/"
 
 
-def _resolve_ecp_manifest() -> dict:
-    """Fetches a gcloud component manifest with a working ECP version.
+def _resolve_ecp_manifest(requested_version: str = "latest") -> dict:
+    """Fetches a gcloud component manifest for the requested ECP version.
 
-    Tries the latest manifest first. If the ECP version is known-broken,
-    walks back through recent gcloud SDK versions (decrementing by 2)
-    until a working version is found.
+    If requested_version is "latest", picks the newest non-broken version,
+    walking back through gcloud SDK releases if necessary.
+    If requested_version is a specific version (e.g. "0.3.14"), walks
+    gcloud SDK manifests until one shipping that exact version is found.
     """
     component_id, _ = _get_ecp_gcloud_component_info()
 
@@ -1343,7 +1350,7 @@ def _resolve_ecp_manifest() -> dict:
                 return comp.get("version", {}).get("version_string")
         return None
 
-    # Try latest manifest first.
+    # Fetch the latest manifest first (we always need it for the base version).
     logger.info("    Fetching gcloud component manifest...")
     resp = requests.get(_GCLOUD_COMPONENTS_LATEST_URL, timeout=30)
     resp.raise_for_status()
@@ -1351,6 +1358,37 @@ def _resolve_ecp_manifest() -> dict:
     ecp_ver = _get_ecp_version(manifest)
     gcloud_ver = manifest.get("version", "?")
 
+    # --- Pinned version mode ---
+    if requested_version != "latest":
+        if ecp_ver == requested_version:
+            logger.info("    Latest gcloud SDK %s has ECP %s (matches requested)",
+                        gcloud_ver, ecp_ver)
+            return manifest
+        logger.info("    Latest ECP is %s, searching for requested %s...",
+                    ecp_ver, requested_version)
+        base_ver = int(gcloud_ver.split(".")[0]) if gcloud_ver != "?" else 578
+        for major in range(base_ver - 2, base_ver - 40, -2):
+            ver_str = f"{major}.0.0"
+            try:
+                url = _GCLOUD_COMPONENTS_VERSIONED_URL.format(ver_str)
+                r = requests.get(url, timeout=15)
+                if r.status_code != 200:
+                    continue
+                m = r.json()
+                v = _get_ecp_version(m)
+                if v == requested_version:
+                    logger.info("    gcloud SDK %s has ECP %s (match)", ver_str, v)
+                    return m
+                logger.debug("    gcloud SDK %s has ECP %s (skip)", ver_str, v)
+            except Exception:
+                continue
+        logger.warning(
+            "    Could not find ECP %s in any gcloud SDK release. "
+            "Using latest (%s) instead.", requested_version, ecp_ver,
+        )
+        return manifest
+
+    # --- Latest mode: skip known-broken versions ---
     if ecp_ver and ecp_ver not in _ECP_BROKEN_VERSIONS:
         logger.info("    Latest gcloud SDK %s has ECP %s (OK)", gcloud_ver, ecp_ver)
         return manifest
@@ -1381,7 +1419,10 @@ def _resolve_ecp_manifest() -> dict:
     return manifest
 
 
-def _download_ecp_from_gcloud_components(ecp_dir: Path) -> None:
+def _download_ecp_from_gcloud_components(
+    ecp_dir: Path,
+    requested_version: str = "latest",
+) -> None:
     """Downloads ECP binaries from gcloud's component CDN.
 
     The gcloud component CDN distributes the same binaries as
@@ -1403,7 +1444,7 @@ def _download_ecp_from_gcloud_components(ecp_dir: Path) -> None:
 
     component_id, _ = _get_ecp_gcloud_component_info()
 
-    manifest = _resolve_ecp_manifest()
+    manifest = _resolve_ecp_manifest(requested_version)
 
     # Find our platform-specific component.
     component = None
@@ -1476,12 +1517,15 @@ def _download_ecp_from_gcloud_components(ecp_dir: Path) -> None:
 
 
 
-def _ensure_ecp_binaries() -> tuple[Path, Path, Path]:
+def _ensure_ecp_binaries(ecp_version: str = "latest") -> tuple[Path, Path, Path]:
     """Locates ECP binaries, downloading from gcloud component CDN if needed.
 
+    Args:
+        ecp_version: "latest" or a pinned version like "0.3.14".
+
     Search order:
-      1. Cached download in persistent install directory
-      2. Download from gcloud component CDN (skipping broken versions)
+      1. Cached download in persistent install directory (version-specific)
+      2. Download from gcloud component CDN
 
     Returns:
         (ecp_binary, ecp_client_lib, tls_offload_lib) paths.
@@ -1489,7 +1533,7 @@ def _ensure_ecp_binaries() -> tuple[Path, Path, Path]:
     _, _, lib_ext, _ = _get_ecp_platform_info()
     exe_ext = ".exe" if sys.platform == "win32" else ""
 
-    ecp_install_dir = _get_ecp_install_dir()
+    ecp_install_dir = _get_ecp_install_dir(ecp_version)
 
     ecp_bin_name = f"ecp{exe_ext}"
     libecp_name = f"libecp{lib_ext}"
@@ -1502,13 +1546,13 @@ def _ensure_ecp_binaries() -> tuple[Path, Path, Path]:
     cached_client = ecp_install_dir / libecp_name
     cached_offload = ecp_install_dir / tls_offload_name
     if cached_bin.exists() and cached_client.exists() and cached_offload.exists():
-        logger.info("    Using cached ECP binaries from %s", ecp_install_dir)
+        logger.info("    Using cached ECP v%s binaries from %s", ecp_version, ecp_install_dir)
         ecp_bin, client, offload = cached_bin, cached_client, cached_offload
 
     # 2. Download from gcloud component CDN.
     if not ecp_bin:
         logger.info("    ECP binaries not found — downloading from gcloud CDN...")
-        _download_ecp_from_gcloud_components(ecp_install_dir)
+        _download_ecp_from_gcloud_components(ecp_install_dir, ecp_version)
         ecp_bin = ecp_install_dir / ecp_bin_name
         client = ecp_install_dir / libecp_name
         offload = ecp_install_dir / tls_offload_name
@@ -1552,15 +1596,19 @@ def _ensure_ecp_binaries() -> tuple[Path, Path, Path]:
     return ecp_bin, client, offload
 
 
-def _get_ecp_install_dir() -> Path:
-    """Returns the standard persistent directory for ECP binaries."""
+def _get_ecp_install_dir(ecp_version: str = "latest") -> Path:
+    """Returns the standard persistent directory for ECP binaries.
+
+    Uses a version-specific subdirectory so pinned and latest versions
+    don't collide in the cache.
+    """
     if sys.platform == "win32":
         local_app_data = os.environ.get(
             "LOCALAPPDATA", str(Path.home() / "AppData" / "Local"),
         )
-        return Path(local_app_data) / "Google" / "ECP"
+        return Path(local_app_data) / "Google" / "ECP" / ecp_version
     else:
-        return Path.home() / ".config" / "bunker-ecp"
+        return Path.home() / ".config" / "bunker-ecp" / ecp_version
 
 
 def _ensure_ecp_on_path(ecp_dir: Path) -> None:
@@ -1791,6 +1839,18 @@ def main() -> None:
             "Only used when creating a new project (e.g. with --create-project)."
         ),
     )
+    _ecp_default = "0.3.14" if sys.platform == "linux" else "latest"
+    parser.add_argument(
+        "--ecp-version", metavar="VERSION", default=_ecp_default,
+        help=(
+            "ECP (Enterprise Certificate Proxy) version to use.  "
+            "'latest' downloads the newest available from the gcloud CDN; "
+            "a specific version like '0.3.14' pins to that release.  "
+            f"Default: {_ecp_default} "
+            "(Linux defaults to 0.3.14 due to OpenSSL 3 compatibility issues "
+            "in 0.3.18+)."
+        ),
+    )
     args = parser.parse_args()
 
     if args.use_adc and args.client_secrets_file:
@@ -1817,6 +1877,7 @@ def main() -> None:
         config.pool_id = args.create_pool
     if args.soft_key:
         config.soft_key = True
+    config.ecp_version = args.ecp_version
     if args.key_algorithm:
         algo_info = _KEY_ALGORITHMS[args.key_algorithm]
         # Validate algorithm is supported on this platform.
@@ -2060,7 +2121,7 @@ def main() -> None:
         logger.info("=== 6) Generating ECP Certificate Config & ADC ===")
 
         try:
-            ecp_binary, ecp_client_lib, tls_offload_lib = _ensure_ecp_binaries()
+            ecp_binary, ecp_client_lib, tls_offload_lib = _ensure_ecp_binaries(config.ecp_version)
         except FileNotFoundError as ecp_err:
             github_os, arch, _, _ = _get_ecp_platform_info()
             logger.warning(
