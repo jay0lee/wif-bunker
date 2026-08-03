@@ -12,7 +12,7 @@ wif-bunker --create-project my-project --folder 123456789
 
 This single command:
 1. Creates a GCP project and enables required APIs
-2. Generates a non-exportable private key in your hardware security module
+2. Generates a non-exportable private key on your device's hardware security module
 3. Creates a Workload Identity Federation pool with X.509 certificate authentication
 4. Configures Application Default Credentials (ADC) for seamless `gcloud` and SDK usage
 
@@ -24,11 +24,20 @@ This single command:
 | **Risk if stolen** | Full impersonation | Key cannot be extracted |
 | **Rotation** | Manual, error-prone | Re-run before expiry (max 390 days) |
 | **Setup complexity** | Download a file | One command |
-| **Compliance** | Fails most security audits | Hardware-attested identity |
+| **Compliance** | Fails most security audits | Hardware-backed identity |
 
 ## Installation
 
 ### Linux / macOS (one-liner)
+
+**Linux prerequisites:** TPM 2.0 hardware (or [swtpm](https://github.com/stefanberger/swtpm) for development) and the TPM PKCS#11 toolchain:
+
+```bash
+sudo apt install tpm2-tools tpm2-pkcs11-tools tpm2-abrmd gnutls-bin opensc
+sudo systemctl start tpm2-abrmd
+```
+
+**macOS prerequisites:** macOS 15 (Sequoia) or later with Apple Silicon (Secure Enclave).
 
 ```bash
 bash <(curl -s -S -L https://raw.githubusercontent.com/jay0lee/wif-bunker/master/packaging/install.sh)
@@ -48,16 +57,9 @@ bash <(curl -s -S -L https://raw.githubusercontent.com/jay0lee/wif-bunker/master
 bash <(curl -s -S -L https://raw.githubusercontent.com/jay0lee/wif-bunker/master/packaging/install.sh) -l
 ```
 
-**Linux prerequisites:** TPM 2.0 hardware (or [swtpm](https://github.com/stefanberger/swtpm) for development) and the TPM PKCS#11 toolchain:
-
-```bash
-sudo apt install tpm2-tools tpm2-pkcs11-tools tpm2-abrmd gnutls-bin opensc
-sudo systemctl start tpm2-abrmd
-```
-
-**macOS prerequisites:** macOS 15 (Sequoia) or later with Apple Silicon (Secure Enclave).
-
 ### Windows
+
+**Prerequisites:** TPM 2.0 - present on all Windows 11 PCs, thanks M$!.
 
 Download and run the installer from the [Releases](https://github.com/jay0lee/wif-bunker/releases) page:
 
@@ -66,8 +68,6 @@ Download and run the installer from the [Releases](https://github.com/jay0lee/wi
 | `wif-bunker-VERSION-windows-x86_64-setup.exe` | TPM 2.0 |
 
 The installer adds `wif-bunker` to your PATH automatically.
-
-**Prerequisites:** TPM 2.0 (present on all modern Windows PCs).
 
 ### Verify (optional)
 
@@ -303,7 +303,7 @@ pyinstaller wif-bunker.spec
 
 ## Certificate Rotation
 
-GCP Workload Identity Federation enforces a **maximum certificate lifetime of 390 days**. Before your certificate expires, re-run WIF Bunker with `--use-project` and `--use-pool` to generate a new hardware-backed key and update the WIF provider:
+By default, per best-practice, WIF Bunker certificates expire after 90 days. GCP Workload Identity Federation enforces a **maximum certificate lifetime of 390 days**. Before your certificate expires, re-run WIF Bunker with `--use-project` and `--use-pool` to generate a new hardware-backed key and update the WIF provider:
 
 ```bash
 wif-bunker \
@@ -314,7 +314,7 @@ wif-bunker \
 
 This generates a fresh certificate and replaces the old WIF provider trust anchor and fingerprint pin. The old key remains in the hardware keystore but is no longer trusted by GCP.
 
-You can set a shorter lifetime with `--cert-lifetime`:
+You can adjust lifetime with `--cert-lifetime`:
 
 ```bash
 # 90-day certificate
