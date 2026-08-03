@@ -32,8 +32,8 @@ def _generate_self_signed_cert() -> str:
         .issuer_name(issuer)
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.datetime.utcnow())
-        .not_valid_after(datetime.datetime.utcnow() + datetime.timedelta(days=10))
+        .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
+        .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=10))
         .sign(key, hashes.SHA256())
     )
     return cert.public_bytes(serialization.Encoding.PEM).decode("utf-8")
@@ -70,12 +70,9 @@ class TestCheckTpmStatus:
 
     @patch("wif_bunker.attestation.windows.subprocess.run")
     def test_parses_valid_tpm_json(self, mock_run):
-        tpm_output = json.dumps({
-            "TpmPresent": True,
-            "TpmReady": True,
-            "ManufacturerId": 1095582720,
-            "ManufacturerVersion": "1.2.3"
-        })
+        tpm_output = json.dumps(
+            {"TpmPresent": True, "TpmReady": True, "ManufacturerId": 1095582720, "ManufacturerVersion": "1.2.3"}
+        )
         mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=tpm_output, stderr="")
 
         check, info = _check_tpm_status()
@@ -117,10 +114,7 @@ class TestCheckEkInfo:
 
     @patch("wif_bunker.attestation.windows.subprocess.run")
     def test_parses_valid_ek_info(self, mock_run):
-        ek_output = json.dumps({
-            "PublicKeyHash": "deadbeef",
-            "ManufacturerCertificates": ["cert1"]
-        })
+        ek_output = json.dumps({"PublicKeyHash": "deadbeef", "ManufacturerCertificates": ["cert1"]})
         mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=ek_output, stderr="")
 
         check, info = _check_ek_info()
@@ -202,9 +196,7 @@ class TestCheckKeyProvider:
     @patch("wif_bunker.attestation.windows.subprocess.run")
     def test_handles_cert_not_found(self, mock_run, sample_config):
         sample_config.workload_cn = "test"
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="CERT_NOT_FOUND", stderr=""
-        )
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="CERT_NOT_FOUND", stderr="")
 
         check, info = _check_key_provider(sample_config)
 
@@ -215,9 +207,7 @@ class TestCheckKeyProvider:
     @patch("wif_bunker.attestation.windows.subprocess.run")
     def test_handles_no_private_key(self, mock_run, sample_config):
         sample_config.workload_cn = "test"
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="NO_PRIVATE_KEY", stderr=""
-        )
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="NO_PRIVATE_KEY", stderr="")
 
         check, info = _check_key_provider(sample_config)
 
@@ -228,9 +218,7 @@ class TestCheckKeyProvider:
     @patch("wif_bunker.attestation.windows.subprocess.run")
     def test_uses_preamble_for_cert_store(self, mock_run, sample_config):
         sample_config.workload_cn = "test"
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="CERT_NOT_FOUND", stderr=""
-        )
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="CERT_NOT_FOUND", stderr="")
         _check_key_provider(sample_config)
         cmd_string = mock_run.call_args[0][0][-1]
         assert "Microsoft.PowerShell.Security" in cmd_string
@@ -254,9 +242,7 @@ class TestCheckExportability:
     @patch("wif_bunker.attestation.windows.subprocess.run")
     def test_cert_not_found(self, mock_run, sample_config):
         sample_config.workload_cn = "test"
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="NOT_FOUND", stderr=""
-        )
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="NOT_FOUND", stderr="")
 
         check = _check_exportability(sample_config)
 
@@ -281,6 +267,7 @@ class TestNcryptCreateClaim:
         key_info = {"provider": "Microsoft Platform Crypto Provider", "key_name": "{THE-KEY-NAME}"}
 
         import sys
+
         mock_ctypes = sys.modules["ctypes"]
         # Configure mock specifically for ncrypt calls to fail gracefully and track arguments
         mock_ncrypt = MagicMock()
