@@ -116,11 +116,7 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
         ca_der_path = work_dir / "ca.der"
         ca_der_path.write_bytes(ca_cert_obj.public_bytes(serialization.Encoding.DER))
         ca_thumbprint = ca_cert_obj.fingerprint(ca_cert_obj.signature_hash_algorithm).hex().upper()
-        ps_install_ca = (
-            f"Import-Certificate "
-            f"-FilePath '{ca_der_path}' "
-            f"-CertStoreLocation 'Cert:\\CurrentUser\\Root'"
-        )
+        ps_install_ca = f"Import-Certificate -FilePath '{ca_der_path}' -CertStoreLocation 'Cert:\\CurrentUser\\Root'"
 
         # Import-Certificate MUST run without capture_output so Windows can
         # display the root CA trust security dialog. Capturing stdout/stderr
