@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -85,7 +86,11 @@ def verify_ek_chain(ek_pem: str) -> AttestationCheck:
     https://github.com/loicsikidi/tpm-ca-certificates) and runs
     ``openssl verify``.
     """
-    certs_dir = Path(__file__).parent / "roots"
+    # In PyInstaller builds, data files are extracted under sys._MEIPASS
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        certs_dir = Path(sys._MEIPASS) / "wif_bunker" / "attestation" / "roots"
+    else:
+        certs_dir = Path(__file__).parent / "roots"
     roots_dir = certs_dir / "roots"
     intermediates_dir = certs_dir / "intermediates"
 

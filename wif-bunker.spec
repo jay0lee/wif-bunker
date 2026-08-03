@@ -33,6 +33,14 @@ for pkg in ('google-auth', 'requests', 'cryptography', 'certifi', 'urllib3', 'ch
     except Exception:
         pass  # Package may not be installed in dev
 
+# ── Attestation root certificates ──
+# TPM EK root/intermediate CAs used by --attest to verify the EK cert chain.
+# These are data files that PyInstaller won't find automatically.
+datas += [
+    ('wif_bunker/attestation/roots/roots/*.pem', 'wif_bunker/attestation/roots/roots'),
+    ('wif_bunker/attestation/roots/intermediates/*.pem', 'wif_bunker/attestation/roots/intermediates'),
+]
+
 # ── Excludes ──
 # Trim unused packages to reduce binary size.
 excludes = [
