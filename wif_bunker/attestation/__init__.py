@@ -13,13 +13,14 @@ from pathlib import Path
 
 from wif_bunker.attestation.base import AttestationReport
 from wif_bunker.config import WorkloadConfig
+from wif_bunker.utils import SYM_CHECK, SYM_CROSS, SYM_WARN
 
 logger = logging.getLogger(__name__)
 
 # Symbols for terminal output
-_SYM_OK = "\u2713"
-_SYM_FAIL = "\u2717"
-_SYM_WARN = "\u26a0"
+_SYM_OK = SYM_CHECK
+_SYM_FAIL = SYM_CROSS
+_SYM_WARN = SYM_WARN
 
 
 def generate_attestation(config: WorkloadConfig) -> AttestationReport:

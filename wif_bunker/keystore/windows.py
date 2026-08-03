@@ -12,7 +12,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 
 from wif_bunker.cert import _create_ca_and_sign
 from wif_bunker.config import CertificateBundle, WorkloadConfig
-from wif_bunker.utils import SYM_WARN, _require_command
+from wif_bunker.utils import _UNICODE, SYM_WARN, _require_command
 
 logger = logging.getLogger(__name__)
 
@@ -104,13 +104,26 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
         #    can validate the chain.  This triggers a Windows security
         #    dialog — the user must click Yes.  We verify afterward.
         logger.warning("")
-        logger.warning("    ╔══════════════════════════════════════════════════════════╗")
-        logger.warning("    ║  ATTENTION: A Windows Security dialog will appear.      ║")
-        logger.warning("    ║  You MUST click YES to install the ephemeral CA cert.    ║")
-        logger.warning("    ║                                                          ║")
-        logger.warning("    ║  ⚠  The dialog may appear BEHIND this window.            ║")
-        logger.warning("    ║     Check your taskbar for a 'Security Warning' prompt.  ║")
-        logger.warning("    ╚══════════════════════════════════════════════════════════╝")
+        if _UNICODE:
+            logger.warning(
+                "    \u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557"
+            )
+            logger.warning("    \u2551  ATTENTION: A Windows Security dialog will appear.      \u2551")
+            logger.warning("    \u2551  You MUST click YES to install the ephemeral CA cert.    \u2551")
+            logger.warning("    \u2551                                                          \u2551")
+            logger.warning("    \u2551  \u26a0  The dialog may appear BEHIND this window.            \u2551")
+            logger.warning("    \u2551     Check your taskbar for a 'Security Warning' prompt.  \u2551")
+            logger.warning(
+                "    \u255a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255d"
+            )
+        else:
+            logger.warning("    +------------------------------------------------------------+")
+            logger.warning("    |  ATTENTION: A Windows Security dialog will appear.      |")
+            logger.warning("    |  You MUST click YES to install the ephemeral CA cert.    |")
+            logger.warning("    |                                                          |")
+            logger.warning("    |  !!  The dialog may appear BEHIND this window.            |")
+            logger.warning("    |     Check your taskbar for a 'Security Warning' prompt.  |")
+            logger.warning("    +------------------------------------------------------------+")
         logger.warning("")
         ca_cert_obj = cx509.load_pem_x509_certificate(bundle.trust_anchor_pem.encode())
         ca_der_path = work_dir / "ca.der"
@@ -159,12 +172,24 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
         #    On Windows, this triggers a Security Warning dialog
         #    requiring user confirmation (same as import).
         logger.warning("")
-        logger.warning("    ╔══════════════════════════════════════════════════════════╗")
-        logger.warning("    ║  ATTENTION: Another Windows Security dialog will appear. ║")
-        logger.warning("    ║  Click YES to remove the ephemeral CA (cleanup step).    ║")
-        logger.warning("    ║                                                          ║")
-        logger.warning("    ║  ⚠  Check your taskbar if you don't see it.              ║")
-        logger.warning("    ╚══════════════════════════════════════════════════════════╝")
+        if _UNICODE:
+            logger.warning(
+                "    \u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557"
+            )
+            logger.warning("    \u2551  ATTENTION: Another Windows Security dialog will appear. \u2551")
+            logger.warning("    \u2551  Click YES to remove the ephemeral CA (cleanup step).    \u2551")
+            logger.warning("    \u2551                                                          \u2551")
+            logger.warning("    \u2551  \u26a0  Check your taskbar if you don't see it.              \u2551")
+            logger.warning(
+                "    \u255a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255d"
+            )
+        else:
+            logger.warning("    +------------------------------------------------------------+")
+            logger.warning("    |  ATTENTION: Another Windows Security dialog will appear. |")
+            logger.warning("    |  Click YES to remove the ephemeral CA (cleanup step).    |")
+            logger.warning("    |                                                          |")
+            logger.warning("    |  !!  Check your taskbar if you don't see it.              |")
+            logger.warning("    +------------------------------------------------------------+")
         logger.warning("")
         logger.info("    Removing ephemeral CA from trusted root store...")
         # certutil -delstore also triggers a security dialog — must not capture.

@@ -372,7 +372,7 @@ jobs:
           assert 'checks' in r, 'Missing checks'
           assert 'checks_passed' in r, 'Missing checks_passed'
           assert r['checks_total'] > 0, 'No checks ran'
-          print(f'  ✓ Report valid: {r[\"platform\"]}, {r[\"checks_passed\"]}/{r[\"checks_total\"]} checks passed')
+          print(f'  Report valid: {r[\"platform\"]}, {r[\"checks_passed\"]}/{r[\"checks_total\"]} checks passed')
           " "$attestdir"
 
           rm -rf "$certdir" "$attestdir"
