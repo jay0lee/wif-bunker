@@ -19,6 +19,7 @@ from wif_bunker.attestation.base import (
     AttestationArtifact,
     AttestationCheck,
     AttestationReport,
+    verify_ek_chain,
 )
 from wif_bunker.config import WorkloadConfig
 from wif_bunker.utils import _require_command
@@ -97,43 +98,9 @@ def _extract_ek_certificate(work_dir: Path) -> tuple[AttestationCheck, str | Non
     )
 
 
-def _verify_ek_chain(ek_pem: str, work_dir: Path) -> AttestationCheck:
+def _verify_ek_chain(ek_pem: str, work_dir: Path) -> AttestationCheck:  # pylint: disable=unused-argument
     """Verify EK certificate against known manufacturer root CAs."""
-    ek_path = work_dir / "ek_for_verify.pem"
-    ek_path.write_text(ek_pem, encoding="utf-8")
-
-    # Look for bundled root CAs
-    roots_dir = Path(__file__).parent / "roots"
-    if not roots_dir.exists() or not any(roots_dir.glob("*.pem")):
-        return AttestationCheck(
-            name="EK certificate chain verified",
-            passed=False,
-            detail="No manufacturer root CA certificates bundled. Chain verification skipped.",
-        )
-
-    # Try each root CA
-    for root_ca in sorted(roots_dir.glob("*.pem")):
-        result = subprocess.run(
-            ["openssl", "verify", "-CAfile", str(root_ca), str(ek_path)],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0 and ": OK" in result.stdout:
-            manufacturer = root_ca.stem.replace("_", " ").title()
-            return AttestationCheck(
-                name="EK certificate chain verified",
-                passed=True,
-                detail=f"EK certificate verified against {manufacturer} root CA ({root_ca.name})",
-            )
-
-    return AttestationCheck(
-        name="EK certificate chain verified",
-        passed=False,
-        detail=(
-            "EK certificate did not chain to any bundled manufacturer root CA. "
-            "The TPM manufacturer's root CA may not be bundled yet."
-        ),
-    )
+    return verify_ek_chain(ek_pem)
 
 
 def _create_ek_and_ak(work_dir: Path) -> tuple[AttestationCheck, bool]:

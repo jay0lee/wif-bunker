@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import subprocess
+import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass
@@ -63,3 +66,48 @@ class AttestationReport:
             "documentation_urls": self.documentation_urls,
             "verification_steps": self.verification_steps,
         }
+
+
+def verify_ek_chain(ek_pem: str) -> AttestationCheck:
+    """Verify EK certificate against known manufacturer root CAs.
+
+    Shared by Linux and Windows attestation modules. Writes the EK PEM
+    to a temp file, iterates over bundled root CAs, and runs ``openssl verify``.
+    """
+    roots_dir = Path(__file__).parent / "roots"
+    if not roots_dir.exists() or not any(roots_dir.glob("*.pem")):
+        return AttestationCheck(
+            name="EK certificate chain verified",
+            passed=False,
+            detail="No manufacturer root CA certificates bundled. Chain verification skipped.",
+        )
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".pem", delete=False, encoding="utf-8") as tmp:
+        tmp.write(ek_pem)
+        ek_path = tmp.name
+
+    try:
+        for root_ca in sorted(roots_dir.glob("*.pem")):
+            result = subprocess.run(
+                ["openssl", "verify", "-CAfile", str(root_ca), ek_path],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0 and ": OK" in result.stdout:
+                manufacturer = root_ca.stem.replace("_", " ").title()
+                return AttestationCheck(
+                    name="EK certificate chain verified",
+                    passed=True,
+                    detail=f"EK certificate verified against {manufacturer} root CA ({root_ca.name})",
+                )
+    finally:
+        Path(ek_path).unlink(missing_ok=True)
+
+    return AttestationCheck(
+        name="EK certificate chain verified",
+        passed=False,
+        detail=(
+            "EK certificate did not chain to any bundled manufacturer root CA. "
+            "The TPM manufacturer's root CA may not be bundled yet."
+        ),
+    )
