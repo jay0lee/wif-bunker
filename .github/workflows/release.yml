@@ -192,11 +192,29 @@ jobs:
           git tag "v${VERSION}"
           git push origin "v${VERSION}"
 
-      - name: Download all build artifacts
+      - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: wif-bunker-*
           merge-multiple: true
+
+      - name: Download SBOMs
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: sbom-*
+          merge-multiple: true
+
+      # Remove the raw Windows binary directory if it leaked through
+      # (the -raw artifact is only for integration testing).
+      - name: Clean up non-release files
+        run: |
+          cd artifacts
+          rm -rf lib ecp _internal
+          find . -maxdepth 1 -type f ! -name '*.tar.gz' ! -name '*-setup.exe' ! -name '*.spdx.json' -delete
+          echo "Release artifacts:"
+          ls -la
 
       - name: Generate SHA256 checksums
         run: |
