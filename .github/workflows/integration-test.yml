@@ -286,7 +286,6 @@ jobs:
             echo "Dialog auto-accept PID: $DIALOG_PID"
           fi
           ${{ inputs.wif_bunker_cmd || 'python wif_bunker.py' }} \
-            --debug \
             --use-adc \
             --create-project="${{ steps.config.outputs.project_id }}" \
             --folder="${{ secrets.SANDBOX_FOLDER_ID }}" \
@@ -301,7 +300,6 @@ jobs:
             powershell -NoProfile -File .github/scripts/win_dialog_accept.ps1 &
           fi
           ${{ inputs.wif_bunker_cmd || 'python wif_bunker.py' }} \
-            --debug \
             --use-adc \
             --use-project="${{ steps.config.outputs.project_id }}" \
             --use-pool=bunker-wif-pool \
@@ -346,7 +344,6 @@ jobs:
             powershell -NoProfile -File .github/scripts/win_dialog_accept.ps1 &
           fi
           ${{ inputs.wif_bunker_cmd || 'python wif_bunker.py' }} \
-            --debug \
             --use-adc \
             --use-project="${{ steps.config.outputs.project_id }}" \
             --use-pool=bunker-wif-pool \

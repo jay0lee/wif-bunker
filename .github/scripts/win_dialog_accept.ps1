@@ -7,7 +7,9 @@
 
 param(
     [int]$TimeoutSeconds = 180,
-    [string]$ScreenshotDir = $env:GITHUB_WORKSPACE
+    [int]$ExpectedDialogs = 2,
+    [string]$ScreenshotDir = $env:GITHUB_WORKSPACE,
+    [switch]$Debug
 )
 
 if (-not $ScreenshotDir) { $ScreenshotDir = $PWD }
@@ -124,14 +126,14 @@ $wshell = New-Object -ComObject wscript.shell
 $elapsed = 0
 $clickCount = 0
 
-Take-Screenshot "dialog_00_start"
+if ($Debug) { Take-Screenshot "dialog_00_start" }
 
 while ($elapsed -lt $TimeoutSeconds) {
     $result = Find-CertDialog
     if ($result.hwnd) {
         $clickCount++
         Write-Output "Dialog #$clickCount found: '$($result.title)' (hwnd=$($result.hwnd)) at ${elapsed}s"
-        Take-Screenshot "dialog_${clickCount}_found"
+        if ($Debug) { Take-Screenshot "dialog_${clickCount}_found" }
 
         # Bring the dialog to front and focus it
         [Win32]::SetForegroundWindow($result.hwnd) | Out-Null
@@ -139,11 +141,19 @@ while ($elapsed -lt $TimeoutSeconds) {
 
         # Send Tab+Enter to click Yes
         $wshell.SendKeys('{TAB}{ENTER}')
-        Write-Output "  Sent Tab+Enter to '$($result.title)'"
+        Write-Output "  Clicked Yes on '$($result.title)'"
 
         Start-Sleep -Milliseconds 1000
-        Take-Screenshot "dialog_${clickCount}_after"
-        Dump-AllWindows
+        if ($Debug) {
+            Take-Screenshot "dialog_${clickCount}_after"
+            Dump-AllWindows
+        }
+
+        # All expected dialogs handled — stop polling
+        if ($clickCount -ge $ExpectedDialogs) {
+            Write-Output "All $ExpectedDialogs expected dialog(s) handled — exiting"
+            break
+        }
 
         # Brief pause to let the dialog close before polling again
         Start-Sleep -Seconds 2
@@ -153,13 +163,14 @@ while ($elapsed -lt $TimeoutSeconds) {
     Start-Sleep -Seconds 1
     $elapsed++
 
-    # Periodic screenshots + window dump every 30s
-    if ($elapsed % 30 -eq 0) {
+    if ($Debug -and ($elapsed % 30 -eq 0)) {
         Take-Screenshot "dialog_poll_${elapsed}s"
         Dump-AllWindows
     }
 }
 
-Take-Screenshot "dialog_final"
-Dump-AllWindows
+if ($Debug) {
+    Take-Screenshot "dialog_final"
+    Dump-AllWindows
+}
 Write-Output "Dialog auto-accept finished ($clickCount dialog(s) clicked in ${elapsed}s)"

@@ -2050,61 +2050,60 @@ def main() -> None:
                 except OSError:
                     pass
 
-        # ── Debug-only diagnostics (7a/7b) ──
-        # These isolate ECP cert retrieval and TLS offload compatibility.
-        # If the ADC verification below fails, re-running with --debug
-        # enables these to pinpoint the failure.
-        if args.debug:
-            logger.info("=== Debug: ECP Certificate Retrieval ===")
+        # ── ECP Certificate Retrieval ──
+        # Quick validation that ECP can find and return the cert before
+        # attempting the full mTLS handshake.
+        logger.info("=== 7a) ECP Certificate Retrieval ===")
 
-            try:
-                _ecp_lib = ctypes.CDLL(str(ecp_client_lib))
-                _ecp_lib.GetCertPemForPython.argtypes = [
-                    ctypes.c_char_p,
-                    ctypes.c_char_p,
-                    ctypes.c_int,
-                ]
-                _ecp_lib.GetCertPemForPython.restype = ctypes.c_int
+        try:
+            _ecp_lib = ctypes.CDLL(str(ecp_client_lib))
+            _ecp_lib.GetCertPemForPython.argtypes = [
+                ctypes.c_char_p,
+                ctypes.c_char_p,
+                ctypes.c_int,
+            ]
+            _ecp_lib.GetCertPemForPython.restype = ctypes.c_int
 
-                # First call with buf=NULL to get required size.
-                _cert_len = _ecp_lib.GetCertPemForPython(
-                    str(cert_config_path).encode(),
-                    None,
-                    0,
-                )
-                if _cert_len <= 0:
-                    logger.error("    FAIL: ECP returned cert_len=%d", _cert_len)
+            # First call with buf=NULL to get required size.
+            _cert_len = _ecp_lib.GetCertPemForPython(
+                str(cert_config_path).encode(),
+                None,
+                0,
+            )
+            if _cert_len <= 0:
+                logger.error("    FAIL: ECP returned cert_len=%d", _cert_len)
+                if args.debug:
                     _run_ecp_diagnostics(cert_config_path, logger)
-                    raise RuntimeError("ECP cert retrieval failed (cert_len=0)")
+                raise RuntimeError("ECP cert retrieval failed (cert_len=0)")
 
-                # Second call to retrieve the actual PEM.
-                _cert_buf = ctypes.create_string_buffer(_cert_len + 1)
-                _ecp_lib.GetCertPemForPython(
-                    str(cert_config_path).encode(),
-                    _cert_buf,
-                    _cert_len + 1,
-                )
-                _cert_pem_bytes = _cert_buf.value
-                _cert_pem = _cert_pem_bytes.decode("utf-8", errors="replace")
-                logger.info("    PASS: ECP returned %d bytes of cert PEM", _cert_len)
+            # Second call to retrieve the actual PEM.
+            _cert_buf = ctypes.create_string_buffer(_cert_len + 1)
+            _ecp_lib.GetCertPemForPython(
+                str(cert_config_path).encode(),
+                _cert_buf,
+                _cert_len + 1,
+            )
+            _cert_pem_bytes = _cert_buf.value
+            _cert_pem = _cert_pem_bytes.decode("utf-8", errors="replace")
+            logger.info("    PASS: ECP returned %d bytes of cert PEM", _cert_len)
 
-                # Parse and show cert details.
-                try:
-                    _parsed = cx509.load_pem_x509_certificate(_cert_pem_bytes)
-                    _pub_key = _parsed.public_key()
-                    _key_type = type(_pub_key).__name__
-                    logger.info("    Cert subject:   %s", _parsed.subject)
-                    logger.info("    Cert issuer:    %s", _parsed.issuer)
-                    logger.info("    Key algorithm:  %s", _key_type)
-                    logger.info("    Cert serial:    %s", format(_parsed.serial_number, "X"))
-                except Exception as _parse_err:
-                    logger.warning("    Could not parse cert: %s", _parse_err)
+            # Parse and show cert details.
+            try:
+                _parsed = cx509.load_pem_x509_certificate(_cert_pem_bytes)
+                _pub_key = _parsed.public_key()
+                _key_type = type(_pub_key).__name__
+                logger.info("    Cert subject:   %s", _parsed.subject)
+                logger.info("    Cert issuer:    %s", _parsed.issuer)
+                logger.info("    Key algorithm:  %s", _key_type)
+                logger.info("    Cert serial:    %s", format(_parsed.serial_number, "X"))
+            except Exception as _parse_err:
+                logger.warning("    Could not parse cert: %s", _parse_err)
 
-                logger.debug("    ECP cert PEM:\n%s", _cert_pem)
+            logger.debug("    ECP cert PEM:\n%s", _cert_pem)
 
-            except Exception:
-                logger.exception("ECP cert retrieval diagnostic failed")
-                sys.exit(1)
+        except Exception:
+            logger.exception("ECP cert retrieval failed")
+            sys.exit(1)
 
         # ── ADC Verification (always runs) ──
         # End-to-end proof: TPM key → ECP → mTLS → Google STS → API call.
@@ -2145,6 +2144,32 @@ def main() -> None:
             if use_sa:
                 logger.info("   Authenticated SA: %s", sa_email)
             logger.info("   Target Project:   %s", proj_result.get("name"))
+
+            # ── "Who am I?" via the 403 trick ──
+            # Request a non-existent project. GCP's IAM returns a 403
+            # whose error message contains the exact principal string.
+            try:
+                adc_creds, _ = google_auth_default(
+                    scopes=["https://www.googleapis.com/auth/cloud-platform"],
+                    request=mtls_request,
+                )
+                adc_creds.refresh(mtls_request)
+                whoami_headers = {}
+                adc_creds.apply(whoami_headers)
+                whoami_res = mtls_session.get(
+                    f"https://{crm_base}/v1/projects/wif-bunker-whoami-00000",
+                    headers=whoami_headers,
+                )
+                if whoami_res.status_code == 403:
+                    error_msg = whoami_res.json().get("error", {}).get("message", "")
+                    match = re.search(r"principal://\S+", error_msg)
+                    if match:
+                        principal = match.group(0).rstrip(".")
+                        logger.info("   Principal:        %s", principal)
+                    else:
+                        logger.debug("   Could not parse principal from 403: %s", error_msg)
+            except Exception:
+                logger.debug("   Principal identity check skipped", exc_info=True)
         except Exception:
             logger.exception("ADC verification failed")
             logger.error(
