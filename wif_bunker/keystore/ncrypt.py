@@ -486,3 +486,140 @@ def _parse_ecc_public_blob(blob: bytes, algorithm: str) -> ec.EllipticCurvePubli
     y = int.from_bytes(y_bytes, byteorder="big")
 
     return ec.EllipticCurvePublicNumbers(x=x, y=y, curve=curve).public_key()
+
+
+# ---------------------------------------------------------------------------
+# Certificate store operations (crypt32.dll)
+# ---------------------------------------------------------------------------
+
+# CertOpenStore constants
+_CERT_STORE_PROV_SYSTEM_W = 10
+_CERT_SYSTEM_STORE_CURRENT_USER = 0x00010000
+
+# CertAddCertificateContextToStore disposition
+_CERT_STORE_ADD_REPLACE_EXISTING = 3
+
+# CertSetCertificateContextProperty
+_CERT_KEY_PROV_INFO_PROP_ID = 2
+
+# X.509 ASN.1 encoding type
+_X509_ASN_ENCODING = 0x00000001
+_PKCS_7_ASN_ENCODING = 0x00010000
+_ENCODING = _X509_ASN_ENCODING | _PKCS_7_ASN_ENCODING
+
+
+def import_cert_to_store(
+    cert_der: bytes,
+    key_name: str,
+    provider_name: str,
+) -> None:
+    """Import a DER certificate into CurrentUser\\My and bind it to a CNG key.
+
+    This is the programmatic equivalent of ``certreq -accept``, but without
+    requiring the issuing CA to be in the Root trust store.
+
+    Uses crypt32.dll (ships with every Windows) to:
+      1. Open the CurrentUser\\My certificate store
+      2. Decode and add the DER certificate
+      3. Set CERT_KEY_PROV_INFO_PROP_ID to bind the cert to the named
+         CNG key container in the specified provider
+
+    Args:
+        cert_der: DER-encoded certificate bytes.
+        key_name: CNG key container name (must match a persisted key).
+        provider_name: KSP provider name (e.g. "Microsoft Platform Crypto Provider").
+
+    Raises:
+        RuntimeError: if any crypt32 call fails.
+
+    Reference:
+        https://learn.microsoft.com/en-us/windows/win32/api/wincrypt/nf-wincrypt-certsetcertificatecontextproperty
+    """
+    ctypes, wintypes, _ = _load_ctypes()
+
+    try:
+        crypt32 = ctypes.windll.crypt32
+    except (AttributeError, OSError) as exc:
+        raise RuntimeError(f"Could not load crypt32.dll: {exc}") from exc
+
+    # Define CRYPT_KEY_PROV_INFO structure.
+    # https://learn.microsoft.com/en-us/windows/win32/api/wincrypt/ns-wincrypt-crypt_key_prov_info
+    class CRYPT_KEY_PROV_INFO(ctypes.Structure):  # pylint: disable=invalid-name
+        _fields_ = [  # noqa: RUF012  — ctypes requires mutable class attr
+            ("pwszContainerName", wintypes.LPWSTR),
+            ("pwszProvName", wintypes.LPWSTR),
+            ("dwProvType", wintypes.DWORD),
+            ("dwFlags", wintypes.DWORD),
+            ("cProvParam", wintypes.DWORD),
+            ("rgProvParam", ctypes.c_void_p),  # PCRYPT_KEY_PROV_PARAM (unused)
+            ("dwKeySpec", wintypes.DWORD),
+        ]
+
+    store_handle = None
+    cert_context = None
+    stored_context = None
+
+    try:
+        # 1. Open CurrentUser\My store.
+        store_handle = crypt32.CertOpenStore(
+            _CERT_STORE_PROV_SYSTEM_W,
+            0,
+            None,
+            _CERT_SYSTEM_STORE_CURRENT_USER,
+            "My",
+        )
+        if not store_handle:
+            raise RuntimeError("CertOpenStore('My') failed")
+
+        # 2. Create a certificate context from DER bytes.
+        cert_context = crypt32.CertCreateCertificateContext(
+            _ENCODING,
+            cert_der,
+            len(cert_der),
+        )
+        if not cert_context:
+            raise RuntimeError("CertCreateCertificateContext failed")
+
+        # 3. Add cert to store (replacing any existing cert with same key).
+        stored_ptr = ctypes.c_void_p()
+        ok = crypt32.CertAddCertificateContextToStore(
+            store_handle,
+            cert_context,
+            _CERT_STORE_ADD_REPLACE_EXISTING,
+            ctypes.byref(stored_ptr),
+        )
+        if not ok:
+            raise RuntimeError("CertAddCertificateContextToStore failed")
+        stored_context = stored_ptr.value
+
+        # 4. Bind the cert to the CNG key container.
+        #    CERT_KEY_PROV_INFO tells Windows where the private key lives.
+        #    dwProvType = 0 means "CNG key" (not legacy CAPI).
+        #    dwKeySpec = 0xFFFFFFFF (CERT_NCRYPT_KEY_SPEC) means "CNG key".
+        key_prov_info = CRYPT_KEY_PROV_INFO(
+            pwszContainerName=key_name,
+            pwszProvName=provider_name,
+            dwProvType=0,  # 0 = CNG provider
+            dwFlags=0,
+            cProvParam=0,
+            rgProvParam=None,
+            dwKeySpec=0xFFFFFFFF,  # CERT_NCRYPT_KEY_SPEC
+        )
+        ok = crypt32.CertSetCertificateContextProperty(
+            stored_context,
+            _CERT_KEY_PROV_INFO_PROP_ID,
+            0,
+            ctypes.byref(key_prov_info),
+        )
+        if not ok:
+            raise RuntimeError("CertSetCertificateContextProperty(CERT_KEY_PROV_INFO) failed")
+
+        logger.info("    Cert imported to CurrentUser\\My and bound to key '%s'", key_name)
+
+    finally:
+        if stored_context:
+            crypt32.CertFreeCertificateContext(stored_context)
+        if cert_context:
+            crypt32.CertFreeCertificateContext(cert_context)
+        if store_handle:
+            crypt32.CertCloseStore(store_handle, 0)

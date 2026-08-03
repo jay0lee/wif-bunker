@@ -220,3 +220,97 @@ class TestDeleteKey:
         mock_ncrypt.NCryptOpenKey.return_value = 0x80090016  # NTE_BAD_KEYSET
 
         assert delete_key("nonexistent-key") is False
+
+
+class TestImportCertToStore:
+    """Tests for import_cert_to_store (mocked crypt32.dll calls)."""
+
+    @patch("wif_bunker.keystore.ncrypt._load_ctypes")
+    def test_import_success(self, mock_load):
+        from wif_bunker.keystore.ncrypt import import_cert_to_store
+
+        mock_ctypes = MagicMock()
+        mock_wintypes = MagicMock()
+        mock_ncrypt = MagicMock()
+        mock_load.return_value = (mock_ctypes, mock_wintypes, mock_ncrypt)
+
+        mock_crypt32 = MagicMock()
+        mock_ctypes.windll.crypt32 = mock_crypt32
+
+        mock_crypt32.CertOpenStore.return_value = 1  # truthy handle
+        mock_crypt32.CertCreateCertificateContext.return_value = 2
+        mock_crypt32.CertAddCertificateContextToStore.return_value = True
+        mock_crypt32.CertSetCertificateContextProperty.return_value = True
+
+        # Provide a stored_ptr mock
+        stored_ptr = MagicMock()
+        stored_ptr.value = 3
+        mock_ctypes.c_void_p.return_value = stored_ptr
+
+        import_cert_to_store(b"\x30\x00", "test-key", "Microsoft Platform Crypto Provider")
+
+        # Verify all 4 crypt32 calls were made
+        mock_crypt32.CertOpenStore.assert_called_once()
+        mock_crypt32.CertCreateCertificateContext.assert_called_once()
+        mock_crypt32.CertAddCertificateContextToStore.assert_called_once()
+        mock_crypt32.CertSetCertificateContextProperty.assert_called_once()
+
+        # Verify cleanup
+        assert mock_crypt32.CertFreeCertificateContext.call_count == 2
+        mock_crypt32.CertCloseStore.assert_called_once()
+
+    @patch("wif_bunker.keystore.ncrypt._load_ctypes")
+    def test_open_store_failure(self, mock_load):
+        from wif_bunker.keystore.ncrypt import import_cert_to_store
+
+        mock_ctypes = MagicMock()
+        mock_wintypes = MagicMock()
+        mock_ncrypt = MagicMock()
+        mock_load.return_value = (mock_ctypes, mock_wintypes, mock_ncrypt)
+
+        mock_crypt32 = MagicMock()
+        mock_ctypes.windll.crypt32 = mock_crypt32
+        mock_crypt32.CertOpenStore.return_value = 0  # failure
+
+        with pytest.raises(RuntimeError, match="CertOpenStore"):
+            import_cert_to_store(b"\x30\x00", "k", "p")
+
+    @patch("wif_bunker.keystore.ncrypt._load_ctypes")
+    def test_create_context_failure(self, mock_load):
+        from wif_bunker.keystore.ncrypt import import_cert_to_store
+
+        mock_ctypes = MagicMock()
+        mock_wintypes = MagicMock()
+        mock_ncrypt = MagicMock()
+        mock_load.return_value = (mock_ctypes, mock_wintypes, mock_ncrypt)
+
+        mock_crypt32 = MagicMock()
+        mock_ctypes.windll.crypt32 = mock_crypt32
+        mock_crypt32.CertOpenStore.return_value = 1
+        mock_crypt32.CertCreateCertificateContext.return_value = 0  # failure
+
+        with pytest.raises(RuntimeError, match="CertCreateCertificateContext"):
+            import_cert_to_store(b"\x30\x00", "k", "p")
+
+    @patch("wif_bunker.keystore.ncrypt._load_ctypes")
+    def test_set_property_failure(self, mock_load):
+        from wif_bunker.keystore.ncrypt import import_cert_to_store
+
+        mock_ctypes = MagicMock()
+        mock_wintypes = MagicMock()
+        mock_ncrypt = MagicMock()
+        mock_load.return_value = (mock_ctypes, mock_wintypes, mock_ncrypt)
+
+        mock_crypt32 = MagicMock()
+        mock_ctypes.windll.crypt32 = mock_crypt32
+        mock_crypt32.CertOpenStore.return_value = 1
+        mock_crypt32.CertCreateCertificateContext.return_value = 2
+        mock_crypt32.CertAddCertificateContextToStore.return_value = True
+        mock_crypt32.CertSetCertificateContextProperty.return_value = False  # failure
+
+        stored_ptr = MagicMock()
+        stored_ptr.value = 3
+        mock_ctypes.c_void_p.return_value = stored_ptr
+
+        with pytest.raises(RuntimeError, match="CertSetCertificateContextProperty"):
+            import_cert_to_store(b"\x30\x00", "k", "p")

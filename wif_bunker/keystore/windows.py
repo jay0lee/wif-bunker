@@ -10,7 +10,6 @@ import logging
 import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 from cryptography import x509 as cx509
@@ -52,10 +51,7 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
     algo = config.key_algo_config
     ncrypt_algo = algo["ncrypt_algo"]
     ncrypt_key_length = algo.get("ncrypt_key_length")
-    cng_class = algo["ncrypt_cng_class"]
 
-    _tmpdir = tempfile.TemporaryDirectory(prefix="bunker_")  # pylint: disable=consider-using-with
-    work_dir = Path(_tmpdir.name)
     key_handle = None
 
     try:
@@ -97,60 +93,15 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
         # 3. Ephemeral CA signs a workload cert using the TPM's public key.
         bundle, workload_pem = _create_ca_and_sign(pub_key_pem, config)
 
-        # 4. Import cert + bind to TPM key via PowerShell.
-        #    Uses .NET CNG classes to associate the cert with the NCrypt
-        #    key container — no certreq needed, no security dialog.
-        issued_cert_path = work_dir / "issued.cer"
+        # 4. Import cert into CurrentUser\My and bind to TPM key.
+        #    Uses crypt32.dll to set CERT_KEY_PROV_INFO — this is what
+        #    certreq -accept does internally, but without requiring the
+        #    issuing CA in the Root trust store.
         workload_cert_obj = cx509.load_pem_x509_certificate(workload_pem.encode())
-        issued_cert_path.write_bytes(workload_cert_obj.public_bytes(serialization.Encoding.DER))
+        workload_der = workload_cert_obj.public_bytes(serialization.Encoding.DER)
 
-        provider_class = (
-            "[System.Security.Cryptography.CngProvider]::MicrosoftSoftwareKeyStorageProvider"
-            if config.soft_key
-            else "[System.Security.Cryptography.CngProvider]::MicrosoftPlatformCryptoProvider"
-        )
-
-        # Build PowerShell script to bind cert to TPM key.
-        # CopyWithPrivateKey creates a new X509Certificate2 with the
-        # private key association — this is the .NET equivalent of
-        # certreq -accept but without the chain validation requirement.
-        ps_import = (
-            f"{_PS_CERT_PREAMBLE}"
-            f"$certBytes = [System.IO.File]::ReadAllBytes('{issued_cert_path}'); "
-            f"$cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certBytes); "
-            f"$cngKey = [System.Security.Cryptography.CngKey]::Open("
-            f"'{config.workload_cn}', {provider_class}); "
-            f"$key = [System.Security.Cryptography.{cng_class}]::new($cngKey); "
-        )
-
-        # CopyWithPrivateKey is an extension method — call it via the
-        # static extension class for PowerShell 5.1 compatibility.
-        if cng_class == "RSACng":
-            ps_import += (
-                "$certWithKey = [System.Security.Cryptography.X509Certificates."
-                "RSACertificateExtensions]::CopyWithPrivateKey($cert, $key); "
-            )
-        else:
-            ps_import += (
-                "$certWithKey = [System.Security.Cryptography.X509Certificates."
-                "ECDsaCertificateExtensions]::CopyWithPrivateKey($cert, $key); "
-            )
-
-        ps_import += (
-            "$store = [System.Security.Cryptography.X509Certificates.X509Store]"
-            "::new('My', 'CurrentUser'); "
-            "$store.Open('ReadWrite'); "
-            "$store.Add($certWithKey); "
-            "$store.Close()"
-        )
-
-        subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps_import],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        logger.info("    CA-signed cert associated with TPM key in CurrentUser store.")
+        provider_name = ncrypt.MS_SOFTWARE_KSP if config.soft_key else ncrypt.MS_PLATFORM_CRYPTO_PROVIDER
+        ncrypt.import_cert_to_store(workload_der, config.workload_cn, provider_name)
 
         # 5. Verify the cert was imported successfully.
         workload_thumbprint = workload_cert_obj.fingerprint(hashes.SHA1()).hex().upper()
@@ -188,7 +139,6 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
     finally:
         if key_handle is not None:
             ncrypt.free_object(key_handle)
-        _tmpdir.cleanup()
 
 
 def _find_ecp_binaries() -> tuple[Path, Path, Path]:
