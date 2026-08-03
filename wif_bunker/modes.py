@@ -7,7 +7,6 @@ import datetime
 import json
 import logging
 import os
-import re
 import sys
 from pathlib import Path
 
@@ -201,17 +200,6 @@ def _run_status() -> None:
         )
         target_res.raise_for_status()
         logger.info("ADC:       %s API call successful", SYM_CHECK)
-
-        # Who am I?
-        whoami_res = authed_session.get(
-            f"https://{crm_base}/v1/projects/wif-bunker-whoami-00000",
-        )
-        if whoami_res.status_code == 403:
-            error_msg = whoami_res.json().get("error", {}).get("message", "")
-            match = re.search(r"principal://\S+", error_msg)
-            if match:
-                principal = match.group(0).rstrip(".")
-                logger.info("Principal: %s", principal)
     except Exception as exc:
         logger.error("ADC:       %s %s", SYM_CROSS, exc)
         logger.error("Re-run with --debug for detailed ECP and TLS diagnostics.")

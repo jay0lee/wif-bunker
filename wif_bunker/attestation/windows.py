@@ -51,7 +51,7 @@ def _run_powershell(command: str, *, preamble: bool = True) -> subprocess.Comple
 
 def _check_tpm_status() -> tuple[AttestationCheck, dict | None]:
     """Query TPM status via PowerShell Get-Tpm."""
-    result = _run_powershell("Get-Tpm | ConvertTo-Json -Depth 3", preamble=False)
+    result = _run_powershell("Get-Tpm | Select-Object * | ConvertTo-Json -Depth 3", preamble=False)
     if result.returncode != 0:
         return (
             AttestationCheck(
@@ -101,7 +101,8 @@ def _check_tpm_status() -> tuple[AttestationCheck, dict | None]:
 def _check_ek_info() -> tuple[AttestationCheck, dict | None]:
     """Extract Endorsement Key info via PowerShell."""
     result = _run_powershell(
-        "Get-TpmEndorsementKeyInfo -HashAlgorithm Sha256 | ConvertTo-Json -Depth 3", preamble=False
+        "Get-TpmEndorsementKeyInfo -HashAlgorithm Sha256 | Select-Object * | ConvertTo-Json -Depth 3",
+        preamble=False,
     )
     if result.returncode != 0:
         return (
@@ -465,10 +466,27 @@ def _check_exportability(config: WorkloadConfig) -> AttestationCheck:
     )
 
 
+def _is_admin() -> bool:
+    """Check if the current process has Administrator privileges on Windows."""
+    try:
+        import ctypes
+
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except (AttributeError, OSError):
+        return False
+
+
 def _attest_windows(config: WorkloadConfig) -> AttestationReport:
     """Perform Windows CNG/TPM key attestation."""
     checks: list[AttestationCheck] = []
     artifacts: list[AttestationArtifact] = []
+
+    if not _is_admin():
+        logger.warning(
+            "  ⚠️  Not running as Administrator. "
+            "TPM status and EK queries require elevation.\n"
+            "  Right-click your terminal → 'Run as Administrator' for full attestation."
+        )
 
     # Step 1: TPM status
     tpm_check, tpm_info = _check_tpm_status()

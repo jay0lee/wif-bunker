@@ -71,10 +71,15 @@ class AttestationReport:
 
 
 def _load_certs(directory: Path) -> list[x509.Certificate]:
-    """Load all PEM certificates from a directory."""
+    """Load all PEM certificates from a directory, skipping unparseable files."""
     certs = []
     for pem_file in sorted(directory.glob("*.pem")):
-        certs.append(x509.load_pem_x509_certificate(pem_file.read_bytes()))
+        try:
+            certs.append(x509.load_pem_x509_certificate(pem_file.read_bytes()))
+        except Exception:
+            # Some manufacturer CA certs have non-canonical DER encoding.
+            # Skip rather than crash the entire chain verification.
+            pass
     return certs
 
 
@@ -104,30 +109,63 @@ def verify_ek_chain(ek_pem: str) -> AttestationCheck:
 
     try:
         ek_cert = x509.load_pem_x509_certificate(ek_pem.encode("utf-8"))
+    except Exception as e:
+        return AttestationCheck(
+            name="EK certificate chain verified",
+            passed=False,
+            detail=(
+                f"Could not parse EK certificate: {e}. The TPM manufacturer may have used non-standard DER encoding."
+            ),
+        )
 
+    try:
         roots = _load_certs(roots_dir)
         intermediates = []
         if intermediates_dir.exists():
             intermediates = _load_certs(intermediates_dir)
 
-        # Build a lookup of potential issuers by subject.
-        all_ca_certs = {cert.subject: cert for cert in roots + intermediates}
+        # Build issuer lookup using raw issuer bytes for matching.
+        # Some TPM EK certs use non-canonical DER SET ordering in
+        # their issuer field.  Comparing the raw TBS issuer bytes
+        # avoids the strict parsed-Name comparison that rejects them.
+        all_ca_certs: list[x509.Certificate] = roots + intermediates
+        issuer_lookup: dict[bytes, x509.Certificate] = {}
+        for cert in all_ca_certs:
+            try:
+                issuer_lookup[cert.subject.public_bytes()] = cert
+            except Exception:
+                # If we can't get public_bytes from the subject, skip this CA
+                pass
 
         # Walk up the chain from the EK cert to a trusted root.
         current = ek_cert
         depth = 0
         max_depth = 10
         while depth < max_depth:
-            # Find the issuer cert.
-            issuer_cert = all_ca_certs.get(current.issuer)
-            if issuer_cert is None:
+            # Find the issuer cert using raw bytes matching.
+            try:
+                issuer_bytes = current.issuer.public_bytes()
+            except Exception:
                 return AttestationCheck(
                     name="EK certificate chain verified",
                     passed=False,
                     detail=(
-                        f"Could not find issuer '{current.issuer.rfc4514_string()}' "
-                        "in bundled manufacturer CA certificates."
+                        "Could not read EK certificate issuer field. "
+                        "The TPM manufacturer may have used non-standard DER encoding."
                     ),
+                )
+
+            issuer_cert = issuer_lookup.get(issuer_bytes)
+            if issuer_cert is None:
+                # Try RFC4514 string fallback for display
+                try:
+                    issuer_str = current.issuer.rfc4514_string()
+                except Exception:
+                    issuer_str = "(unparseable issuer)"
+                return AttestationCheck(
+                    name="EK certificate chain verified",
+                    passed=False,
+                    detail=(f"Could not find issuer '{issuer_str}' in bundled manufacturer CA certificates."),
                 )
 
             # Verify the signature.

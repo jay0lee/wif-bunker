@@ -29,8 +29,7 @@ def _generate_cert_macos(config: WorkloadConfig) -> CertificateBundle:
       2. sc_auth create-ctk-identity → SE key + throwaway self-signed cert
       3. sc_auth identities          → look up the key's SHA-1 hash
       4. sc_auth create-ctk-csr      → proper CSR signed by the SE key
-      5. Ephemeral CA signs the CSR  → CA-signed workload cert
-      6. sc_auth import-ctk-certificate → replace self-signed cert with CA-signed
+      5. Ephemeral CA signs the CSR  → CA-signed workload cert + import-ctk-certificate
     """
     # Pre-validate required commands.
     _require_command("security", install_hint="Built-in macOS command — should always be at /usr/bin/security")
@@ -168,27 +167,6 @@ def _generate_cert_macos(config: WorkloadConfig) -> CertificateBundle:
             text=True,
         )
         logger.info("    CA-signed cert linked to SE key via import-ctk-certificate.")
-
-        # 6. Also import the cert into the login keychain so that ECP's
-        #    GetCertPemForPython / SignForPython can find it via
-        #    SecItemCopyMatching.  macOS auto-associates login keychain
-        #    certs with SE keys that share the same public key hash,
-        #    forming a usable SecIdentity for mTLS signing.
-        login_kc = _macos_login_keychain()
-        subprocess.run(
-            [
-                "security",
-                "import",
-                str(workload_cert_path),
-                "-k",
-                login_kc,
-                "-T",
-                "/usr/bin/security",
-            ],
-            capture_output=True,
-            text=True,  # Don't check — may warn "already exists"
-        )
-        logger.info("    Cert also imported into login keychain for ECP.")
 
         return bundle
 
