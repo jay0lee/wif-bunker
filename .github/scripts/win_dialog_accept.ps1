@@ -151,7 +151,7 @@ while ($elapsed -lt $TimeoutSeconds) {
 
         # All expected dialogs handled — stop polling
         if ($clickCount -ge $ExpectedDialogs) {
-            Write-Output "All $ExpectedDialogs expected dialog(s) handled — exiting"
+            Write-Output "All $ExpectedDialogs expected dialogs handled -- exiting"
             break
         }
 
@@ -173,4 +173,4 @@ if ($Debug) {
     Take-Screenshot "dialog_final"
     Dump-AllWindows
 }
-Write-Output "Dialog auto-accept finished ($clickCount dialog(s) clicked in ${elapsed}s)"
+Write-Output "Dialog auto-accept finished: $clickCount dialogs clicked in ${elapsed}s"
