@@ -14,7 +14,7 @@ This single command:
 1. Creates a GCP project and enables required APIs
 2. Generates a non-exportable private key on your device's hardware security module
 3. Creates a Workload Identity Federation pool with X.509 certificate authentication
-4. Configures Application Default Credentials (ADC) for seamless `gcloud` and SDK usage
+4. Configures [Application Default Credentials (ADC)](https://cloud.google.com/docs/authentication/application-default-credentials) for seamless `gcloud` and SDK usage
 
 ## Why WIF Bunker?
 
@@ -92,12 +92,13 @@ WIF Bunker needs a Google identity to create GCP resources on your behalf. Use o
 wif-bunker --create-project my-wif-project --folder FOLDER_ID
 
 # Option B: Application Default Credentials (CI/CD)
+# See: https://cloud.google.com/docs/authentication/application-default-credentials
 wif-bunker --use-adc --create-project my-wif-project --folder FOLDER_ID
 ```
 
 ### 2. Set environment variables
 
-After setup, WIF Bunker prints the environment variables needed for ADC:
+After setup, WIF Bunker prints the environment variables needed for [ADC](https://cloud.google.com/docs/authentication/application-default-credentials):
 
 ```bash
 export GOOGLE_APPLICATION_CREDENTIALS=/path/to/wif-bunker/adc.json
@@ -107,7 +108,7 @@ export GOOGLE_API_CERTIFICATE_CONFIG=/path/to/wif-bunker/certificate_config.json
 
 ### 3. Use Google Cloud normally
 
-Any Google Cloud SDK or client library that supports ADC will now authenticate using your hardware-backed identity:
+Any Google Cloud SDK or client library that supports [ADC](https://cloud.google.com/docs/authentication/application-default-credentials) will now authenticate using your hardware-backed identity:
 
 ```python
 import google.auth
@@ -155,7 +156,7 @@ WIF Bunker bridges your OS hardware security module to Google Cloud's [Workload 
 | **2. Certificate** | Generates a non-exportable private key in your hardware security module and creates an ephemeral CA to sign it |
 | **3. WIF Pool** | Creates a Workload Identity Federation pool with an X.509 provider, pinned to your certificate's fingerprint |
 | **4. IAM** | Grants the federated identity permission to act on the project (optionally via a service account) |
-| **5. ADC Config** | Writes `adc.json` and `certificate_config.json` that tell google-auth how to use ECP for mTLS |
+| **5. ADC Config** | Writes `adc.json` and `certificate_config.json` that tell [google-auth](https://cloud.google.com/docs/authentication/application-default-credentials) how to use ECP for mTLS |
 | **6. Verification** | Validates the full chain: hardware key → ECP → mTLS → Google STS → API call |
 
 ### Platform Details
@@ -226,7 +227,7 @@ wif-bunker [OPTIONS]
 
 | Flag | Description |
 |------|-------------|
-| `--use-adc` | Use Application Default Credentials (for CI/CD) |
+| `--use-adc` | Use [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials) (for CI/CD) |
 | `--client-secrets-file FILE` | OAuth client secrets file (for interactive use) |
 
 ### Modes
@@ -329,6 +330,24 @@ You can adjust lifetime with `--cert-lifetime`:
 # 90-day certificate
 wif-bunker --create-project my-project --folder 123456 --cert-lifetime 90
 ```
+
+## Dependencies
+
+WIF Bunker currently requires **forked versions** of two Google libraries because the upstream releases do not fully support hardware-backed (non-exportable) keys:
+
+### google-auth (Python)
+
+The upstream [`google-auth`](https://github.com/googleapis/google-auth-library-python) library assumes that both a certificate *and* a private key file are present on disk when configuring mTLS. With hardware-backed keys, the private key lives inside the TPM or Secure Enclave and is never available as a file — only the [Enterprise Certificate Proxy (ECP)](https://cloud.google.com/endpoint-verification/docs/ecp-overview) can perform signing operations. WIF Bunker uses a [forked google-auth](https://github.com/jay0lee/google-cloud-python) that tolerates a missing `key_path` in the certificate configuration and delegates all TLS signing to ECP.
+
+**Upstream issue:** [googleapis/google-cloud-python#17967](https://github.com/googleapis/google-cloud-python/issues/17967)
+
+### Enterprise Certificate Proxy (ECP)
+
+The upstream [ECP](https://github.com/googleapis/enterprise-certificate-proxy) binary has issues loading hardware-backed certificates from OS keystores in certain configurations, particularly on Linux with TPM 2.0 PKCS#11 stores and on macOS with Secure Enclave keys managed via CryptoTokenKit. WIF Bunker uses a [forked ECP](https://github.com/jay0lee/enterprise-certificate-proxy) with fixes for these hardware keystore access patterns.
+
+**Upstream issue:** [googleapis/enterprise-certificate-proxy#220](https://github.com/googleapis/enterprise-certificate-proxy/issues/220)
+
+> **Note:** Once these upstream issues are resolved, WIF Bunker will switch to the official releases. No changes to your configuration will be required.
 
 ## Security
 
