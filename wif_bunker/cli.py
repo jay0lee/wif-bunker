@@ -70,8 +70,7 @@ def _preflight_check_write_access(directory: Path) -> None:
         raise SystemExit(1) from None
 
 
-# --- Core Workflow ---
-def main() -> None:
+def _main_impl() -> None:
     """Parse arguments and run the WIF Bunker setup or status workflow."""
     parser = argparse.ArgumentParser(
         description="WIF Bunker — Hardware-backed X.509 Workload Identity Federation",
@@ -877,11 +876,11 @@ def main() -> None:
             sys.exit(1)
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Wrapper for main() to handle exceptions."""
     try:
-        main()
+        _main_impl()
     except requests.exceptions.HTTPError as exc:
-        # Clean exit on HTTP errors — show API response, no traceback.
         status = exc.response.status_code if exc.response is not None else "?"
         body = exc.response.text if exc.response is not None else str(exc)
         logger.error(
@@ -897,3 +896,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("\nInterrupted.")
         sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()

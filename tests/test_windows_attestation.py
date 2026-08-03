@@ -284,3 +284,61 @@ class TestNcryptCreateClaim:
         args = mock_ncrypt.NCryptOpenKey.call_args[0]
         # args[2] is the key name (pszKeyName)
         assert args[2] == "{THE-KEY-NAME}"
+
+
+class TestCheckTpmStatusMalformedJson:
+    """Tests for edge cases in _check_tpm_status JSON parsing."""
+
+    @patch("wif_bunker.attestation.windows.subprocess.run")
+    def test_malformed_json_returns_failed(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="not json", stderr="")
+        check, info = _check_tpm_status()
+        assert check.passed is False
+        assert "Could not parse" in check.detail
+        assert info is None
+
+    @patch("wif_bunker.attestation.windows.subprocess.run")
+    def test_partial_json_missing_keys(self, mock_run):
+        tpm_output = '{"TpmPresent": true}'
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=tpm_output, stderr="")
+        check, info = _check_tpm_status()
+        assert check.passed is False  # TpmReady is missing/false
+        assert "TPM Present: True" in check.detail
+        assert info is not None
+
+    @patch("wif_bunker.attestation.windows.subprocess.run")
+    def test_empty_stdout(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        check, info = _check_tpm_status()
+        assert check.passed is False
+        assert "Could not parse" in check.detail
+        assert info is None
+
+    @patch("wif_bunker.attestation.windows.subprocess.run")
+    def test_json_string_instead_of_dict(self, mock_run):
+        """Reproduce the Dell crash: json.loads returns str, not dict."""
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout='"some string output"', stderr=""
+        )
+        check, info = _check_tpm_status()
+        assert check.passed is False
+        assert "Unexpected" in check.detail
+        assert info is None
+
+
+class TestNcryptCreateClaimEdgeCases:
+    """Additional edge cases for _ncrypt_create_claim."""
+
+    @patch.dict("sys.modules", {"ctypes": None, "ctypes.wintypes": None})
+    def test_skips_when_no_ctypes(self, sample_config):
+        check, blob = _ncrypt_create_claim(sample_config, key_info={"provider": "p", "key_name": "k"})
+        assert check.passed is False
+        assert "ctypes.wintypes not available" in check.detail
+        assert blob is None
+
+    @patch.dict("sys.modules", {"ctypes": MagicMock(), "ctypes.wintypes": MagicMock()})
+    def test_skips_with_empty_key_info(self, sample_config):
+        check, blob = _ncrypt_create_claim(sample_config, key_info={})
+        assert check.passed is False
+        assert "Skipped" in check.detail
+        assert blob is None

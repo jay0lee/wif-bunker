@@ -64,6 +64,15 @@ def _check_tpm_status() -> tuple[AttestationCheck, dict | None]:
 
     try:
         tpm_info = json.loads(result.stdout)
+        if not isinstance(tpm_info, dict):
+            return (
+                AttestationCheck(
+                    name="TPM status",
+                    passed=False,
+                    detail=f"Unexpected Get-Tpm output type: {type(tpm_info).__name__}",
+                ),
+                None,
+            )
         present = tpm_info.get("TpmPresent", False)
         ready = tpm_info.get("TpmReady", False)
         return (
@@ -106,6 +115,15 @@ def _check_ek_info() -> tuple[AttestationCheck, dict | None]:
 
     try:
         ek_info = json.loads(result.stdout)
+        if not isinstance(ek_info, dict):
+            return (
+                AttestationCheck(
+                    name="EK information",
+                    passed=False,
+                    detail=f"Unexpected EK info output type: {type(ek_info).__name__}",
+                ),
+                None,
+            )
         has_certs = bool(ek_info.get("ManufacturerCertificates"))
         return (
             AttestationCheck(

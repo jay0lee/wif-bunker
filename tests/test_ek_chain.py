@@ -195,3 +195,93 @@ class TestVerifyEkChain:
 
         result = verify_ek_chain(ek_pem)
         assert result.passed is True
+
+
+def _generate_3_cert_chain() -> tuple[str, str, str]:
+    """Generate a root, intermediate, and EK certificate."""
+    root_key = ec.generate_private_key(ec.SECP256R1())
+    root_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Root CA")])
+    root_cert = (
+        x509.CertificateBuilder()
+        .subject_name(root_name)
+        .issuer_name(root_name)
+        .public_key(root_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
+        .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=365))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(root_key.public_key()), critical=False)
+        .sign(root_key, hashes.SHA256())
+    )
+
+    inter_key = ec.generate_private_key(ec.SECP256R1())
+    inter_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Intermediate CA")])
+    inter_cert = (
+        x509.CertificateBuilder()
+        .subject_name(inter_name)
+        .issuer_name(root_name)
+        .public_key(inter_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
+        .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=365))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(inter_key.public_key()), critical=False)
+        .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(root_key.public_key()), critical=False)
+        .sign(root_key, hashes.SHA256())
+    )
+
+    ek_key = ec.generate_private_key(ec.SECP256R1())
+    ek_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "EK Cert")])
+    ek_cert = (
+        x509.CertificateBuilder()
+        .subject_name(ek_name)
+        .issuer_name(inter_name)
+        .public_key(ek_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
+        .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=365))
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(ek_key.public_key()), critical=False)
+        .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(inter_key.public_key()), critical=False)
+        .sign(inter_key, hashes.SHA256())
+    )
+
+    return (
+        root_cert.public_bytes(serialization.Encoding.PEM).decode(),
+        inter_cert.public_bytes(serialization.Encoding.PEM).decode(),
+        ek_cert.public_bytes(serialization.Encoding.PEM).decode(),
+    )
+
+
+class TestVerifyEkChainIntermediates:
+    """Tests for intermediate CA handling in verify_ek_chain."""
+
+    def test_chain_through_intermediate(self, tmp_path, monkeypatch):
+        root_pem, inter_pem, ek_pem = _generate_3_cert_chain()
+        roots_dir = tmp_path / "roots" / "roots"
+        inter_dir = tmp_path / "roots" / "intermediates"
+        roots_dir.mkdir(parents=True)
+        inter_dir.mkdir(parents=True)
+
+        (roots_dir / "root.pem").write_text(root_pem)
+        (inter_dir / "inter.pem").write_text(inter_pem)
+
+        monkeypatch.setattr("wif_bunker.attestation.base.__file__", str(tmp_path / "base.py"))
+        result = verify_ek_chain(ek_pem)
+        assert result.passed is True
+
+    def test_intermediate_only_no_root_fails(self, tmp_path, monkeypatch):
+        _, inter_pem, ek_pem = _generate_3_cert_chain()
+        roots_dir = tmp_path / "roots" / "roots"
+        inter_dir = tmp_path / "roots" / "intermediates"
+        roots_dir.mkdir(parents=True)
+        inter_dir.mkdir(parents=True)
+
+        # Put a dummy root in roots to bypass the empty check
+        (roots_dir / "dummy_root.pem").write_text(_generate_self_signed_cert())
+
+        # Put intermediate in intermediates
+        (inter_dir / "inter.pem").write_text(inter_pem)
+
+        monkeypatch.setattr("wif_bunker.attestation.base.__file__", str(tmp_path / "base.py"))
+        result = verify_ek_chain(ek_pem)
+        assert result.passed is False
