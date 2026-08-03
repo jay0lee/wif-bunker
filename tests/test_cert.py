@@ -75,4 +75,3 @@ def test_create_ca_and_sign_es256_ca_for_es256_workload(sample_config, sample_cs
     ca_pub = ca_cert.public_key()
     assert isinstance(ca_pub, EllipticCurvePublicKey)
     assert ca_pub.curve.name == "secp256r1"
-

@@ -111,6 +111,7 @@ Any Google Cloud SDK or client library that supports ADC will now authenticate u
 
 ```python
 import google.auth
+
 credentials, project = google.auth.default()
 # Authenticated via hardware-backed mTLS — no key files involved
 ```
@@ -228,12 +229,20 @@ wif-bunker [OPTIONS]
 | `--use-adc` | Use Application Default Credentials (for CI/CD) |
 | `--client-secrets-file FILE` | OAuth client secrets file (for interactive use) |
 
+### Modes
+
+| Flag | Description |
+|------|-------------|
+| `--cert-only` | Generate a hardware-backed certificate without setting up WIF or GCP resources |
+| `--status` | Show current configuration status, certificate expiry, and test ECP/ADC connectivity |
+
 ### Options
 
 | Flag | Description |
 |------|-------------|
 | `--key-algorithm ALGO` | Key algorithm: `es256` (default), `es384`, `rsa2048`, `rsa3072`, `rsa4096` |
 | `--cert-lifetime DAYS` | Certificate validity in days (1-390, default: 90) |
+| `--output-dir DIR` | Output directory for cert files (with `--cert-only` only) |
 | `--soft-key` | Windows only — use software keys instead of TPM (for CI testing) |
 | `--debug` | Enable verbose debug logging |
 | `--version` | Show version |
