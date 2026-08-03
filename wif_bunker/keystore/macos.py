@@ -1,3 +1,5 @@
+"""macOS Secure Enclave keystore: CryptoTokenKit key generation and cert management."""
+
 from __future__ import annotations
 
 import logging
@@ -42,7 +44,7 @@ def _generate_cert_macos(config: WorkloadConfig) -> CertificateBundle:
                 f"Hardware-backed mTLS via CryptoTokenKit requires macOS 15+. Current version: {mac_ver_str}"
             )
 
-    _tmpdir = tempfile.TemporaryDirectory(prefix="bunker_")
+    _tmpdir = tempfile.TemporaryDirectory(prefix="bunker_")  # pylint: disable=consider-using-with
     work_dir = Path(_tmpdir.name)
 
     try:
@@ -143,7 +145,7 @@ def _generate_cert_macos(config: WorkloadConfig) -> CertificateBundle:
         csr_path = Path(f"{csr_basename}.csr")
         if not csr_path.exists():
             raise FileNotFoundError(f"CSR not found at {csr_path} after sc_auth create-ctk-csr")
-        csr_pem = csr_path.read_text().strip()
+        csr_pem = csr_path.read_text(encoding="utf-8").strip()
         logger.info("    CSR generated from SE key.")
 
         # 4. Ephemeral CA signs the CSR → CA-signed workload cert
@@ -190,9 +192,9 @@ def _generate_cert_macos(config: WorkloadConfig) -> CertificateBundle:
 
         return bundle
 
-    except subprocess.CalledProcessError as e:
-        stderr = (e.stderr or "").strip()
-        cmd_name = e.cmd[0] if isinstance(e.cmd, list) else str(e.cmd)
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or "").strip()
+        cmd_name = exc.cmd[0] if isinstance(exc.cmd, list) else str(exc.cmd)
         if "-25293" in stderr or "errSecAuthFailed" in stderr:
             raise RuntimeError(
                 f"Secure Enclave key generation denied (command: {cmd_name}).\n"
@@ -201,11 +203,11 @@ def _generate_cert_macos(config: WorkloadConfig) -> CertificateBundle:
                 "  Possible causes:\n"
                 "    - Running in a VM without SE support\n"
                 "    - User denied the biometric/passcode prompt"
-            ) from e
+            ) from exc
         raise RuntimeError(
             f"macOS certificate generation failed (command: {cmd_name}, "
-            f"exit code: {e.returncode}).\n"
+            f"exit code: {exc.returncode}).\n"
             f"  stderr: {stderr[:500]}"
-        ) from e
+        ) from exc
     finally:
         _tmpdir.cleanup()

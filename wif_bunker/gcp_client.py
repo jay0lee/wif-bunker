@@ -1,3 +1,5 @@
+"""GCP API client: OAuth browser flow, ADC credentials, and REST helpers."""
+
 from __future__ import annotations
 
 import base64
@@ -95,8 +97,8 @@ class GCPClient:
 
         # Load OAuth client config.
         if client_secrets_file:
-            with open(client_secrets_file) as f:
-                client_config = json.load(f)
+            with open(client_secrets_file, encoding="utf-8") as cfg_file:
+                client_config = json.load(cfg_file)
             installed = client_config.get("installed", client_config.get("web", {}))
             client_id = installed["client_id"]
             client_secret = installed.get("client_secret", "")
@@ -112,13 +114,14 @@ class GCPClient:
 
         # Start a local redirect server on a random port.
         class _RedirectHandler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self_handler):
+            def do_GET(self_handler):  # pylint: disable=invalid-name,no-self-argument
+                """Handle the OAuth redirect callback."""
                 nonlocal auth_code
-                qs = urllib.parse.parse_qs(
+                query_string = urllib.parse.parse_qs(
                     urllib.parse.urlparse(self_handler.path).query,
                 )
-                if qs.get("state", [None])[0] == state:
-                    auth_code = qs.get("code", [None])[0]
+                if query_string.get("state", [None])[0] == state:
+                    auth_code = query_string.get("code", [None])[0]
                 self_handler.send_response(200)
                 self_handler.send_header("Content-Type", "text/html")
                 self_handler.end_headers()
@@ -126,7 +129,7 @@ class GCPClient:
                     b"<h2>Authorization complete.</h2><p>You may close this window and return to the terminal.</p>"
                 )
 
-            def log_message(self_handler, *args):
+            def log_message(self_handler, *args):  # pylint: disable=no-self-argument,arguments-differ
                 pass  # Suppress request logging.
 
         server = http.server.HTTPServer(("127.0.0.1", 0), _RedirectHandler)
@@ -203,10 +206,10 @@ class GCPClient:
                 if pasted and not code_event.is_set():
                     # Accept either a full redirect URL or a raw code.
                     if "code=" in pasted:
-                        qs = urllib.parse.parse_qs(
+                        query_string = urllib.parse.parse_qs(
                             urllib.parse.urlparse(pasted).query,
                         )
-                        code_list = qs.get("code")
+                        code_list = query_string.get("code")
                         if code_list:
                             auth_code = code_list[0]
                             code_event.set()
@@ -218,14 +221,14 @@ class GCPClient:
                         return
 
         # Patch the handler to signal the event when code is captured.
-        orig_do_GET = _RedirectHandler.do_GET
+        orig_do_get = _RedirectHandler.do_GET
 
-        def _signaling_do_GET(self_handler):
-            orig_do_GET(self_handler)
+        def _signaling_do_get(self_handler):  # pylint: disable=invalid-name
+            orig_do_get(self_handler)
             if auth_code:
                 code_event.set()
 
-        _RedirectHandler.do_GET = _signaling_do_GET
+        _RedirectHandler.do_GET = _signaling_do_get  # pylint: disable=invalid-name
 
         server_thread = threading.Thread(target=_serve_until_code, daemon=True)
         stdin_thread = threading.Thread(target=_read_stdin_for_code, daemon=True)
@@ -249,6 +252,7 @@ class GCPClient:
                 "redirect_uri": redirect_uri,
                 "code_verifier": code_verifier,
             },
+            timeout=60,
         )
         token_resp.raise_for_status()
         token_data = token_resp.json()
@@ -270,6 +274,7 @@ class GCPClient:
         url: str,
         json_payload: dict | None = None,
     ) -> dict | None:
+        """Make an authenticated GCP API call with automatic retries."""
         if self._credentials:
             # ADC mode — auto-refresh and apply credentials.
             self._credentials.refresh(self._auth_request)

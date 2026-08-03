@@ -1,3 +1,5 @@
+"""Linux/TPM 2.0 keystore: PKCS#11 key generation and certificate management."""
+
 from __future__ import annotations
 
 import logging
@@ -41,9 +43,9 @@ def _check_tpm_linux() -> None:
     try:
         import socket
 
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(1)
-            s.connect(("127.0.0.1", 2321))
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(1)
+            sock.connect(("127.0.0.1", 2321))
             return  # swtpm is listening on the default port
     except (OSError, ConnectionRefusedError):
         pass
@@ -180,14 +182,14 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
             capture_output=True,
         )
 
-        se_pem = Path("bunker-workload-selfsigned.pem").read_text().strip()
+        se_pem = Path("bunker-workload-selfsigned.pem").read_text(encoding="utf-8").strip()
 
         # 3. Create CA-signed workload cert
         bundle, workload_pem = _create_ca_and_sign(se_pem, config)
 
         # 4. Write the CA-signed cert and import into PKCS#11 store
         #    addcert needs --key-id (CKA_ID from addkey) and prompts for PIN.
-        Path("bunker-workload-public.pem").write_text(workload_pem)
+        Path("bunker-workload-public.pem").write_text(workload_pem, encoding="utf-8")
 
         # Extract CKA_ID from addkey output
         key_id = None
@@ -215,9 +217,9 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
 
         return bundle
 
-    except subprocess.CalledProcessError as e:
-        stderr = (e.stderr or "").strip()
-        cmd_name = e.cmd[0] if isinstance(e.cmd, list) else str(e.cmd)
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or "").strip()
+        cmd_name = exc.cmd[0] if isinstance(exc.cmd, list) else str(exc.cmd)
         # Parse known error patterns for actionable guidance.
         if "Could not load tcti" in stderr or "No standard TCTI" in stderr:
             raise RuntimeError(
@@ -232,7 +234,7 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
                 "         swtpm socket --tpmstate dir=/tmp/swtpm --tpm2 "
                 "--server type=tcp,port=2321 --ctrl type=tcp,port=2322 &\n"
                 "         export TPM2TOOLS_TCTI='swtpm:host=127.0.0.1,port=2321'"
-            ) from e
+            ) from exc
         if "timed out" in stderr and "Tabrmd" in stderr:
             raise RuntimeError(
                 f"tpm2-abrmd service timed out (command: {cmd_name}).\n"
@@ -242,20 +244,20 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
                 "\n"
                 "  If using a software TPM, set the TCTI environment variable:\n"
                 "    export TPM2TOOLS_TCTI='swtpm:host=127.0.0.1,port=2321'"
-            ) from e
+            ) from exc
         if "/dev/tpmrm0" in stderr or "/dev/tpm0" in stderr:
             raise RuntimeError(
                 f"No TPM device found (command: {cmd_name}).\n"
                 "The system does not have /dev/tpmrm0 or /dev/tpm0.\n"
                 "\n"
                 "  For development/testing, use a software TPM (swtpm)."
-            ) from e
+            ) from exc
         # Fallback: include the raw error with the failing command.
         raise RuntimeError(
             f"Linux TPM operation failed (command: {cmd_name}, "
-            f"exit code: {e.returncode}).\n"
+            f"exit code: {exc.returncode}).\n"
             f"  stderr: {stderr[:500]}\n"
             "\n"
             "  Ensure tpm2-pkcs11-tools and gnutls-bin are installed:\n"
             "    sudo apt install tpm2-pkcs11-tools gnutls-bin opensc"
-        ) from e
+        ) from exc

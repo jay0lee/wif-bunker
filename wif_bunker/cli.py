@@ -1,4 +1,4 @@
-"""CLI entry point and main orchestration workflow."""
+"""CLI entry point and main orchestration workflow."""  # pylint: disable=duplicate-code
 
 from __future__ import annotations
 
@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 
 # --- Core Workflow ---
 def main() -> None:
+    """Parse arguments and run the WIF Bunker setup or status workflow."""
     parser = argparse.ArgumentParser(
         description="WIF Bunker — Hardware-backed X.509 Workload Identity Federation",
     )
@@ -269,12 +270,12 @@ def main() -> None:
                     "id": args.folder,
                 }
                 logger.info("    Parent folder: %s", args.folder)
-            op = client.api_call(
+            operation = client.api_call(
                 "POST",
                 f"https://{crm_base}/v1/projects",
                 create_payload,
             )
-            client.wait_for_lro(crm_base, op["name"])
+            client.wait_for_lro(crm_base, operation["name"])
             project_number = client.api_call(
                 "GET",
                 f"https://{crm_base}/v1/projects/{config.project_id}",
@@ -288,12 +289,12 @@ def main() -> None:
                 "iamcredentials.googleapis.com",
                 "cloudresourcemanager.googleapis.com",
             ]
-            op = client.api_call(
+            operation = client.api_call(
                 "POST",
                 f"https://{su_base}/v1/projects/{project_number}/services:batchEnable",
                 {"serviceIds": required_apis},
             )
-            client.wait_for_lro(su_base, op["name"])
+            client.wait_for_lro(su_base, operation["name"])
 
         # --- Step 3: Generate Hardware-Backed Certificate ---
         logger.info("=== 3) Generating Hardware-Backed Certificate ===")
@@ -325,8 +326,8 @@ def main() -> None:
                     },
                 )
                 return result["email"]
-            except Exception as e:
-                if "409" in str(e) or "ALREADY_EXISTS" in str(e):
+            except Exception as exc:
+                if "409" in str(exc) or "ALREADY_EXISTS" in str(exc):
                     email = f"{config.sa_name}@{config.project_id}.iam.gserviceaccount.com"
                     logger.info("    SA already exists: %s", email)
                     return email
@@ -343,8 +344,8 @@ def main() -> None:
                     {"displayName": "WIF Bunker Pool", "disabled": False},
                 )
                 client.wait_for_lro(iam_base, pool_op["name"])
-            except Exception as e:
-                if "409" in str(e) or "ALREADY_EXISTS" in str(e):
+            except Exception as exc:
+                if "409" in str(exc) or "ALREADY_EXISTS" in str(exc):
                     logger.info("    Pool already exists: %s", config.pool_id)
                 else:
                     raise
@@ -359,8 +360,8 @@ def main() -> None:
                         "GET",
                         f"{pool_res_url}/providers",
                     ).get("workloadIdentityPoolProviders", [])
-                    for p in provs:
-                        pname = p["name"].split("/")[-1]
+                    for prov in provs:
+                        pname = prov["name"].split("/")[-1]
                         if pname.startswith("bunker-x509-prov-") and pname != config.provider_id:
                             logger.info("    Deleting stale provider: %s", pname)
                             try:
@@ -530,8 +531,8 @@ def main() -> None:
                     if "bunker-wif" in line and last_slot_hex:
                         slot_id = last_slot_hex
                         break
-            except Exception as e:
-                logger.debug("    pkcs11-tool slot discovery failed: %s", e)
+            except Exception as exc:
+                logger.debug("    pkcs11-tool slot discovery failed: %s", exc)
 
             # Fallback: try slot 1 (slot 0 is typically p11-kit trust)
             if slot_id is None:
@@ -615,14 +616,14 @@ def main() -> None:
         }
         if sys.platform == "win32":
             logger.info("  PowerShell:")
-            for k, v in env_vars.items():
-                logger.info('    $env:%s="%s"', k, v)
+            for k, value in env_vars.items():
+                logger.info('    $env:%s="%s"', k, value)
             logger.info("  cmd.exe:")
-            for k, v in env_vars.items():
-                logger.info("    set %s=%s", k, v)
+            for k, value in env_vars.items():
+                logger.info("    set %s=%s", k, value)
         else:
-            for k, v in env_vars.items():
-                logger.info("  export %s=%s", k, v)
+            for k, value in env_vars.items():
+                logger.info("  export %s=%s", k, value)
         logger.info("=" * 70)
         reuse_parts = [
             f"python3 {sys.argv[0]}",
@@ -642,11 +643,11 @@ def main() -> None:
             """Deep ECP diagnostics (only called with --debug when cert_len=0)."""
             log.warning("    Running ECP diagnostics (--debug)...")
             try:
-                with open(config_path) as _f:
-                    _cfg_text = _f.read()
+                with open(config_path, encoding="utf-8") as cfg_file:
+                    _cfg_text = cfg_file.read()
                 log.warning("    certificate_config.json:\n%s", _cfg_text)
-            except Exception as _e:
-                log.warning("    Could not read config: %s", _e)
+            except Exception as read_exc:
+                log.warning("    Could not read config: %s", read_exc)
                 return
 
             # Check if ECP signer binary has Secure Enclave support
@@ -791,7 +792,7 @@ def main() -> None:
                 return target_api_res.json()
 
             proj_result = _verify_adc()
-            logger.info(f"{SYM_OK} API Call Successful! The OS signed the handshake via ECP.")
+            logger.info("%s API Call Successful! The OS signed the handshake via ECP.", SYM_OK)
             if use_sa:
                 logger.info("   Authenticated SA: %s", sa_email)
             logger.info("   Target Project:   %s", proj_result.get("name"))
@@ -830,10 +831,10 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except requests.exceptions.HTTPError as e:
+    except requests.exceptions.HTTPError as exc:
         # Clean exit on HTTP errors — show API response, no traceback.
-        status = e.response.status_code if e.response is not None else "?"
-        body = e.response.text if e.response is not None else str(e)
+        status = exc.response.status_code if exc.response is not None else "?"
+        body = exc.response.text if exc.response is not None else str(exc)
         logger.error(
             "%s GCP API call failed (HTTP %s).\n%s",
             SYM_FAIL,
@@ -841,8 +842,8 @@ if __name__ == "__main__":
             body,
         )
         sys.exit(1)
-    except RuntimeError as e:
-        logger.error("%s %s", SYM_FAIL, e)
+    except RuntimeError as exc:
+        logger.error("%s %s", SYM_FAIL, exc)
         sys.exit(1)
     except KeyboardInterrupt:
         logger.info("\nInterrupted.")

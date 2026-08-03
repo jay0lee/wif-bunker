@@ -85,9 +85,9 @@ def with_retries(
                         time.sleep(sleep_time)
                         continue
                     raise
-                except requests.exceptions.HTTPError as e:
-                    status = e.response.status_code
-                    body = e.response.text
+                except requests.exceptions.HTTPError as exc:
+                    status = exc.response.status_code
+                    body = exc.response.text
                     is_expected_status = status in expected_errors
                     is_custom_error = custom_error_text and custom_error_text in body
                     if (is_expected_status or is_custom_error) and attempt < max_attempts - 1:
@@ -121,8 +121,8 @@ def write_secure_file(filepath: Path | str, content: str) -> None:
     filepath = Path(filepath)
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
     mode = 0o600
-    with os.fdopen(os.open(filepath, flags, mode), "w") as f:
-        f.write(content)
+    with os.fdopen(os.open(filepath, flags, mode), "w") as out:
+        out.write(content)
 
 
 def _require_command(name: str, *, package: str = "", install_hint: str = "") -> str:

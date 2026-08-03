@@ -15,11 +15,13 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.x'
-      - run: pip install ruff
+      - run: pip install ruff pylint
       - name: Ruff lint
         run: ruff check .
       - name: Ruff format check
         run: ruff format --check .
+      - name: Pylint
+        run: pylint wif_bunker/ --fail-under=9.0
 
   test:
     name: Unit Tests

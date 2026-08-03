@@ -1,4 +1,4 @@
-"""Alternate CLI modes: --cert-only and --status."""
+"""Alternate CLI modes: --cert-only and --status."""  # pylint: disable=duplicate-code
 
 from __future__ import annotations
 
@@ -105,8 +105,8 @@ def _run_status() -> None:
                 SYM_WARN,
                 days_remaining,
             )
-    except Exception as e:
-        logger.error("  %s Failed to parse certificate: %s", SYM_CROSS, e)
+    except Exception as exc:
+        logger.error("  %s Failed to parse certificate: %s", SYM_CROSS, exc)
         return
 
     # Stage 3: Test ECP
@@ -127,8 +127,8 @@ def _run_status() -> None:
             logger.error("ECP:       %s ECP returned cert_len=%d", SYM_CROSS, _cert_len)
             return
         logger.info("ECP:       %s Certificate retrieved (%d bytes)", SYM_CHECK, _cert_len)
-    except Exception as e:
-        logger.error("ECP:       %s %s", SYM_CROSS, e)
+    except Exception as exc:
+        logger.error("ECP:       %s %s", SYM_CROSS, exc)
         return
 
     # Stage 4: Test ADC
@@ -165,6 +165,6 @@ def _run_status() -> None:
             if match:
                 principal = match.group(0).rstrip(".")
                 logger.info("Principal: %s", principal)
-    except Exception as e:
-        logger.error("ADC:       %s %s", SYM_CROSS, e)
+    except Exception as exc:
+        logger.error("ADC:       %s %s", SYM_CROSS, exc)
         logger.error("Re-run with --debug for detailed ECP and TLS diagnostics.")

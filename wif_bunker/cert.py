@@ -1,3 +1,5 @@
+"""Ephemeral CA generation, workload certificate signing, and ECP binary discovery."""
+
 from __future__ import annotations
 
 import base64

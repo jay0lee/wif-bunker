@@ -1,3 +1,5 @@
+"""Windows CNG/TPM keystore: key generation via certreq and certificate management."""
+
 from __future__ import annotations
 
 import logging
@@ -33,7 +35,7 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
     )
     _require_command("powershell", install_hint="Built-in Windows command — ensure PowerShell is on PATH")
 
-    _tmpdir = tempfile.TemporaryDirectory(prefix="bunker_")
+    _tmpdir = tempfile.TemporaryDirectory(prefix="bunker_")  # pylint: disable=consider-using-with
     work_dir = Path(_tmpdir.name)
 
     try:
@@ -193,9 +195,9 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
 
         return bundle
 
-    except subprocess.CalledProcessError as e:
-        stderr = (e.stderr or "").strip()
-        cmd_name = e.cmd[0] if isinstance(e.cmd, list) else str(e.cmd)
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or "").strip()
+        cmd_name = exc.cmd[0] if isinstance(exc.cmd, list) else str(exc.cmd)
         if "NTE_DEVICE_NOT_FOUND" in stderr:
             raise RuntimeError(
                 f"No TPM device found (command: {cmd_name}).\n"
@@ -203,17 +205,17 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
                 "\n"
                 "  Use --soft-key for software-only keys (no TPM required).\n"
                 "  NOTE: --soft-key does NOT provide hardware TPM protection."
-            ) from e
+            ) from exc
         if "NTE_NOT_SUPPORTED" in stderr:
             raise RuntimeError(
                 f"TPM does not support the requested algorithm (command: {cmd_name}).\n"
                 "  Try a different --key-algorithm (e.g. es256 or rsa2048)."
-            ) from e
+            ) from exc
         raise RuntimeError(
             f"Windows certificate generation failed (command: {cmd_name}, "
-            f"exit code: {e.returncode}).\n"
-            f"  stdout: {(e.stdout or '')[:300]}\n"
+            f"exit code: {exc.returncode}).\n"
+            f"  stdout: {(exc.stdout or '')[:300]}\n"
             f"  stderr: {stderr[:500]}"
-        ) from e
+        ) from exc
     finally:
         _tmpdir.cleanup()
