@@ -279,23 +279,32 @@ jobs:
         run: |
           echo "=== Testing --cert-only for all supported algorithms ==="
           # Algorithms supported per platform:
-          #   Linux/Windows: es256 es384 rsa2048 rsa3072 rsa4096
-          #   macOS:         es256 es384
+          #   Windows: es256 es384 rsa2048 rsa3072 rsa4096
+          #   Linux:   es256 es384 rsa2048 rsa3072 (rsa4096 excluded — swtpm limitation)
+          #   macOS:   es256 es384
           ALGOS="es256 es384"
-          if [[ "$RUNNER_OS" != "macOS" ]]; then
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
             ALGOS="$ALGOS rsa2048 rsa3072 rsa4096"
+          elif [[ "$RUNNER_OS" == "Linux" ]]; then
+            # rsa4096 excluded: tpm2-pkcs11-tools crashes with swtpm for 4096-bit keys.
+            # Real TPM hardware supports rsa4096 — this is a CI simulator limitation.
+            ALGOS="$ALGOS rsa2048 rsa3072"
           fi
 
           WIF_CMD="${{ inputs.wif_bunker_cmd || 'python wif_bunker.py' }}"
 
-          # Windows cert generation triggers CA store dialogs
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            powershell -NoProfile -File .github/scripts/win_dialog_accept.ps1 &
-          fi
-
           for algo in $ALGOS; do
             echo "--- Testing --cert-only --key-algorithm $algo ---"
             outdir=$(mktemp -d)
+
+            # Each cert generation triggers CA store dialogs on Windows —
+            # launch a fresh dialog acceptor per iteration.
+            DIALOG_PID=""
+            if [[ "$RUNNER_OS" == "Windows" ]]; then
+              powershell -NoProfile -File .github/scripts/win_dialog_accept.ps1 &
+              DIALOG_PID=$!
+            fi
+
             $WIF_CMD \
               --cert-only \
               --key-algorithm "$algo" \
@@ -306,6 +315,12 @@ jobs:
             test -f "$outdir/workload_cert.pem" || { echo "FAIL: no workload_cert.pem for $algo"; exit 1; }
             test -f "$outdir/trust_chain.pem"   || { echo "FAIL: no trust_chain.pem for $algo"; exit 1; }
             echo "  ✓ $algo: cert files created"
+
+            # Kill dialog acceptor before next iteration
+            if [[ -n "$DIALOG_PID" ]]; then
+              kill "$DIALOG_PID" 2>/dev/null || true
+              wait "$DIALOG_PID" 2>/dev/null || true
+            fi
 
             rm -rf "$outdir"
           done
