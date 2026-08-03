@@ -250,7 +250,10 @@ def export_public_key_pem(key_handle: int, algorithm: str) -> str:
         raise RuntimeError(f"NCryptExportKey size query failed: 0x{status & 0xFFFFFFFF:08X}")
 
     # Second call: export into allocated buffer.
-    blob_buffer = (ctypes.c_byte * blob_size.value)()
+    # NOTE: c_ubyte (unsigned 0-255), NOT c_byte (signed -128..127).
+    # bytes() requires unsigned values; c_byte causes "bytes must be
+    # in range(0, 256)" errors when any byte exceeds 127.
+    blob_buffer = (ctypes.c_ubyte * blob_size.value)()
     result_size = wintypes.DWORD(0)
     status = ncrypt.NCryptExportKey(
         handle,

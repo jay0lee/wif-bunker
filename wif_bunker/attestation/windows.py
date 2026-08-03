@@ -504,7 +504,7 @@ def _ncrypt_create_claim(config: WorkloadConfig, key_info: dict | None = None) -
             )
 
         # Second call with allocated buffer
-        claim_buffer = (ctypes.c_byte * claim_size.value)()
+        claim_buffer = (ctypes.c_ubyte * claim_size.value)()
         result_size = wintypes.DWORD(0)
         status = ncrypt.NCryptCreateClaim(
             key_handle,
