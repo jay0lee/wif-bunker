@@ -107,21 +107,129 @@ def print_attestation_summary(report: AttestationReport) -> None:
         logger.info("    %s", check.detail)
 
     logger.info("")
-    logger.info("  Summary: %s", report.summary)
-
-    if report.documentation_urls:
-        logger.info("")
-        logger.info("  References:")
-        for url in report.documentation_urls:
-            logger.info("    %s", url)
-
-    if report.verification_steps:
-        logger.info("")
-        logger.info("  Verification Steps:")
-        for step in report.verification_steps:
-            logger.info("    %s", step)
+    all_passed = report.checks and all(c.passed for c in report.checks)
+    if all_passed:
+        logger.info("  🎉🎆 %s 🎆🎉", report.summary)
+    else:
+        logger.info("  %s", report.summary)
 
     logger.info("=" * 70)
+
+    # Visual attestation chain when all checks pass
+    all_passed = report.checks and all(c.passed for c in report.checks)
+    if all_passed:
+        _print_attestation_chain(report)
+
+
+def _box(label: str, lines: list[str], width: int = 55) -> list[str]:
+    """Build an ASCII box with a label and content lines."""
+    result = []
+    inner = width - 4  # account for "│  " and "  │"
+    result.append(f"  ┌─ {label} {'─' * max(0, inner - len(label) - 1)}┐")
+    for line in lines:
+        padded = line[:inner].ljust(inner)
+        result.append(f"  │  {padded}│")
+    result.append(f"  └{'─' * (width - 2)}┘")
+    return result
+
+
+def _print_attestation_chain(report: AttestationReport) -> None:
+    """Print a visual attestation chain diagram."""
+    logger.info("")
+    logger.info("  Attestation Chain")
+    logger.info("  ═════════════════")
+    logger.info("")
+
+    W = 55  # box width
+    connector_pad = " " * ((W // 2) - 1)
+
+    # Platform Certificate box (if found — OEM attested)
+    pi = report.platform_info
+    if pi and pi.get("manufacturer"):
+        mfr = pi.get("manufacturer", "Unknown OEM")
+        model = pi.get("model", "")
+        sn = pi.get("serial_number", "")
+        issuer = pi.get("issuer", "unknown")
+        plat_lines = [f"{mfr} {model}".strip()]
+        if sn:
+            plat_lines.append(f"S/N: {sn}")
+        plat_lines.append(f"Signed by: {issuer[:45]}")
+        for line in _box("Platform (OEM Attested) 🏭", plat_lines, W):
+            logger.info(line)
+        logger.info(f"{connector_pad}│ contains (platform cert)")
+
+    # TPM Hardware box
+    tpm = report.tpm_info or {}
+    ek = report.ek_details or {}
+
+    # Build TPM manufacturer string
+    mfr_id = tpm.get("ManufacturerId", 0)
+    try:
+        from wif_bunker.attestation.windows import _decode_manufacturer_id
+
+        tpm_mfr = _decode_manufacturer_id(mfr_id) if mfr_id else "Unknown"
+    except ImportError:
+        tpm_mfr = str(mfr_id) if mfr_id else "Unknown"
+    tpm_model = ek.get("tpm_model", "")
+    fw = tpm.get("ManufacturerVersion", "")
+
+    tpm_lines = [f"{tpm_mfr}"]
+    if tpm_model:
+        tpm_lines[0] += f" {tpm_model}"
+    if fw:
+        tpm_lines[0] += f", FW {fw}"
+
+    # EK info
+    ek_issuer = ek.get("issuer", "")
+    if ek_issuer:
+        ek_short = ek_issuer[:45]
+        tpm_lines.append(f"EK Issuer: {ek_short}")
+    ek_serial = ek.get("serial", "")
+    if ek_serial:
+        tpm_lines.append(f"EK Serial: {ek_serial[:30]}...")
+
+    for line in _box("TPM Hardware (Cryptographic) 🔐", tpm_lines, W):
+        logger.info(line)
+    logger.info(f"{connector_pad}│ certifies (NCryptCreateClaim)")
+
+    # Workload Key box
+    # Extract workload key name from checks
+    wk_name = ""
+    wk_provider = ""
+    for check in report.checks:
+        if check.name == "Key storage provider" and check.passed:
+            # Parse key name from detail
+            if "'" in check.detail:
+                parts = check.detail.split("'")
+                if len(parts) >= 2:
+                    wk_name = parts[1]
+            if "Platform Crypto Provider" in check.detail:
+                wk_provider = "Platform Crypto Provider (TPM)"
+
+    wk_lines = [wk_name or "workload key"]
+    if wk_provider:
+        wk_lines.append(f"Provider: {wk_provider}")
+    wk_lines.append(f"Non-exportable: {_SYM_OK}")
+
+    for line in _box("Workload Key 🔑", wk_lines, W):
+        logger.info(line)
+    logger.info(f"{connector_pad}│ bound to certificate")
+
+    # mTLS Identity box
+    mtls_lines = [
+        f"CN={wk_name or 'workload'}",
+        "mTLS via ECP → STS → GCP IAM",
+    ]
+    for line in _box("mTLS Identity 🌐", mtls_lines, W):
+        logger.info(line)
+
+    # Platform cert note
+    if not pi or not pi.get("manufacturer"):
+        logger.info("")
+        logger.info("  (i) Platform Certificate not found at TPM NV 0x01C08000")
+        logger.info("     (OEM binding unavailable — common on business PCs)")
+
+    logger.info("")
 
 
 def _format_text_report(report: AttestationReport) -> str:
@@ -150,25 +258,17 @@ def _format_text_report(report: AttestationReport) -> str:
         lines.append(f"      {check.detail}")
     lines.append("")
 
-    lines.append(f"  Summary: {report.summary}")
+    all_passed = report.checks and all(c.passed for c in report.checks)
+    if all_passed:
+        lines.append(f"  🎉🎆 {report.summary} 🎆🎉")
+    else:
+        lines.append(f"  {report.summary}")
     lines.append("")
 
     if report.artifacts:
         lines.append("  Artifacts:")
         for artifact in report.artifacts:
             lines.append(f"    - {artifact.filename}: {artifact.description}")
-        lines.append("")
-
-    if report.documentation_urls:
-        lines.append("  References:")
-        for url in report.documentation_urls:
-            lines.append(f"    {url}")
-        lines.append("")
-
-    if report.verification_steps:
-        lines.append("  Verification Steps:")
-        for step in report.verification_steps:
-            lines.append(f"    {step}")
         lines.append("")
 
     lines.append("=" * 70)

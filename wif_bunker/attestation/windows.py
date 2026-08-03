@@ -42,6 +42,38 @@ _PS_PREAMBLE = (
     "Import-Module PKI -ErrorAction SilentlyContinue; "
 )
 
+# TPM Manufacturer IDs — the ManufacturerId from Get-Tpm is a 32-bit int
+# encoding 4 ASCII bytes (the TCG-registered vendor ID).
+# See: https://trustedcomputinggroup.org/resource/vendor-id-registry/
+_TPM_MANUFACTURERS: dict[int, tuple[str, str]] = {
+    # decimal: (short_name, full_name)
+    1095582720: ("AMD", "Advanced Micro Devices"),
+    1096043852: ("ATML", "Atmel"),
+    1112687437: ("BRCM", "Broadcom"),
+    1213220096: ("HPE", "HPE"),
+    1229081856: ("IBM", "IBM"),
+    1229346816: ("IFX", "Infineon"),
+    1229870147: ("INTC", "Intel"),
+    1280398708: ("LEN", "Lenovo"),
+    1314145024: ("NTC", "Nuvoton Technology"),
+    1314406208: ("NTZ", "Nationz Technologies"),
+    1363365956: ("QCOM", "Qualcomm"),
+    1397576515: ("SMSC", "SMSC"),
+    1398033696: ("STM", "STMicroelectronics"),
+    1398895469: ("SMSN", "Samsung"),
+    1413828608: ("TXN", "Texas Instruments"),
+    1464156928: ("WEC", "Winbond"),
+    1380926275: ("ROCC", "Futurex"),
+    1196379975: ("GOOG", "Google"),
+    1297302852: ("MSFT", "Microsoft"),
+}
+
+# TCG EK certificate OIDs for TPM hardware attributes.
+# These appear in the Subject Alternative Name or Subject Directory Attributes.
+_TCG_OID_TPM_MANUFACTURER = "2.23.133.2.1"
+_TCG_OID_TPM_MODEL = "2.23.133.2.2"
+_TCG_OID_TPM_VERSION = "2.23.133.2.3"
+
 
 def _run_powershell(command: str, *, preamble: bool = True) -> subprocess.CompletedProcess:
     """Run a PowerShell command and return the result.
@@ -55,6 +87,83 @@ def _run_powershell(command: str, *, preamble: bool = True) -> subprocess.Comple
         capture_output=True,
         text=True,
     )
+
+
+def _parse_tcg_attributes(cert_obj: cx509.Certificate) -> dict[str, str]:
+    """Extract TCG hardware attributes from an EK certificate.
+
+    TCG EK certificates encode TPM manufacturer, model, and firmware
+    version in the Subject Alternative Name (SAN) extension using
+    OIDs under 2.23.133.2.
+
+    Returns a dict with keys like 'tpm_manufacturer', 'tpm_model',
+    'tpm_version' when found.
+    """
+    attrs: dict[str, str] = {}
+    tcg_oid_map = {
+        _TCG_OID_TPM_MANUFACTURER: "tpm_manufacturer",
+        _TCG_OID_TPM_MODEL: "tpm_model",
+        _TCG_OID_TPM_VERSION: "tpm_version",
+    }
+
+    # Try Subject Directory Attributes first, then SAN.
+    # Both are used by different manufacturers.
+    for ext in cert_obj.extensions:
+        oid_str = ext.oid.dotted_string
+
+        # Check if this is a TCG attribute extension directly
+        if oid_str in tcg_oid_map:
+            try:
+                raw = ext.value.value if hasattr(ext.value, "value") else bytes(ext.value)
+                decoded = raw.decode("utf-8", errors="replace").strip("\x00").strip()
+                if decoded:
+                    attrs[tcg_oid_map[oid_str]] = decoded
+            except Exception:  # pylint: disable=broad-except
+                pass
+            continue
+
+        # Check SubjectAlternativeName — TCG attributes may be in
+        # directoryName entries within the SAN
+        if oid_str == "2.5.29.17":  # subjectAltName
+            try:
+                san = ext.value
+                for name in san:
+                    if isinstance(name, cx509.DirectoryName):
+                        for attr in name.value:
+                            attr_oid = attr.oid.dotted_string
+                            if attr_oid in tcg_oid_map:
+                                attrs[tcg_oid_map[attr_oid]] = attr.value
+            except Exception:  # pylint: disable=broad-except
+                pass
+
+    return attrs
+
+
+def _decode_manufacturer_id(mfr_id: int | str) -> str:
+    """Decode a TPM ManufacturerId to a human-readable name.
+
+    The ManufacturerId from Get-Tpm is a 32-bit integer encoding
+    4 ASCII bytes — the TCG-registered vendor ID.
+    e.g. 1314145024 = 0x4E544300 = 'NTC\0' = Nuvoton Technology.
+    """
+    try:
+        mfr_int = int(mfr_id)
+    except (TypeError, ValueError):
+        return str(mfr_id)
+
+    entry = _TPM_MANUFACTURERS.get(mfr_int)
+    if entry:
+        short, full = entry
+        return f"{full} ({short})"
+
+    # Fallback: try to decode as ASCII
+    try:
+        ascii_str = mfr_int.to_bytes(4, "big").decode("ascii").rstrip("\x00").strip()
+        if ascii_str:
+            return f"{ascii_str} (0x{mfr_int:08X})"
+    except (UnicodeDecodeError, OverflowError):
+        pass
+    return f"0x{mfr_int:08X}"
 
 
 def _check_tpm_status() -> tuple[AttestationCheck, dict | None]:
@@ -83,15 +192,13 @@ def _check_tpm_status() -> tuple[AttestationCheck, dict | None]:
             )
         present = tpm_info.get("TpmPresent", False)
         ready = tpm_info.get("TpmReady", False)
+        mfr_name = _decode_manufacturer_id(tpm_info.get("ManufacturerId", 0))
+        version = tpm_info.get("ManufacturerVersion", "unknown")
         return (
             AttestationCheck(
                 name="TPM status",
                 passed=present and ready,
-                detail=(
-                    f"TPM Present: {present}, Ready: {ready}, "
-                    f"Manufacturer: {tpm_info.get('ManufacturerId', 'unknown')}, "
-                    f"Version: {tpm_info.get('ManufacturerVersion', 'unknown')}"
-                ),
+                detail=(f"TPM Present: {present}, Ready: {ready}, Manufacturer: {mfr_name}, FW: {version}"),
             ),
             tpm_info,
         )
@@ -182,6 +289,7 @@ def _extract_ek_certificate() -> tuple[AttestationCheck, str | None]:
                 detail=(f"Could not extract EK certificate: {result.stderr.strip()[:200]}"),
             ),
             None,
+            {},
         )
 
     output = result.stdout.strip()
@@ -193,22 +301,43 @@ def _extract_ek_certificate() -> tuple[AttestationCheck, str | None]:
                 detail=("No manufacturer EK certificate found. The TPM may not have a provisioned EK certificate."),
             ),
             None,
+            {},
         )
 
-    # Extract issuer using the cryptography library (no openssl CLI needed)
+    # Extract detailed info using the cryptography library
+    details: dict[str, str] = {}
     try:
         cert_obj = cx509.load_pem_x509_certificate(output.encode())
-        issuer = cert_obj.issuer.rfc4514_string()
+        details["issuer"] = cert_obj.issuer.rfc4514_string()
+        details["serial"] = format(cert_obj.serial_number, "X")
+        details["not_before"] = cert_obj.not_valid_before_utc.strftime("%Y-%m-%d")
+        details["not_after"] = cert_obj.not_valid_after_utc.strftime("%Y-%m-%d")
+
+        # Parse TCG OIDs from Subject Alternative Name or Subject Directory Attributes
+        tcg_attrs = _parse_tcg_attributes(cert_obj)
+        details.update(tcg_attrs)
     except Exception:  # pylint: disable=broad-except
-        issuer = "unknown"
+        details.setdefault("issuer", "unknown")
+
+    # Build rich detail string
+    detail_parts = [f"Issuer: {details.get('issuer', 'unknown')}"]
+    if "serial" in details:
+        # Show first 20 chars of serial for readability
+        serial = details["serial"]
+        detail_parts.append(f"Serial: {serial[:20]}{'...' if len(serial) > 20 else ''}")
+    if "tpm_model" in details:
+        detail_parts.append(f"TPM Model: {details['tpm_model']}")
+    if "not_before" in details:
+        detail_parts.append(f"Valid: {details['not_before']} to {details.get('not_after', '?')}")
 
     return (
         AttestationCheck(
             name="EK certificate extracted",
             passed=True,
-            detail=f"EK certificate extracted from TPM. Issuer: {issuer}",
+            detail="EK certificate extracted from TPM. " + ", ".join(detail_parts),
         ),
         output,
+        details,
     )
 
 
@@ -652,6 +781,240 @@ def _check_exportability(config: WorkloadConfig) -> AttestationCheck:
     )
 
 
+# ── TBS (TPM Base Services) Platform Certificate Discovery ──────────
+#
+# TCG defines NV index 0x01C08000 for the Platform Certificate.
+# We probe for it using raw TPM2 commands via the TBS API (tbs.dll).
+# This avoids any PowerShell dependency and works at the TPM level.
+
+_PLATFORM_CERT_NV_INDEX = 0x01C08000
+
+# TPM2 command codes
+_TPM2_CC_NV_READ_PUBLIC = 0x00000169
+_TPM2_CC_NV_READ = 0x0000014E
+
+# TPM2 tags
+_TPM_ST_NO_SESSIONS = 0x8001
+_TPM_ST_SESSIONS = 0x8002
+
+# TPM2 auth
+_TPM_RS_PW = 0x40000009  # Password session handle
+
+# TBS constants
+_TBS_COMMAND_PRIORITY_NORMAL = 200
+
+
+def _tbs_submit_command(tbs_ctx, tbs, ctypes, cmd_bytes: bytes) -> bytes | None:
+    """Submit a raw TPM2 command via TBS and return the response."""
+    cmd_buf = (ctypes.c_ubyte * len(cmd_bytes))(*cmd_bytes)
+    resp_buf = (ctypes.c_ubyte * 4096)()
+    resp_len = ctypes.c_uint32(4096)
+
+    status = tbs.Tbsip_Submit_Command(
+        tbs_ctx,
+        0,  # locality
+        _TBS_COMMAND_PRIORITY_NORMAL,
+        cmd_buf,
+        len(cmd_bytes),
+        resp_buf,
+        ctypes.byref(resp_len),
+    )
+    if status != 0:
+        logger.debug("Tbsip_Submit_Command failed: 0x%08X", status)
+        return None
+
+    return bytes(resp_buf[: resp_len.value])
+
+
+def _tpm2_nv_read_public(tbs_ctx, tbs, ctypes, nv_index: int) -> int | None:
+    """Send TPM2_NV_ReadPublic to check if NV index exists and get size.
+
+    Returns the data size in bytes, or None if the index doesn't exist.
+    """
+    import struct
+
+    # Build command: tag(2) + size(4) + commandCode(4) + nvIndex(4) = 14 bytes
+    cmd = struct.pack(
+        ">HII I",
+        _TPM_ST_NO_SESSIONS,
+        14,  # total command size
+        _TPM2_CC_NV_READ_PUBLIC,
+        nv_index,
+    )
+    resp = _tbs_submit_command(tbs_ctx, tbs, ctypes, cmd)
+    if resp is None or len(resp) < 10:
+        return None
+
+    # Parse response header
+    _tag, _size, rc = struct.unpack_from(">HII", resp, 0)
+    if rc != 0:
+        logger.debug("TPM2_NV_ReadPublic failed: 0x%08X (index may not exist)", rc)
+        return None
+
+    # Parse TPM2B_NV_PUBLIC: size(2) + TPMS_NV_PUBLIC
+    # TPMS_NV_PUBLIC: nvIndex(4) + nameAlg(2) + attributes(4) + authPolicy_size(2) + authPolicy + dataSize(2)
+    if len(resp) < 14:
+        return None
+    nv_public_size = struct.unpack_from(">H", resp, 10)[0]
+    if nv_public_size < 12 or len(resp) < 12 + nv_public_size:
+        return None
+
+    # Skip nvIndex(4) + nameAlg(2) + attributes(4) = 10 bytes into nvPublic
+    offset = 12 + 10  # after TPM2B_NV_PUBLIC header
+    auth_policy_size = struct.unpack_from(">H", resp, offset)[0]
+    offset += 2 + auth_policy_size
+    data_size = struct.unpack_from(">H", resp, offset)[0]
+    return data_size
+
+
+def _tpm2_nv_read(tbs_ctx, tbs, ctypes, nv_index: int, size: int) -> bytes | None:
+    """Send TPM2_NV_Read to read data from an NV index.
+
+    Uses empty-password auth (TPM_RS_PW with no HMAC).
+    May need to read in chunks for large data.
+    """
+    import struct
+
+    result = b""
+    max_chunk = 1024  # TPM implementations typically allow 1024 bytes per read
+    offset = 0
+
+    while offset < size:
+        chunk_size = min(max_chunk, size - offset)
+
+        # Build command with password auth session
+        # Header: tag(2) + size(4) + commandCode(4) = 10
+        # Handles: authHandle(4) + nvIndex(4) = 8
+        # Auth area size(4) + auth session(9) = 13
+        # Parameters: size(2) + offset(2) = 4
+        # Total = 35
+        auth_area = struct.pack(
+            ">I HB H",
+            _TPM_RS_PW,  # sessionHandle
+            0,  # nonceSize = 0
+            0,  # sessionAttributes = 0
+            0,  # hmacSize = 0 (empty password)
+        )
+        total_size = 10 + 8 + 4 + len(auth_area) + 4
+        cmd = struct.pack(
+            ">HII II I",
+            _TPM_ST_SESSIONS,
+            total_size,
+            _TPM2_CC_NV_READ,
+            nv_index,  # authHandle
+            nv_index,  # nvIndex
+            len(auth_area),  # authorizationSize
+        )
+        cmd += auth_area
+        cmd += struct.pack(">HH", chunk_size, offset)
+
+        resp = _tbs_submit_command(tbs_ctx, tbs, ctypes, cmd)
+        if resp is None or len(resp) < 10:
+            return None
+
+        _tag, _resp_size, rc = struct.unpack_from(">HII", resp, 0)
+        if rc != 0:
+            logger.debug("TPM2_NV_Read failed at offset %d: 0x%08X", offset, rc)
+            return None
+
+        # Parse response: header(10) + parameterSize(4) + TPM2B_MAX_NV_BUFFER(size(2) + data)
+        if len(resp) < 16:
+            return None
+        _param_size = struct.unpack_from(">I", resp, 10)[0]
+        data_len = struct.unpack_from(">H", resp, 14)[0]
+        data_start = 16
+        if len(resp) < data_start + data_len:
+            return None
+        result += resp[data_start : data_start + data_len]
+        offset += data_len
+
+    return result
+
+
+def _check_platform_certificate() -> dict | None:
+    """Attempt to discover a TCG Platform Certificate in TPM NV storage.
+
+    The TCG Platform Certificate is stored at NV index 0x01C08000 by OEMs.
+    It binds the TPM to a specific physical machine (make/model/serial).
+
+    Returns a dict with OEM details if found, None otherwise.
+    This is informational and does NOT affect the pass/fail count.
+    """
+    try:
+        import ctypes
+
+        tbs = ctypes.windll.tbs
+    except (AttributeError, OSError):
+        logger.debug("TBS API not available — skipping Platform Certificate probe")
+        return None
+
+    # Create TBS context for TPM 2.0
+    tbs_ctx = ctypes.c_void_p()
+
+    # TBS_CONTEXT_PARAMS2: version(4) + flags(4) = 8 bytes
+    # version=2, includeTpm20=1 (bit 2 of flags)
+    import struct
+
+    params = (ctypes.c_ubyte * 8)(*struct.pack("<II", 2, 0x4))  # includeTpm20 = bit 2
+    status = tbs.Tbsi_Context_Create(params, ctypes.byref(tbs_ctx))
+    if status != 0:
+        logger.debug("Tbsi_Context_Create failed: 0x%08X", status)
+        return None
+
+    try:
+        # Step 1: Check if NV index exists and get data size
+        data_size = _tpm2_nv_read_public(tbs_ctx, tbs, ctypes, _PLATFORM_CERT_NV_INDEX)
+        if data_size is None or data_size == 0:
+            logger.info(
+                "Platform Certificate not found at TPM NV index 0x%08X (common on consumer/business PCs)",
+                _PLATFORM_CERT_NV_INDEX,
+            )
+            return None
+
+        logger.info(
+            "Platform Certificate found at NV 0x%08X (%d bytes) — reading...",
+            _PLATFORM_CERT_NV_INDEX,
+            data_size,
+        )
+
+        # Step 2: Read the certificate data
+        cert_data = _tpm2_nv_read(tbs_ctx, tbs, ctypes, _PLATFORM_CERT_NV_INDEX, data_size)
+        if cert_data is None:
+            logger.warning("Could not read Platform Certificate data from TPM NV")
+            return None
+
+        # Step 3: Try to parse as X.509 DER certificate
+        result: dict[str, str] = {}
+        try:
+            cert = cx509.load_der_x509_certificate(cert_data)
+            result["issuer"] = cert.issuer.rfc4514_string()
+            result["subject"] = cert.subject.rfc4514_string()
+            result["serial"] = format(cert.serial_number, "X")
+
+            # Extract OEM details from subject
+            for attr in cert.subject:
+                if attr.oid == cx509.oid.NameOID.ORGANIZATION_NAME:
+                    result["manufacturer"] = attr.value
+                elif attr.oid == cx509.oid.NameOID.COMMON_NAME:
+                    result["model"] = attr.value
+                elif attr.oid == cx509.oid.NameOID.SERIAL_NUMBER:
+                    result["serial_number"] = attr.value
+
+            logger.info(
+                "Platform Certificate: %s (signed by %s)",
+                result.get("subject", "?"),
+                result.get("issuer", "?"),
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.debug("Platform Certificate data is not a valid X.509 cert: %s", exc)
+            result["raw_size"] = str(len(cert_data))
+
+        return result if result else None
+
+    finally:
+        tbs.Tbsip_Context_Close(tbs_ctx)
+
+
 def _is_admin() -> bool:
     """Check if the current process has Administrator privileges on Windows."""
     try:
@@ -699,7 +1062,7 @@ def _attest_windows(config: WorkloadConfig) -> AttestationReport:
         )
 
     # Step 3: Extract EK certificate and verify chain
-    ek_cert_check, ek_pem = _extract_ek_certificate()
+    ek_cert_check, ek_pem, ek_details = _extract_ek_certificate()
     checks.append(ek_cert_check)
     if ek_pem:
         artifacts.append(
@@ -709,6 +1072,14 @@ def _attest_windows(config: WorkloadConfig) -> AttestationReport:
                 description="TPM Endorsement Key certificate (manufacturer-signed)",
             )
         )
+        if ek_details:
+            artifacts.append(
+                AttestationArtifact(
+                    filename="ek_certificate_details.json",
+                    content=json.dumps(ek_details, indent=2),
+                    description="Parsed EK certificate details (issuer, serial, TCG attributes)",
+                )
+            )
         chain_check = _verify_ek_chain_windows(ek_pem)
         checks.append(chain_check)
     else:
@@ -749,22 +1120,72 @@ def _attest_windows(config: WorkloadConfig) -> AttestationReport:
     export_check = _check_exportability(config)
     checks.append(export_check)
 
-    passed = sum(1 for chk in checks if chk.passed)
-    total = len(checks)
+    # Informational: Platform Certificate discovery (best-effort)
+    platform_info = _check_platform_certificate()
+
+    # ── Build human-readable verdict ────────────────────────────────
+    # Checks group into two tiers:
+    #   Tier 1 — TPM hardware (checks 1-4): Is there a genuine TPM?
+    #   Tier 2 — Key residency (checks 5-7): Is the key provably in that TPM?
+    #
+    # A key is either on the TPM or it isn't — there's no "partial".
+    # The summary should say exactly what was and wasn't confirmed.
 
     is_software = provider_info and provider_info.get("provider") == _MS_SOFTWARE_KSP
+
+    # Build a check-name → passed lookup
+    check_map = {chk.name: chk.passed for chk in checks}
+
+    tpm_present = check_map.get("TPM status", False)
+    ek_info_ok = check_map.get("EK information", False)
+    ek_cert_ok = check_map.get("EK certificate extracted", False)
+    ek_chain_ok = check_map.get("EK certificate chain verified", False)
+    provider_ok = check_map.get("Key storage provider", False)
+    claim_ok = check_map.get("NCryptCreateClaim attestation", False)
+    export_ok = check_map.get("Key non-exportability", False)
+
+    tpm_verified = tpm_present and ek_info_ok and ek_cert_ok and ek_chain_ok
+    key_proven = provider_ok and claim_ok and export_ok
+
     if is_software:
         summary = (
-            f"{passed}/{total} checks passed. Key is in the Software KSP (--soft-key). "
-            "No TPM attestation available for software keys."
+            "The workload key is stored in software (--soft-key mode). "
+            "Software keys cannot be attested to a TPM. "
+            "Remove --soft-key to use hardware-bound keys."
         )
-    elif passed == total:
+    elif tpm_verified and key_proven:
         summary = (
-            f"{passed}/{total} checks passed. Full CNG/TPM attestation verified. "
-            "The workload key is cryptographically proven to reside in the TPM."
+            "Cryptographically proven: your workload private key is bound to "
+            "this TPM and cannot be extracted. The TPM's identity has been "
+            "verified against the manufacturer's root certificate."
+        )
+    elif tpm_verified and provider_ok and not claim_ok:
+        summary = (
+            "Your device has a verified, genuine TPM and the workload key is "
+            "stored in the TPM's key storage provider. However, the TPM could "
+            "not produce a cryptographic attestation claim (NCryptCreateClaim "
+            "failed). The key is likely on the TPM but this cannot be "
+            "independently proven."
+        )
+    elif tpm_verified and not provider_ok:
+        summary = (
+            "Your device has a verified, genuine TPM but the workload key is "
+            "not stored in the Platform Crypto Provider. The key may be in a "
+            "software key store. Re-run setup without --soft-key to create a "
+            "TPM-bound key."
+        )
+    elif tpm_present and not tpm_verified:
+        summary = (
+            "Your device has a TPM but its identity could not be fully verified. "
+            "The EK certificate or manufacturer chain verification failed. "
+            "The TPM may be genuine but we cannot cryptographically confirm it."
         )
     else:
-        summary = f"{passed}/{total} checks passed. Partial attestation."
+        summary = (
+            "No functional TPM was detected. Hardware attestation requires a "
+            "TPM 2.0 that is present, enabled, and ready. Check your BIOS/UEFI "
+            "settings to ensure the TPM is enabled."
+        )
 
     return AttestationReport(
         platform="windows-cng",
@@ -773,17 +1194,7 @@ def _attest_windows(config: WorkloadConfig) -> AttestationReport:
         artifacts=artifacts,
         checks=checks,
         summary=summary,
-        documentation_urls=[
-            "https://learn.microsoft.com/en-us/windows/win32/api/ncrypt/nf-ncrypt-ncryptcreateclaim",
-            "https://learn.microsoft.com/en-us/powershell/module/tpm/get-tpmendorsementkeyinfo",
-            "https://learn.microsoft.com/en-us/windows/security/"
-            "identity-protection/hello-for-business/hello-key-attestation",
-        ],
-        verification_steps=[
-            "1. Verify TPM is present and ready: Get-Tpm",
-            "2. Verify EK certificate chain: openssl verify -CAfile <manufacturer_root.pem> ek_certificate.pem",
-            "3. Verify key is in Platform Crypto Provider: certutil -csp 'Microsoft Platform Crypto Provider' -key",
-            "4. Verify claim blob: NCryptVerifyClaim with the attestation blob",
-            "5. Verify EK: Get-TpmEndorsementKeyInfo -HashAlgorithm Sha256",
-        ],
+        platform_info=platform_info,
+        ek_details=ek_details,
+        tpm_info=tpm_info,
     )

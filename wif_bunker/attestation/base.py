@@ -45,6 +45,10 @@ class AttestationReport:
     not_supported_reason: str | None = None
     documentation_urls: list[str] = field(default_factory=list)
     verification_steps: list[str] = field(default_factory=list)
+    # Optional enrichment data for visual chain display
+    platform_info: dict | None = None  # OEM platform cert details (if found)
+    ek_details: dict | None = None  # Parsed EK certificate details
+    tpm_info: dict | None = None  # Raw Get-Tpm info
 
     @property
     def checks_passed(self) -> int:
