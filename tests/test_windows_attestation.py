@@ -18,9 +18,11 @@ from wif_bunker.attestation.windows import (
     _check_key_provider,
     _check_tpm_status,
     _create_ak_fresh,
+    _decode_manufacturer_id,
     _extract_ek_certificate,
     _get_or_create_ak,
     _ncrypt_create_claim,
+    _parse_tcg_attributes,
     _run_powershell,
 )
 
@@ -81,7 +83,7 @@ class TestCheckTpmStatus:
         check, info = _check_tpm_status()
 
         assert check.passed is True
-        assert "Manufacturer: 1095582720" in check.detail
+        assert "Manufacturer: Advanced Micro Devices (AMD)" in check.detail
         assert info is not None
         assert info["TpmPresent"] is True
 
@@ -143,7 +145,7 @@ class TestExtractEkCertificate:
         pem_cert = _generate_self_signed_cert()
         mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=pem_cert, stderr="")
 
-        check, cert_out = _extract_ek_certificate()
+        check, cert_out, _details = _extract_ek_certificate()
 
         assert check.passed is True
         assert "Test Manufacturer" in check.detail
@@ -153,7 +155,7 @@ class TestExtractEkCertificate:
     def test_handles_no_cert(self, mock_run):
         mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="NO_CERT", stderr="")
 
-        check, cert_out = _extract_ek_certificate()
+        check, cert_out, _details = _extract_ek_certificate()
 
         assert check.passed is False
         assert cert_out is None
@@ -443,3 +445,54 @@ class TestGetOrCreateAk:
 
         assert ak_handle is None
         assert "NCryptCreatePersistedKey for AK failed" in error
+
+
+class TestDecodeManufacturerId:
+    """Tests for _decode_manufacturer_id."""
+
+    def test_known_nuvoton(self):
+        assert _decode_manufacturer_id(1314145024) == "Nuvoton Technology (NTC)"
+
+    def test_known_infineon(self):
+        assert _decode_manufacturer_id(1229346816) == "Infineon (IFX)"
+
+    def test_known_intel(self):
+        assert _decode_manufacturer_id(1229870147) == "Intel (INTC)"
+
+    def test_known_amd(self):
+        assert _decode_manufacturer_id(1095582720) == "Advanced Micro Devices (AMD)"
+
+    def test_known_stm(self):
+        assert _decode_manufacturer_id(1398033696) == "STMicroelectronics (STM)"
+
+    def test_unknown_fallback_ascii(self):
+        # 0x58595A00 = 'XYZ\0'
+        result = _decode_manufacturer_id(0x58595A00)
+        assert "XYZ" in result
+
+    def test_string_input(self):
+        assert _decode_manufacturer_id("1314145024") == "Nuvoton Technology (NTC)"
+
+    def test_invalid_input(self):
+        result = _decode_manufacturer_id("not_a_number")
+        assert result == "not_a_number"
+
+
+class TestParseTcgAttributes:
+    """Tests for _parse_tcg_attributes."""
+
+    def test_returns_empty_for_standard_cert(self):
+        """A standard self-signed cert has no TCG attributes."""
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test")]))
+            .issuer_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test")]))
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
+            .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=365))
+            .public_key(key.public_key())
+            .sign(key, hashes.SHA256())
+        )
+        attrs = _parse_tcg_attributes(cert)
+        assert attrs == {}
