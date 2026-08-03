@@ -273,6 +273,59 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
+      # ── Test --cert-only for all supported algorithms ──
+      - name: "Test --cert-only (all algorithms)"
+        shell: bash
+        run: |
+          echo "=== Testing --cert-only for all supported algorithms ==="
+          # Algorithms supported per platform:
+          #   Linux/Windows: es256 es384 rsa2048 rsa3072 rsa4096
+          #   macOS:         es256 es384
+          ALGOS="es256 es384"
+          if [[ "$RUNNER_OS" != "macOS" ]]; then
+            ALGOS="$ALGOS rsa2048 rsa3072 rsa4096"
+          fi
+
+          WIF_CMD="${{ inputs.wif_bunker_cmd || 'python wif_bunker.py' }}"
+
+          # Windows cert generation triggers CA store dialogs
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            powershell -NoProfile -File .github/scripts/win_dialog_accept.ps1 &
+          fi
+
+          for algo in $ALGOS; do
+            echo "--- Testing --cert-only --key-algorithm $algo ---"
+            outdir=$(mktemp -d)
+            $WIF_CMD \
+              --cert-only \
+              --key-algorithm "$algo" \
+              --output-dir "$outdir" \
+              ${{ matrix.soft_key_flag }}
+
+            # Verify cert files were created
+            test -f "$outdir/workload_cert.pem" || { echo "FAIL: no workload_cert.pem for $algo"; exit 1; }
+            test -f "$outdir/trust_chain.pem"   || { echo "FAIL: no trust_chain.pem for $algo"; exit 1; }
+            echo "  ✓ $algo: cert files created"
+
+            rm -rf "$outdir"
+          done
+          echo "=== All --cert-only algorithm tests passed ==="
+
+      # ── Test --cert-only refuses to overwrite existing config ──
+      - name: "Test --cert-only overwrite protection"
+        shell: bash
+        run: |
+          echo "=== Testing --cert-only overwrite protection ==="
+          outdir=$(mktemp -d)
+          echo '{}' > "$outdir/adc.json"
+          WIF_CMD="${{ inputs.wif_bunker_cmd || 'python wif_bunker.py' }}"
+          if $WIF_CMD --cert-only --output-dir "$outdir" 2>&1; then
+            echo "FAIL: --cert-only should have refused to overwrite"
+            exit 1
+          fi
+          echo "✓ --cert-only correctly refused to overwrite existing config"
+          rm -rf "$outdir"
+
       # ── Step 2: WIF Bunker fresh run (creates project, SA, pool, provider) ──
       - name: "WIF Bunker: Fresh setup"
         shell: bash
@@ -371,6 +424,17 @@ jobs:
             exit 1
           fi
           echo "✓ Not using GHA CI SA"
+
+      # ── Test --status after full WIF setup ──
+      - name: "Test --status"
+        shell: bash
+        run: |
+          echo "=== Testing --status ==="
+          export GOOGLE_APPLICATION_CREDENTIALS="$PWD/adc.json"
+          export GOOGLE_API_USE_CLIENT_CERTIFICATE=true
+          export GOOGLE_API_CERTIFICATE_CONFIG="$PWD/certificate_config.json"
+          unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE 2>/dev/null || true
+          ${{ inputs.wif_bunker_cmd || 'python wif_bunker.py' }} --status
 
 
       # ── Upload Windows screenshots for dialog debugging ──

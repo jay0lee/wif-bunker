@@ -2,7 +2,7 @@ import json
 
 from cryptography import x509
 
-from wif_bunker import _WIF_MAX_CERT_LIFETIME_DAYS, CertificateBundle, _create_ca_and_sign
+from wif_bunker import _DEFAULT_CERT_LIFETIME_DAYS, CertificateBundle, _create_ca_and_sign
 
 
 def test_create_ca_and_sign_returns_bundle(sample_config, sample_csr_pem):
@@ -42,5 +42,37 @@ def test_create_ca_and_sign_lifetime(sample_config, sample_csr_pem):
     _bundle, workload_pem = _create_ca_and_sign(sample_csr_pem, sample_config)
     cert = x509.load_pem_x509_certificate(workload_pem.encode())
     lifetime = cert.not_valid_after_utc - cert.not_valid_before_utc
-    # allow some seconds of difference, around 390 days
-    assert lifetime.days == _WIF_MAX_CERT_LIFETIME_DAYS
+    # allow some seconds of difference, around the default lifetime
+    assert lifetime.days == _DEFAULT_CERT_LIFETIME_DAYS
+
+
+def test_create_ca_and_sign_rsa_ca_for_rsa_workload(sample_rsa_config, sample_rsa_csr_pem):
+    """RSA workload keys should get an RSA CA, not ECC."""
+    bundle, _workload_pem = _create_ca_and_sign(sample_rsa_csr_pem, sample_rsa_config)
+    ca_cert = x509.load_pem_x509_certificate(bundle.trust_anchor_pem.encode())
+    from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
+
+    assert isinstance(ca_cert.public_key(), RSAPublicKey)
+
+
+def test_create_ca_and_sign_es384_ca_for_es384_workload(sample_es384_config, sample_es384_csr_pem):
+    """ES384 workload keys should get a P-384 CA."""
+    bundle, _workload_pem = _create_ca_and_sign(sample_es384_csr_pem, sample_es384_config)
+    ca_cert = x509.load_pem_x509_certificate(bundle.trust_anchor_pem.encode())
+    from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicKey
+
+    ca_pub = ca_cert.public_key()
+    assert isinstance(ca_pub, EllipticCurvePublicKey)
+    assert ca_pub.curve.name == "secp384r1"
+
+
+def test_create_ca_and_sign_es256_ca_for_es256_workload(sample_config, sample_csr_pem):
+    """ES256 (default) should get a P-256 CA."""
+    bundle, _workload_pem = _create_ca_and_sign(sample_csr_pem, sample_config)
+    ca_cert = x509.load_pem_x509_certificate(bundle.trust_anchor_pem.encode())
+    from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicKey
+
+    ca_pub = ca_cert.public_key()
+    assert isinstance(ca_pub, EllipticCurvePublicKey)
+    assert ca_pub.curve.name == "secp256r1"
+

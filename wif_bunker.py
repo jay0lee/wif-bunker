@@ -34,7 +34,7 @@ from typing import Any, ClassVar
 import requests
 from cryptography import x509 as cx509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.x509.oid import NameOID
 from google.auth import default as google_auth_default
 from google.auth.exceptions import OAuthError, RefreshError
@@ -88,6 +88,7 @@ LRO_TIMEOUT_SECONDS = 300
 
 # WIF maximum certificate lifetime (Google enforced).
 _WIF_MAX_CERT_LIFETIME_DAYS = 390
+_DEFAULT_CERT_LIFETIME_DAYS = 90
 
 # --- Key Algorithm Definitions ---
 # Maps user-facing algorithm names to platform-specific parameters.
@@ -199,12 +200,7 @@ def _check_tpm_linux() -> None:
         "         mkdir -p /tmp/swtpm\n"
         "         swtpm socket --tpmstate dir=/tmp/swtpm --tpm2 "
         "--server type=tcp,port=2321 --ctrl type=tcp,port=2322 &\n"
-        "         export TPM2TOOLS_TCTI='swtpm:host=127.0.0.1,port=2321'\n"
-        "\n"
-        "    3. Use --soft-key for software-only keys (no TPM required).\n"
-        "       NOTE: --soft-key does NOT provide hardware TPM protection.\n"
-        "       Keys are stored in software and are exportable. Use only for\n"
-        "       development and testing, never for production workloads."
+        "         export TPM2TOOLS_TCTI='swtpm:host=127.0.0.1,port=2321'"
     )
 
 
@@ -218,6 +214,7 @@ class WorkloadConfig:
     provider_id: str = field(init=False)  # unique per run
     linux_tpm_pin: str = "bunker123"
     key_algorithm: str = "es256"
+    cert_lifetime_days: int = _DEFAULT_CERT_LIFETIME_DAYS
     soft_key: bool = False  # Use software keys (CI testing, no TPM required)
     suffix: str = field(default_factory=lambda: str(int(time.time())))
     project_id: str = field(init=False)
@@ -648,7 +645,19 @@ def _create_ca_and_sign(
         workload_pub_key = cert.public_key()
 
     # --- Generate ephemeral CA (in-memory only, never written to disk) ---
-    ca_key = ec.generate_private_key(ec.SECP256R1())
+    # Match CA key type to workload key type so RSA leaf certs get an RSA CA
+    # (RSA is typically chosen for legacy environments that don't support ECC).
+    if config.key_algorithm.startswith("rsa"):
+        key_size = int(config.key_algorithm.replace("rsa", ""))
+        ca_key = rsa.generate_private_key(public_exponent=65537, key_size=key_size)
+        ca_hash = hashes.SHA256()
+    elif config.key_algorithm == "es384":
+        ca_key = ec.generate_private_key(ec.SECP384R1())
+        ca_hash = hashes.SHA384()
+    else:  # es256 (default)
+        ca_key = ec.generate_private_key(ec.SECP256R1())
+        ca_hash = hashes.SHA256()
+
     ca_name = cx509.Name(
         [
             cx509.NameAttribute(NameOID.COMMON_NAME, config.ca_cn),
@@ -663,7 +672,7 @@ def _create_ca_and_sign(
         .public_key(ca_key.public_key())
         .serial_number(cx509.random_serial_number())
         .not_valid_before(now)
-        .not_valid_after(now + datetime.timedelta(days=_WIF_MAX_CERT_LIFETIME_DAYS))
+        .not_valid_after(now + datetime.timedelta(days=config.cert_lifetime_days))
         .add_extension(
             cx509.BasicConstraints(ca=True, path_length=0),
             critical=True,
@@ -682,7 +691,7 @@ def _create_ca_and_sign(
             ),
             critical=True,
         )
-        .sign(ca_key, hashes.SHA256())
+        .sign(ca_key, ca_hash)
     )
     logger.info("    Ephemeral CA generated: CN=%s", config.ca_cn)
 
@@ -699,7 +708,7 @@ def _create_ca_and_sign(
         .public_key(workload_pub_key)
         .serial_number(cx509.random_serial_number())
         .not_valid_before(now)
-        .not_valid_after(now + datetime.timedelta(days=_WIF_MAX_CERT_LIFETIME_DAYS))
+        .not_valid_after(now + datetime.timedelta(days=config.cert_lifetime_days))
         .add_extension(
             cx509.BasicConstraints(ca=False, path_length=None),
             critical=True,
@@ -718,7 +727,7 @@ def _create_ca_and_sign(
             ),
             critical=True,
         )
-        .sign(ca_key, hashes.SHA256())
+        .sign(ca_key, ca_hash)
     )
     logger.info(
         "    Workload cert signed by CA: CN=%s %s issued by CN=%s",
@@ -1145,10 +1154,7 @@ def _generate_cert_macos(config: WorkloadConfig) -> CertificateBundle:
                 "\n"
                 "  Possible causes:\n"
                 "    - Running in a VM without SE support\n"
-                "    - User denied the biometric/passcode prompt\n"
-                "\n"
-                "  Use --soft-key for software-only keys (no SE required).\n"
-                "  NOTE: --soft-key does NOT provide hardware protection."
+                "    - User denied the biometric/passcode prompt"
             ) from e
         raise RuntimeError(
             f"macOS certificate generation failed (command: {cmd_name}, "
@@ -1168,9 +1174,8 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
     # Also need certtool from gnutls-bin for CSR generation.
     _require_command("certtool", package="gnutls-bin", install_hint="sudo apt install gnutls-bin")
 
-    # Check TPM availability (unless using software keys).
-    if not config.soft_key:
-        _check_tpm_linux()
+    # Check TPM availability.
+    _check_tpm_linux()
 
     tpm_store = Path.home() / ".tpm2_pkcs11"
     os.environ["TPM2_PKCS11_STORE"] = str(tpm_store)
@@ -1325,11 +1330,7 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
                 "    2. For development, start a software TPM:\n"
                 "         swtpm socket --tpmstate dir=/tmp/swtpm --tpm2 "
                 "--server type=tcp,port=2321 --ctrl type=tcp,port=2322 &\n"
-                "         export TPM2TOOLS_TCTI='swtpm:host=127.0.0.1,port=2321'\n"
-                "\n"
-                "    3. Use --soft-key for software-only keys (no TPM required).\n"
-                "       NOTE: --soft-key does NOT provide hardware TPM protection.\n"
-                "       Keys are stored in software and are exportable."
+                "         export TPM2TOOLS_TCTI='swtpm:host=127.0.0.1,port=2321'"
             ) from e
         if "timed out" in stderr and "Tabrmd" in stderr:
             raise RuntimeError(
@@ -1346,8 +1347,7 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
                 f"No TPM device found (command: {cmd_name}).\n"
                 "The system does not have /dev/tpmrm0 or /dev/tpm0.\n"
                 "\n"
-                "  Use --soft-key for software-only keys (no TPM required).\n"
-                "  NOTE: --soft-key does NOT provide hardware TPM protection."
+                "  For development/testing, use a software TPM (swtpm)."
             ) from e
         # Fallback: include the raw error with the failing command.
         raise RuntimeError(
@@ -1446,6 +1446,166 @@ def generate_os_keystore_cert(config: WorkloadConfig) -> CertificateBundle:
     raise OSError(f"Unsupported Operating System: {sys.platform}")
 
 
+# --- Config file names written by wif-bunker ---
+_CONFIG_FILES = ("adc.json", "certificate_config.json", "workload_cert.pem", "trust_chain.pem")
+
+SYM_CHECK = "\u2713" if _UNICODE else "[ok]"
+SYM_CROSS = "\u2717" if _UNICODE else "[X]"
+
+
+def _run_cert_only(config: WorkloadConfig, output_dir: str) -> None:
+    """Generate a hardware-backed certificate without any GCP/WIF setup."""
+    logger.info("=== Generating Hardware-Backed Certificate (cert-only mode) ===")
+
+    cert_bundle = generate_os_keystore_cert(config)
+
+    os.makedirs(output_dir, exist_ok=True)
+    cert_path = Path(output_dir) / "workload_cert.pem"
+    chain_path = Path(output_dir) / "trust_chain.pem"
+    write_secure_file(cert_path, cert_bundle.workload_cert_pem)
+    write_secure_file(chain_path, cert_bundle.trust_anchor_pem)
+
+    logger.info("")
+    logger.info("Certificate generated:")
+    logger.info("  Subject:     CN=%s", config.workload_cn)
+    logger.info("  Issuer:      CN=%s", cert_bundle.issuer_cn)
+    logger.info("  Algorithm:   %s", config.key_algorithm)
+    logger.info("  Fingerprint: %s", cert_bundle.sha256_fingerprint)
+    logger.info("  Lifetime:    %d days", config.cert_lifetime_days)
+    logger.info("")
+    logger.info("Files written:")
+    logger.info("  %s", cert_path)
+    logger.info("  %s", chain_path)
+
+
+def _run_status() -> None:
+    """Show current WIF Bunker configuration status and health."""
+    logger.info("=== WIF Bunker Status ===")
+
+    # Stage 1: Check config files
+    logger.info("Config files:")
+    missing = []
+    for name in _CONFIG_FILES:
+        path = Path.cwd() / name
+        if path.exists():
+            logger.info("  %s %s", SYM_CHECK, name)
+        else:
+            logger.info("  %s %s (missing)", SYM_CROSS, name)
+            missing.append(name)
+    if missing:
+        logger.error("")
+        logger.error("Missing config files: %s", ", ".join(missing))
+        logger.error("Run wif-bunker to generate configuration first.")
+        return
+
+    # Stage 2: Parse certificate
+    logger.info("")
+    logger.info("Certificate:")
+    cert_path = Path.cwd() / "workload_cert.pem"
+    try:
+        cert = cx509.load_pem_x509_certificate(cert_path.read_bytes())
+        subject_cn = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+        issuer_cn = cert.issuer.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+        key_type = type(cert.public_key()).__name__
+        serial_hex = format(cert.serial_number, "X")
+        serial_display = serial_hex[:16] + "..." if len(serial_hex) > 16 else serial_hex
+        valid_from = cert.not_valid_before_utc
+        expires = cert.not_valid_after_utc
+        now = datetime.datetime.now(datetime.UTC)
+        days_remaining = (expires - now).days
+
+        logger.info("  Subject:    CN=%s", subject_cn)
+        logger.info("  Issuer:     CN=%s", issuer_cn)
+        logger.info("  Algorithm:  %s", key_type)
+        logger.info("  Serial:     %s", serial_display)
+        logger.info("  Valid from: %s", valid_from.strftime("%Y-%m-%d"))
+        logger.info("  Expires:    %s (%d days remaining)", expires.strftime("%Y-%m-%d"), days_remaining)
+
+        if days_remaining < 0:
+            logger.error("  %s Certificate has EXPIRED. Re-run wif-bunker to rotate.", SYM_FAIL)
+            return
+        if days_remaining < 15:
+            logger.warning(
+                "  %s WARNING: Certificate expires in %d days. Re-run wif-bunker to rotate.",
+                SYM_WARN,
+                days_remaining,
+            )
+    except Exception as e:
+        logger.error("  %s Failed to parse certificate: %s", SYM_CROSS, e)
+        return
+
+    # Stage 3: Test ECP
+    logger.info("")
+    cert_config_path = Path.cwd() / "certificate_config.json"
+    try:
+        cert_config = json.loads(cert_config_path.read_text())
+        ecp_client_path = cert_config.get("libs", {}).get("ecp_client")
+        if not ecp_client_path or not Path(ecp_client_path).exists():
+            logger.error("ECP:       %s ECP client library not found at: %s", SYM_CROSS, ecp_client_path)
+            return
+
+        _ecp_lib = ctypes.CDLL(ecp_client_path)
+        _ecp_lib.GetCertPemForPython.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
+        _ecp_lib.GetCertPemForPython.restype = ctypes.c_int
+        _cert_len = _ecp_lib.GetCertPemForPython(str(cert_config_path).encode(), None, 0)
+        if _cert_len <= 0:
+            logger.error("ECP:       %s ECP returned cert_len=%d", SYM_CROSS, _cert_len)
+            return
+        logger.info("ECP:       %s Certificate retrieved (%d bytes)", SYM_CHECK, _cert_len)
+    except Exception as e:
+        logger.error("ECP:       %s %s", SYM_CROSS, e)
+        return
+
+    # Stage 4: Test ADC
+    try:
+        adc_path = Path.cwd() / "adc.json"
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(adc_path)
+        os.environ["GOOGLE_API_USE_CLIENT_CERTIFICATE"] = "true"
+        os.environ["GOOGLE_API_CERTIFICATE_CONFIG"] = str(cert_config_path)
+
+        mtls_session = requests.Session()
+        mtls_adapter = _MutualTlsOffloadAdapter(str(cert_config_path))
+        mtls_session.mount("https://", mtls_adapter)
+        mtls_request = GoogleAuthRequest(session=mtls_session)
+
+        adc_creds, _ = google_auth_default(
+            scopes=["https://www.googleapis.com/auth/cloud-platform"],
+            request=mtls_request,
+        )
+        adc_creds.refresh(mtls_request)
+
+        # Read project ID from adc.json
+        adc_config = json.loads(adc_path.read_text())
+        project_id = adc_config.get("workforce_pool_user_project", "")
+
+        api_headers = {}
+        adc_creds.apply(api_headers)
+        crm_base = "cloudresourcemanager.googleapis.com"
+        target_res = mtls_session.get(
+            f"https://{crm_base}/v1/projects/{project_id}",
+            headers=api_headers,
+        )
+        target_res.raise_for_status()
+        logger.info("ADC:       %s API call successful", SYM_CHECK)
+
+        # Who am I?
+        whoami_headers = {}
+        adc_creds.apply(whoami_headers)
+        whoami_res = mtls_session.get(
+            f"https://{crm_base}/v1/projects/wif-bunker-whoami-00000",
+            headers=whoami_headers,
+        )
+        if whoami_res.status_code == 403:
+            error_msg = whoami_res.json().get("error", {}).get("message", "")
+            match = re.search(r"principal://\S+", error_msg)
+            if match:
+                principal = match.group(0).rstrip(".")
+                logger.info("Principal: %s", principal)
+    except Exception as e:
+        logger.error("ADC:       %s %s", SYM_CROSS, e)
+        logger.error("Re-run with --debug for detailed ECP and TLS diagnostics.")
+
+
 # --- Core Workflow ---
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -1453,6 +1613,25 @@ def main() -> None:
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--debug", action="store_true")
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--cert-only",
+        action="store_true",
+        help=(
+            "Generate a hardware-backed certificate without setting up WIF or "
+            "GCP resources. Useful for testing key algorithm and platform combinations."
+        ),
+    )
+    mode_group.add_argument(
+        "--status",
+        action="store_true",
+        help=("Show current WIF Bunker configuration status, certificate expiry, and test ECP and ADC connectivity."),
+    )
+    parser.add_argument(
+        "--output-dir",
+        metavar="DIR",
+        help="Output directory for certificate files (default: current directory). Only used with --cert-only.",
+    )
     project_group = parser.add_mutually_exclusive_group()
     project_group.add_argument(
         "--use-project",
@@ -1521,7 +1700,20 @@ def main() -> None:
         "--soft-key",
         action="store_true",
         help=(
-            "Use software keys instead of hardware-backed keys (for CI testing without a TPM).  NOT for production use."
+            "Windows only. Use Microsoft Software Key Storage Provider instead of "
+            "the TPM-backed Platform Crypto Provider. For CI testing on systems "
+            "without a TPM. NOT for production use."
+        ),
+    )
+    parser.add_argument(
+        "--cert-lifetime",
+        type=int,
+        default=_DEFAULT_CERT_LIFETIME_DAYS,
+        metavar="DAYS",
+        help=(
+            "Certificate validity period in days (1-390, default: 90). "
+            "GCP Workload Identity Federation enforces a maximum of 390 days. "
+            "Re-run wif-bunker before expiry to rotate."
         ),
     )
     parser.add_argument(
@@ -1566,7 +1758,12 @@ def main() -> None:
     elif args.create_pool:
         config.pool_id = args.create_pool
     if args.soft_key:
+        if sys.platform != "win32":
+            parser.error("--soft-key is only supported on Windows.")
         config.soft_key = True
+    if args.cert_lifetime < 1 or args.cert_lifetime > _WIF_MAX_CERT_LIFETIME_DAYS:
+        parser.error(f"--cert-lifetime must be between 1 and {_WIF_MAX_CERT_LIFETIME_DAYS} days.")
+    config.cert_lifetime_days = args.cert_lifetime
 
     if args.key_algorithm:
         algo_info = _KEY_ALGORITHMS[args.key_algorithm]
@@ -1581,6 +1778,30 @@ def main() -> None:
                 f"{sys.platform}. Supported: {', '.join(supported)}"
             )
         config.key_algorithm = args.key_algorithm
+
+    # Validate --output-dir is only used with --cert-only
+    if args.output_dir and not args.cert_only:
+        parser.error("--output-dir can only be used with --cert-only")
+
+    # --- Mode dispatch: --status or --cert-only exit early ---
+    if args.status:
+        _run_status()
+        return
+
+    if args.cert_only:
+        output_dir = args.output_dir or os.getcwd()
+        # Safety: refuse to overwrite existing config files
+        existing = [f for f in _CONFIG_FILES if (Path(output_dir) / f).exists()]
+        if existing:
+            parser.error(
+                f"Config files already exist in {output_dir}:\n"
+                f"  Found: {', '.join(existing)}\n\n"
+                "Running --cert-only here would overwrite files needed for your\n"
+                "working GCP authentication. Use --output-dir to write to a\n"
+                "different directory, or remove the existing files first."
+            )
+        _run_cert_only(config, output_dir)
+        return
 
     with GCPClient(
         use_adc=args.use_adc,
