@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -83,6 +86,55 @@ def _load_certs(directory: Path) -> list[x509.Certificate]:
     return certs
 
 
+def _load_cert_lenient(pem_data: bytes) -> x509.Certificate:
+    """Load a PEM certificate, falling back to pyOpenSSL for non-canonical DER.
+
+    **Why this exists:**
+
+    The ``cryptography`` library (>= v42) uses a strict Rust-based X.509
+    parser that rejects certificates with non-canonical DER encoding — in
+    particular, SET OF elements that aren't sorted in lexicographic order
+    (``InvalidSetOrdering``).  The library maintainers intentionally refuse
+    to add a leniency flag for this (see pyca/cryptography#7189).
+
+    Unfortunately, several major TPM manufacturers ship EK certificates
+    that violate this rule.  Nuvoton TPMs (found in Dell hardware) are a
+    known example — their issuer field has attributes in the "wrong" order.
+    The certificate data itself is perfectly valid and OpenSSL has no
+    trouble with it; it's only ``cryptography``'s Rust layer that objects.
+
+    **How it works:**
+
+    ``pyOpenSSL`` wraps OpenSSL's C library (the same one ``cryptography``
+    bundles for its own crypto operations) and exposes the lenient
+    ``PEM_read_bio_X509`` / ``d2i_X509`` functions.  We use it to:
+
+    1. Load the cert via OpenSSL's lenient C parser
+    2. Re-encode it back to PEM — OpenSSL normalises the DER on output
+    3. Feed the cleaned PEM to ``cryptography``'s strict parser
+
+    This way all downstream code gets a proper ``cryptography`` cert
+    object with full access to ``.issuer``, ``.tbs_certificate_bytes``,
+    ``.signature``, etc.
+    """
+    # Happy path: cryptography can parse this cert natively.
+    try:
+        return x509.load_pem_x509_certificate(pem_data)
+    except Exception:
+        pass
+
+    # Fallback: the cert has non-standard DER encoding that cryptography
+    # rejects.  Use pyOpenSSL (OpenSSL C library) to re-encode it.
+    # pyOpenSSL is a pure-Python package that uses the OpenSSL already
+    # bundled inside cryptography — no new native dependencies.
+    from OpenSSL.crypto import FILETYPE_PEM, dump_certificate, load_certificate
+
+    logger.debug("cryptography's strict parser rejected cert; re-encoding via pyOpenSSL")
+    openssl_cert = load_certificate(FILETYPE_PEM, pem_data)
+    fixed_pem = dump_certificate(FILETYPE_PEM, openssl_cert)
+    return x509.load_pem_x509_certificate(fixed_pem)
+
+
 def verify_ek_chain(ek_pem: str) -> AttestationCheck:
     """Verify EK certificate against known manufacturer root CAs.
 
@@ -91,6 +143,9 @@ def verify_ek_chain(ek_pem: str) -> AttestationCheck:
     ``roots/intermediates/`` directories (sourced from
     https://github.com/loicsikidi/tpm-ca-certificates) and uses
     cryptography.x509.verification.
+
+    Falls back to pyOpenSSL re-encoding for certs with non-canonical DER
+    encoding (e.g. Nuvoton TPMs with InvalidSetOrdering in issuer).
     """
     # In PyInstaller builds, data files are extracted under sys._MEIPASS
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
@@ -108,14 +163,12 @@ def verify_ek_chain(ek_pem: str) -> AttestationCheck:
         )
 
     try:
-        ek_cert = x509.load_pem_x509_certificate(ek_pem.encode("utf-8"))
+        ek_cert = _load_cert_lenient(ek_pem.encode("utf-8"))
     except Exception as e:
         return AttestationCheck(
             name="EK certificate chain verified",
             passed=False,
-            detail=(
-                f"Could not parse EK certificate: {e}. The TPM manufacturer may have used non-standard DER encoding."
-            ),
+            detail=f"Could not parse EK certificate: {e}",
         )
 
     try:
@@ -124,17 +177,13 @@ def verify_ek_chain(ek_pem: str) -> AttestationCheck:
         if intermediates_dir.exists():
             intermediates = _load_certs(intermediates_dir)
 
-        # Build issuer lookup using raw issuer bytes for matching.
-        # Some TPM EK certs use non-canonical DER SET ordering in
-        # their issuer field.  Comparing the raw TBS issuer bytes
-        # avoids the strict parsed-Name comparison that rejects them.
+        # Build issuer lookup using raw subject bytes.
         all_ca_certs: list[x509.Certificate] = roots + intermediates
         issuer_lookup: dict[bytes, x509.Certificate] = {}
         for cert in all_ca_certs:
             try:
                 issuer_lookup[cert.subject.public_bytes()] = cert
             except Exception:
-                # If we can't get public_bytes from the subject, skip this CA
                 pass
 
         # Walk up the chain from the EK cert to a trusted root.
@@ -142,7 +191,6 @@ def verify_ek_chain(ek_pem: str) -> AttestationCheck:
         depth = 0
         max_depth = 10
         while depth < max_depth:
-            # Find the issuer cert using raw bytes matching.
             try:
                 issuer_bytes = current.issuer.public_bytes()
             except Exception:
@@ -157,7 +205,6 @@ def verify_ek_chain(ek_pem: str) -> AttestationCheck:
 
             issuer_cert = issuer_lookup.get(issuer_bytes)
             if issuer_cert is None:
-                # Try RFC4514 string fallback for display
                 try:
                     issuer_str = current.issuer.rfc4514_string()
                 except Exception:
@@ -190,7 +237,6 @@ def verify_ek_chain(ek_pem: str) -> AttestationCheck:
                     detail=f"Unsupported key type: {type(issuer_pub).__name__}",
                 )
 
-            # If the issuer is a trusted root, chain is verified.
             if issuer_cert in roots:
                 return AttestationCheck(
                     name="EK certificate chain verified",
@@ -201,7 +247,6 @@ def verify_ek_chain(ek_pem: str) -> AttestationCheck:
                     ),
                 )
 
-            # Move up the chain.
             current = issuer_cert
             depth += 1
 
@@ -211,9 +256,8 @@ def verify_ek_chain(ek_pem: str) -> AttestationCheck:
             detail="Certificate chain too deep (exceeded 10 levels).",
         )
     except Exception as e:
-        stderr_hint = f" Error: {e}"
         return AttestationCheck(
             name="EK certificate chain verified",
             passed=False,
-            detail=f"EK certificate did not chain to any bundled manufacturer root CA.{stderr_hint}",
+            detail=f"EK certificate did not chain to any bundled manufacturer root CA. Error: {e}",
         )
