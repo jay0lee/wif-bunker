@@ -184,7 +184,27 @@ def create_tpm_key(
         if status != 0:
             raise RuntimeError(f"NCryptSetProperty('Export Policy') failed: 0x{status & 0xFFFFFFFF:08X}")
 
-        # 5. Finalize (persist) the key.
+        # 5. Set PCP key usage policy to enable attestation.
+        #    NCRYPT_PCP_IDENTITY_KEY (0x8) tells the Platform Crypto Provider
+        #    that this key supports identity attestation via NCryptCreateClaim.
+        #    Without this, NCryptCreateClaim fails with PCP_E_KEY_NOT_LOADED
+        #    (0x8029040F).
+        #    Only applicable to TPM keys — the software KSP ignores PCP
+        #    properties (and setting them would error).
+        if not soft_key:
+            _NCRYPT_PCP_IDENTITY_KEY = 0x00000008
+            usage_policy = wintypes.DWORD(_NCRYPT_PCP_IDENTITY_KEY)
+            status = ncrypt.NCryptSetProperty(
+                key_handle,
+                "PCP_KEY_USAGE_POLICY",
+                ctypes.byref(usage_policy),
+                ctypes.sizeof(usage_policy),
+                0,
+            )
+            if status != 0:
+                raise RuntimeError(f"NCryptSetProperty('PCP_KEY_USAGE_POLICY') failed: 0x{status & 0xFFFFFFFF:08X}")
+
+        # 6. Finalize (persist) the key.
         #    After this call, the key is stored in the TPM / software KSP
         #    and survives reboots.
         status = ncrypt.NCryptFinalizeKey(key_handle, 0)
