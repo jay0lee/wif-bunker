@@ -86,8 +86,8 @@ def _load_certs(directory: Path) -> list[x509.Certificate]:
     return certs
 
 
-def _load_cert_lenient(pem_data: bytes) -> x509.Certificate:
-    """Load a PEM certificate, falling back to pyOpenSSL for non-canonical DER.
+def _verify_ek_chain_pyopenssl(ek_pem: str, roots_dir: Path, intermediates_dir: Path) -> AttestationCheck:
+    """Verify EK cert chain using pyOpenSSL when cryptography's strict parser fails.
 
     **Why this exists:**
 
@@ -97,42 +97,81 @@ def _load_cert_lenient(pem_data: bytes) -> x509.Certificate:
     (``InvalidSetOrdering``).  The library maintainers intentionally refuse
     to add a leniency flag for this (see pyca/cryptography#7189).
 
-    Unfortunately, several major TPM manufacturers ship EK certificates
-    that violate this rule.  Nuvoton TPMs (found in Dell hardware) are a
-    known example — their issuer field has attributes in the "wrong" order.
-    The certificate data itself is perfectly valid and OpenSSL has no
-    trouble with it; it's only ``cryptography``'s Rust layer that objects.
+    Several major TPM manufacturers (e.g. Nuvoton on Dell hardware) ship
+    EK certificates that violate this rule.  The certificate data itself is
+    perfectly valid — OpenSSL has no trouble with it.
 
-    **How it works:**
-
-    ``pyOpenSSL`` wraps OpenSSL's C library (the same one ``cryptography``
-    bundles for its own crypto operations) and exposes the lenient
-    ``PEM_read_bio_X509`` / ``d2i_X509`` functions.  We use it to:
-
-    1. Load the cert via OpenSSL's lenient C parser
-    2. Re-encode it back to PEM — OpenSSL normalises the DER on output
-    3. Feed the cleaned PEM to ``cryptography``'s strict parser
-
-    This way all downstream code gets a proper ``cryptography`` cert
-    object with full access to ``.issuer``, ``.tbs_certificate_bytes``,
-    ``.signature``, etc.
+    OpenSSL's ``d2i_X509`` / ``i2d_X509`` preserves original DER byte
+    ordering on output, so the "re-encode to fix" approach doesn't work.
+    Instead we use ``pyOpenSSL``'s ``X509StoreContext`` to do the **entire**
+    chain verification natively in OpenSSL's C library — no conversion back
+    to ``cryptography`` needed.
     """
-    # Happy path: cryptography can parse this cert natively.
+    from OpenSSL.crypto import (
+        FILETYPE_PEM,
+        X509Store,
+        X509StoreContext,
+        X509StoreContextError,
+        load_certificate,
+    )
+
+    logger.debug("Using pyOpenSSL X509StoreContext for EK chain verification")
+
     try:
-        return x509.load_pem_x509_certificate(pem_data)
-    except Exception:
-        pass
+        ek_cert = load_certificate(FILETYPE_PEM, ek_pem.encode("utf-8"))
+    except Exception as e:
+        return AttestationCheck(
+            name="EK certificate chain verified",
+            passed=False,
+            detail=f"pyOpenSSL could not parse EK certificate either: {e}",
+        )
 
-    # Fallback: the cert has non-standard DER encoding that cryptography
-    # rejects.  Use pyOpenSSL (OpenSSL C library) to re-encode it.
-    # pyOpenSSL is a pure-Python package that uses the OpenSSL already
-    # bundled inside cryptography — no new native dependencies.
-    from OpenSSL.crypto import FILETYPE_PEM, dump_certificate, load_certificate
+    # Build an X509Store with all root CAs.
+    store = X509Store()
+    roots_loaded = 0
+    for pem_file in sorted(roots_dir.glob("*.pem")):
+        try:
+            ca_cert = load_certificate(FILETYPE_PEM, pem_file.read_bytes())
+            store.add_cert(ca_cert)
+            roots_loaded += 1
+        except Exception:
+            pass
 
-    logger.debug("cryptography's strict parser rejected cert; re-encoding via pyOpenSSL")
-    openssl_cert = load_certificate(FILETYPE_PEM, pem_data)
-    fixed_pem = dump_certificate(FILETYPE_PEM, openssl_cert)
-    return x509.load_pem_x509_certificate(fixed_pem)
+    if roots_loaded == 0:
+        return AttestationCheck(
+            name="EK certificate chain verified",
+            passed=False,
+            detail="No root CA certificates could be loaded by pyOpenSSL.",
+        )
+
+    # Load intermediates (untrusted chain certs).
+    intermediates = []
+    if intermediates_dir.exists():
+        for pem_file in sorted(intermediates_dir.glob("*.pem")):
+            try:
+                intermediates.append(load_certificate(FILETYPE_PEM, pem_file.read_bytes()))
+            except Exception:
+                pass
+
+    # Verify the chain using OpenSSL's C library.
+    try:
+        ctx = X509StoreContext(store, ek_cert, chain=intermediates)
+        ctx.verify_certificate()
+    except X509StoreContextError as e:
+        return AttestationCheck(
+            name="EK certificate chain verified",
+            passed=False,
+            detail=f"EK certificate chain verification failed (pyOpenSSL): {e}",
+        )
+
+    return AttestationCheck(
+        name="EK certificate chain verified",
+        passed=True,
+        detail=(
+            "EK certificate verified against tpm-ca-certificates bundle "
+            "(via pyOpenSSL — cert has non-standard DER encoding)"
+        ),
+    )
 
 
 def verify_ek_chain(ek_pem: str) -> AttestationCheck:
@@ -144,8 +183,8 @@ def verify_ek_chain(ek_pem: str) -> AttestationCheck:
     https://github.com/loicsikidi/tpm-ca-certificates) and uses
     cryptography.x509.verification.
 
-    Falls back to pyOpenSSL re-encoding for certs with non-canonical DER
-    encoding (e.g. Nuvoton TPMs with InvalidSetOrdering in issuer).
+    Falls back to pyOpenSSL's X509StoreContext for certs with non-canonical
+    DER encoding (e.g. Nuvoton TPMs with InvalidSetOrdering in issuer).
     """
     # In PyInstaller builds, data files are extracted under sys._MEIPASS
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
@@ -162,14 +201,15 @@ def verify_ek_chain(ek_pem: str) -> AttestationCheck:
             detail="No manufacturer root CA certificates bundled. Chain verification skipped.",
         )
 
+    # Try the standard path: cryptography's strict parser.
+    ek_cert = None
     try:
-        ek_cert = _load_cert_lenient(ek_pem.encode("utf-8"))
-    except Exception as e:
-        return AttestationCheck(
-            name="EK certificate chain verified",
-            passed=False,
-            detail=f"Could not parse EK certificate: {e}",
-        )
+        ek_cert = x509.load_pem_x509_certificate(ek_pem.encode("utf-8"))
+    except Exception:
+        # Strict parser rejected the cert (e.g. InvalidSetOrdering).
+        # Fall back to pyOpenSSL for the entire chain verification.
+        logger.debug("cryptography's strict parser rejected EK cert; falling back to pyOpenSSL")
+        return _verify_ek_chain_pyopenssl(ek_pem, roots_dir, intermediates_dir)
 
     try:
         roots = _load_certs(roots_dir)

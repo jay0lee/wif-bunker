@@ -1,0 +1,485 @@
+"""Win32 CNG (NCrypt) ctypes bindings for TPM key operations.
+
+All direct Win32 API calls for key lifecycle management are isolated in
+this module.  The rest of the codebase never touches ctypes/wintypes
+directly for key operations.
+
+This module is ONLY imported on Windows (``sys.platform == 'win32'``).
+On macOS and Linux it exists on disk but is never loaded.
+
+References:
+  NCrypt API overview:
+    https://learn.microsoft.com/en-us/windows/win32/api/ncrypt/
+  NCryptCreatePersistedKey:
+    https://learn.microsoft.com/en-us/windows/win32/api/ncrypt/nf-ncrypt-ncryptcreatepersistedkey
+  NCryptExportKey:
+    https://learn.microsoft.com/en-us/windows/win32/api/ncrypt/nf-ncrypt-ncryptexportkey
+  BCRYPT_RSAKEY_BLOB / BCRYPT_ECCKEY_BLOB:
+    https://learn.microsoft.com/en-us/windows/win32/api/bcrypt/ns-bcrypt-bcrypt_rsakey_blob
+
+How ctypes works (for future maintainers):
+  Python's ``ctypes`` module calls functions in pre-compiled Windows DLLs
+  (like ncrypt.dll) at runtime.  No C compiler is needed — these DLLs ship
+  with every Windows installation.  Think of it as calling a function in a
+  shared library, similar to how Python's ``ssl`` module calls libssl.
+"""
+
+from __future__ import annotations
+
+import logging
+import struct
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# CNG / NCrypt constants
+# ---------------------------------------------------------------------------
+
+# Key Storage Providers — the TPM provider is preferred; the software
+# provider is the fallback for --soft-key mode.
+MS_PLATFORM_CRYPTO_PROVIDER = "Microsoft Platform Crypto Provider"
+MS_SOFTWARE_KSP = "Microsoft Software Key Storage Provider"
+
+# Algorithm identifiers for NCryptCreatePersistedKey
+# https://learn.microsoft.com/en-us/windows/win32/seccng/cng-algorithm-identifiers
+BCRYPT_RSA_ALGORITHM = "RSA"
+BCRYPT_ECDSA_P256_ALGORITHM = "ECDSA_P256"
+BCRYPT_ECDSA_P384_ALGORITHM = "ECDSA_P384"
+
+# Blob type strings for NCryptExportKey
+BCRYPT_RSAPUBLIC_BLOB = "RSAPUBLICBLOB"
+BCRYPT_ECCPUBLIC_BLOB = "ECCPUBLICBLOB"
+
+# BCRYPT_RSAKEY_BLOB magic value for public keys
+_BCRYPT_RSAPUBLIC_MAGIC = 0x31415352  # "RSA1" in little-endian ASCII
+
+# BCRYPT_ECCKEY_BLOB magic values
+_BCRYPT_ECDSA_PUBLIC_P256_MAGIC = 0x31534345  # "ECS1"
+_BCRYPT_ECDSA_PUBLIC_P384_MAGIC = 0x33534345  # "ECS3"
+
+# NTSTATUS / SECURITY_STATUS error codes
+_NTE_BAD_KEYSET = 0x80090016  # "keyset does not exist" — key not found
+_NTE_EXISTS = 0x8009000F  # key container already exists
+
+# NCryptCreatePersistedKey flags — these are NOT mutually exclusive
+_NCRYPT_OVERWRITE_KEY_FLAG = 0x00000080
+
+
+def _load_ctypes():
+    """Lazy-load ctypes and wintypes (only available on Windows).
+
+    Returns:
+        Tuple of (ctypes_module, wintypes_module, ncrypt_dll).
+
+    Raises:
+        RuntimeError: if not running on Windows or ncrypt.dll cannot be loaded.
+    """
+    try:
+        import ctypes  # pylint: disable=import-outside-toplevel
+        from ctypes import wintypes  # pylint: disable=import-outside-toplevel
+    except ImportError as exc:
+        raise RuntimeError("ctypes.wintypes not available — this module requires Windows") from exc
+
+    try:
+        ncrypt = ctypes.windll.ncrypt  # type: ignore[attr-defined]
+    except (AttributeError, OSError) as exc:
+        raise RuntimeError(f"Could not load ncrypt.dll: {exc}") from exc
+
+    return ctypes, wintypes, ncrypt
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+def create_tpm_key(
+    key_name: str,
+    algorithm: str,
+    key_length: int | None = None,
+    soft_key: bool = False,
+) -> int:
+    """Create a persistent key in the TPM (or software KSP) via NCrypt.
+
+    The key is created with non-exportable storage and is persisted in the
+    Key Storage Provider so it survives reboots.
+
+    Args:
+        key_name: CNG key container name (e.g. "bunker-workload-1234").
+        algorithm: CNG algorithm identifier — one of ``BCRYPT_RSA_ALGORITHM``,
+            ``BCRYPT_ECDSA_P256_ALGORITHM``, or ``BCRYPT_ECDSA_P384_ALGORITHM``.
+        key_length: Key size in bits.  Required for RSA (e.g. 2048).
+            Ignored for ECC (key size is implicit in the algorithm).
+        soft_key: If True, use the software KSP instead of the TPM.
+            This is for --soft-key mode (development/testing).
+
+    Returns:
+        An NCrypt key handle (integer).  The caller is responsible for
+        calling ``free_object(handle)`` when done.
+
+    Raises:
+        RuntimeError: if any NCrypt call fails.
+    """
+    ctypes, wintypes, ncrypt = _load_ctypes()
+
+    provider_name = MS_SOFTWARE_KSP if soft_key else MS_PLATFORM_CRYPTO_PROVIDER
+    provider_handle = wintypes.HANDLE()
+    key_handle = wintypes.HANDLE()
+
+    try:
+        # 1. Open the Key Storage Provider.
+        status = ncrypt.NCryptOpenStorageProvider(
+            ctypes.byref(provider_handle),
+            provider_name,
+            0,
+        )
+        if status != 0:
+            raise RuntimeError(f"NCryptOpenStorageProvider('{provider_name}') failed: 0x{status & 0xFFFFFFFF:08X}")
+
+        # 2. Create a persisted key.
+        #    NCryptCreatePersistedKey creates a key handle but does NOT
+        #    persist it until NCryptFinalizeKey is called.
+        #    NCRYPT_OVERWRITE_KEY_FLAG ensures idempotency if the key
+        #    container already exists (e.g. from a failed previous run).
+        status = ncrypt.NCryptCreatePersistedKey(
+            provider_handle,
+            ctypes.byref(key_handle),
+            algorithm,
+            key_name,
+            0,  # dwLegacyKeySpec — 0 for CNG keys
+            _NCRYPT_OVERWRITE_KEY_FLAG,
+        )
+        if status != 0:
+            raise RuntimeError(
+                f"NCryptCreatePersistedKey('{algorithm}', '{key_name}') failed: 0x{status & 0xFFFFFFFF:08X}"
+            )
+
+        # 3. Set key length (RSA only — ECC key size is determined by the
+        #    algorithm identifier, e.g. ECDSA_P256 implies 256 bits).
+        if key_length is not None:
+            length_dword = wintypes.DWORD(key_length)
+            status = ncrypt.NCryptSetProperty(
+                key_handle,
+                "Length",
+                ctypes.byref(length_dword),
+                ctypes.sizeof(length_dword),
+                0,
+            )
+            if status != 0:
+                raise RuntimeError(f"NCryptSetProperty('Length', {key_length}) failed: 0x{status & 0xFFFFFFFF:08X}")
+
+        # 4. Mark the key as non-exportable.
+        #    NCRYPT_ALLOW_EXPORT_FLAG = 0x1 → we set to 0 (no export).
+        export_policy = wintypes.DWORD(0)
+        status = ncrypt.NCryptSetProperty(
+            key_handle,
+            "Export Policy",
+            ctypes.byref(export_policy),
+            ctypes.sizeof(export_policy),
+            0,
+        )
+        if status != 0:
+            raise RuntimeError(f"NCryptSetProperty('Export Policy') failed: 0x{status & 0xFFFFFFFF:08X}")
+
+        # 5. Finalize (persist) the key.
+        #    After this call, the key is stored in the TPM / software KSP
+        #    and survives reboots.
+        status = ncrypt.NCryptFinalizeKey(key_handle, 0)
+        if status != 0:
+            raise RuntimeError(f"NCryptFinalizeKey failed: 0x{status & 0xFFFFFFFF:08X}")
+
+        logger.info(
+            "    TPM key created: '%s' (%s) in %s",
+            key_name,
+            algorithm,
+            provider_name,
+        )
+
+        # Transfer ownership of key_handle to the caller.
+        handle_value = key_handle.value
+        key_handle = wintypes.HANDLE()  # prevent cleanup from freeing it
+        return handle_value
+
+    finally:
+        if key_handle.value:
+            ncrypt.NCryptFreeObject(key_handle)
+        if provider_handle.value:
+            ncrypt.NCryptFreeObject(provider_handle)
+
+
+def export_public_key_pem(key_handle: int, algorithm: str) -> str:
+    """Export the public key from an NCrypt key handle as PEM.
+
+    Calls NCryptExportKey to get the raw BCRYPT blob, then parses the
+    blob into a ``cryptography`` public key object and serializes to PEM.
+
+    Args:
+        key_handle: NCrypt key handle from ``create_tpm_key`` or ``open_key``.
+        algorithm: The CNG algorithm identifier (needed to select the
+            correct blob format — RSA vs ECC).
+
+    Returns:
+        PEM-encoded public key string (SubjectPublicKeyInfo format).
+    """
+    ctypes, wintypes, ncrypt = _load_ctypes()
+
+    # Select the right blob type based on algorithm.
+    if algorithm == BCRYPT_RSA_ALGORITHM:
+        blob_type = BCRYPT_RSAPUBLIC_BLOB
+    else:
+        blob_type = BCRYPT_ECCPUBLIC_BLOB
+
+    handle = wintypes.HANDLE(key_handle)
+
+    # First call: get required buffer size.
+    blob_size = wintypes.DWORD(0)
+    status = ncrypt.NCryptExportKey(
+        handle,
+        None,  # no export key (plaintext export)
+        blob_type,
+        None,  # no parameter list
+        None,  # output buffer (null for size query)
+        0,
+        ctypes.byref(blob_size),
+        0,
+    )
+    if status != 0:
+        raise RuntimeError(f"NCryptExportKey size query failed: 0x{status & 0xFFFFFFFF:08X}")
+
+    # Second call: export into allocated buffer.
+    blob_buffer = (ctypes.c_byte * blob_size.value)()
+    result_size = wintypes.DWORD(0)
+    status = ncrypt.NCryptExportKey(
+        handle,
+        None,
+        blob_type,
+        None,
+        blob_buffer,
+        blob_size.value,
+        ctypes.byref(result_size),
+        0,
+    )
+    if status != 0:
+        raise RuntimeError(f"NCryptExportKey failed: 0x{status & 0xFFFFFFFF:08X}")
+
+    blob_bytes = bytes(blob_buffer[: result_size.value])
+
+    # Parse the BCRYPT blob into a cryptography public key.
+    if algorithm == BCRYPT_RSA_ALGORITHM:
+        pub_key = _parse_rsa_public_blob(blob_bytes)
+    else:
+        pub_key = _parse_ecc_public_blob(blob_bytes, algorithm)
+
+    # Serialize to PEM.
+    pem_bytes = pub_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    return pem_bytes.decode("utf-8")
+
+
+def delete_key(key_name: str, soft_key: bool = False) -> bool:
+    """Delete a persisted key by name.
+
+    Args:
+        key_name: CNG key container name.
+        soft_key: If True, look in the software KSP.
+
+    Returns:
+        True if the key was deleted, False if it didn't exist.
+    """
+    ctypes, wintypes, ncrypt = _load_ctypes()
+
+    provider_name = MS_SOFTWARE_KSP if soft_key else MS_PLATFORM_CRYPTO_PROVIDER
+    provider_handle = wintypes.HANDLE()
+    key_handle = wintypes.HANDLE()
+
+    try:
+        status = ncrypt.NCryptOpenStorageProvider(
+            ctypes.byref(provider_handle),
+            provider_name,
+            0,
+        )
+        if status != 0:
+            return False
+
+        status = ncrypt.NCryptOpenKey(
+            provider_handle,
+            ctypes.byref(key_handle),
+            key_name,
+            0,
+            0,
+        )
+        if status != 0:
+            # Key doesn't exist — nothing to delete.
+            return False
+
+        # NCryptDeleteKey frees the handle AND deletes the key.
+        # Do NOT call NCryptFreeObject on the handle after this.
+        status = ncrypt.NCryptDeleteKey(key_handle, 0)
+        key_handle = wintypes.HANDLE()  # prevent double-free in finally
+        if status != 0:
+            logger.warning(
+                "NCryptDeleteKey('%s') failed: 0x%08X",
+                key_name,
+                status & 0xFFFFFFFF,
+            )
+            return False
+
+        logger.info("    Deleted TPM key: '%s'", key_name)
+        return True
+
+    finally:
+        if key_handle.value:
+            ncrypt.NCryptFreeObject(key_handle)
+        if provider_handle.value:
+            ncrypt.NCryptFreeObject(provider_handle)
+
+
+def open_key(key_name: str, soft_key: bool = False) -> int | None:
+    """Open an existing persisted key by name.
+
+    Args:
+        key_name: CNG key container name.
+        soft_key: If True, look in the software KSP.
+
+    Returns:
+        NCrypt key handle (integer) if found, None if the key doesn't exist.
+        The caller is responsible for calling ``free_object(handle)`` when done.
+    """
+    ctypes, wintypes, ncrypt = _load_ctypes()
+
+    provider_name = MS_SOFTWARE_KSP if soft_key else MS_PLATFORM_CRYPTO_PROVIDER
+    provider_handle = wintypes.HANDLE()
+    key_handle = wintypes.HANDLE()
+
+    try:
+        status = ncrypt.NCryptOpenStorageProvider(
+            ctypes.byref(provider_handle),
+            provider_name,
+            0,
+        )
+        if status != 0:
+            return None
+
+        status = ncrypt.NCryptOpenKey(
+            provider_handle,
+            ctypes.byref(key_handle),
+            key_name,
+            0,
+            0,
+        )
+        if status != 0:
+            return None
+
+        handle_value = key_handle.value
+        key_handle = wintypes.HANDLE()  # prevent cleanup
+        return handle_value
+
+    finally:
+        if key_handle.value:
+            ncrypt.NCryptFreeObject(key_handle)
+        if provider_handle.value:
+            ncrypt.NCryptFreeObject(provider_handle)
+
+
+def free_object(handle: int) -> None:
+    """Free an NCrypt handle (key or provider).
+
+    Safe to call with 0 or None — does nothing.
+    """
+    if not handle:
+        return
+    _, wintypes, ncrypt = _load_ctypes()
+    ncrypt.NCryptFreeObject(wintypes.HANDLE(handle))
+
+
+# ---------------------------------------------------------------------------
+# BCRYPT blob parsers (internal)
+# ---------------------------------------------------------------------------
+
+
+def _parse_rsa_public_blob(blob: bytes) -> rsa.RSAPublicKey:
+    """Parse a BCRYPT_RSAPUBLIC_BLOB into a cryptography RSAPublicKey.
+
+    Blob layout (all little-endian):
+      +-------------------------------------------+
+      | BCRYPT_RSAKEY_BLOB header (24 bytes)      |
+      |   Magic        (4 bytes) = 0x31415352     |
+      |   BitLength    (4 bytes)                  |
+      |   cbPublicExp  (4 bytes)                  |
+      |   cbModulus    (4 bytes)                  |
+      |   cbPrime1     (4 bytes) = 0 (public)     |
+      |   cbPrime2     (4 bytes) = 0 (public)     |
+      +-------------------------------------------+
+      | PublicExponent (cbPublicExp bytes)         |
+      | Modulus        (cbModulus bytes)           |
+      +-------------------------------------------+
+
+    Reference:
+      https://learn.microsoft.com/en-us/windows/win32/api/bcrypt/ns-bcrypt-bcrypt_rsakey_blob
+    """
+    if len(blob) < 24:
+        raise ValueError(f"RSA public blob too short: {len(blob)} bytes")
+
+    magic, _bit_length, cb_exp, cb_mod, _cb_p1, _cb_p2 = struct.unpack_from("<6I", blob, 0)
+    if magic != _BCRYPT_RSAPUBLIC_MAGIC:
+        raise ValueError(f"Bad RSA blob magic: 0x{magic:08X}")
+
+    offset = 24
+    exp_bytes = blob[offset : offset + cb_exp]
+    offset += cb_exp
+    mod_bytes = blob[offset : offset + cb_mod]
+
+    exponent = int.from_bytes(exp_bytes, byteorder="big")
+    modulus = int.from_bytes(mod_bytes, byteorder="big")
+
+    return rsa.RSAPublicNumbers(e=exponent, n=modulus).public_key()
+
+
+def _parse_ecc_public_blob(blob: bytes, algorithm: str) -> ec.EllipticCurvePublicKey:
+    """Parse a BCRYPT_ECCPUBLIC_BLOB into a cryptography EllipticCurvePublicKey.
+
+    Blob layout (all little-endian):
+      +-------------------------------------------+
+      | BCRYPT_ECCKEY_BLOB header (8 bytes)       |
+      |   dwMagic  (4 bytes)                      |
+      |   cbKey    (4 bytes) = coordinate size    |
+      +-------------------------------------------+
+      | X coordinate  (cbKey bytes, big-endian)   |
+      | Y coordinate  (cbKey bytes, big-endian)   |
+      +-------------------------------------------+
+
+    Reference:
+      https://learn.microsoft.com/en-us/windows/win32/api/bcrypt/ns-bcrypt-bcrypt_ecckey_blob
+    """
+    if len(blob) < 8:
+        raise ValueError(f"ECC public blob too short: {len(blob)} bytes")
+
+    magic, cb_key = struct.unpack_from("<2I", blob, 0)
+
+    # Select curve based on algorithm.
+    if algorithm == BCRYPT_ECDSA_P256_ALGORITHM:
+        curve: ec.EllipticCurve = ec.SECP256R1()
+        expected_magic = _BCRYPT_ECDSA_PUBLIC_P256_MAGIC
+    elif algorithm == BCRYPT_ECDSA_P384_ALGORITHM:
+        curve = ec.SECP384R1()
+        expected_magic = _BCRYPT_ECDSA_PUBLIC_P384_MAGIC
+    else:
+        raise ValueError(f"Unsupported ECC algorithm: {algorithm}")
+
+    if magic != expected_magic:
+        raise ValueError(f"Bad ECC blob magic: 0x{magic:08X} (expected 0x{expected_magic:08X})")
+
+    offset = 8
+    x_bytes = blob[offset : offset + cb_key]
+    offset += cb_key
+    y_bytes = blob[offset : offset + cb_key]
+
+    x = int.from_bytes(x_bytes, byteorder="big")
+    y = int.from_bytes(y_bytes, byteorder="big")
+
+    return ec.EllipticCurvePublicNumbers(x=x, y=y, curve=curve).public_key()

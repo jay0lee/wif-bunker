@@ -33,6 +33,7 @@ _NCRYPT_CLAIM_KEY_ATTESTATION = 0x00000001
 _AK_KEY_NAME = "wif-bunker-attestation-key"
 _BCRYPT_RSA_ALGORITHM = "RSA"
 _NTE_BAD_KEYSET = 0x80090016  # "keyset does not exist" — key not found
+_PCP_E_KEY_NOT_LOADED = 0x8029040F  # "TPM key is not loaded" — key lacks attestation flag
 
 # Ensures Cert: drive + TPM cmdlets work in both Windows PowerShell 5.1 and PowerShell 7+.
 # Microsoft.PowerShell.Security provides the Cert: drive; PKI provides Import-Certificate.
@@ -479,14 +480,25 @@ def _ncrypt_create_claim(config: WorkloadConfig, key_info: dict | None = None) -
             0,
         )
         if status != 0:
+            unsigned = status & 0xFFFFFFFF
+            if unsigned == _PCP_E_KEY_NOT_LOADED:
+                detail = (
+                    f"NCryptCreateClaim failed: 0x{unsigned:08X} "
+                    "(PCP_E_KEY_NOT_LOADED — the workload key was not created with "
+                    "the attestation capability flag). "
+                    "To fix: delete and re-create the workload identity so the key "
+                    "is generated with attestation support."
+                )
+            else:
+                detail = (
+                    f"NCryptCreateClaim size query failed: 0x{unsigned:08X}. "
+                    "The TPM may not support key attestation with this key type."
+                )
             return (
                 AttestationCheck(
                     name="NCryptCreateClaim attestation",
                     passed=False,
-                    detail=(
-                        f"NCryptCreateClaim size query failed: 0x{status & 0xFFFFFFFF:08X}. "
-                        "The TPM may not support key attestation with this key type."
-                    ),
+                    detail=detail,
                 ),
                 None,
             )

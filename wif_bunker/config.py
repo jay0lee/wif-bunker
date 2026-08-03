@@ -22,7 +22,10 @@ _KEY_ALGORITHMS: dict[str, dict] = {
         "desc": "ECDSA P-256 (default, fastest)",
         "platforms": {"darwin", "win32", "linux"},
         "macos_sc_auth": "p-256-ne",  # sc_auth -k flag
-        "windows_certreq": "ECDSA_P256",  # certreq INF KeyAlgorithm
+        "windows_certreq": "ECDSA_P256",  # certreq INF KeyAlgorithm (legacy)
+        "ncrypt_algo": "ECDSA_P256",  # NCryptCreatePersistedKey algorithm
+        "ncrypt_key_length": None,  # ECC key length is implicit in algorithm
+        "ncrypt_cng_class": "ECDsaCng",  # .NET class for CopyWithPrivateKey
         "linux_tpm2": "ecc256",  # tpm2_ptool --algorithm
     },
     "es384": {
@@ -30,6 +33,9 @@ _KEY_ALGORITHMS: dict[str, dict] = {
         "platforms": {"darwin", "win32", "linux"},
         "macos_sc_auth": "p-384-ne",
         "windows_certreq": "ECDSA_P384",
+        "ncrypt_algo": "ECDSA_P384",
+        "ncrypt_key_length": None,
+        "ncrypt_cng_class": "ECDsaCng",
         "linux_tpm2": "ecc384",
     },
     "rsa2048": {
@@ -37,6 +43,9 @@ _KEY_ALGORITHMS: dict[str, dict] = {
         "platforms": {"win32", "linux"},
         "windows_certreq": "RSA",
         "windows_key_length": 2048,
+        "ncrypt_algo": "RSA",
+        "ncrypt_key_length": 2048,
+        "ncrypt_cng_class": "RSACng",
         "linux_tpm2": "rsa2048",
     },
     "rsa3072": {
@@ -44,6 +53,9 @@ _KEY_ALGORITHMS: dict[str, dict] = {
         "platforms": {"win32", "linux"},
         "windows_certreq": "RSA",
         "windows_key_length": 3072,
+        "ncrypt_algo": "RSA",
+        "ncrypt_key_length": 3072,
+        "ncrypt_cng_class": "RSACng",
         "linux_tpm2": "rsa3072",
     },
     "rsa4096": {
@@ -51,6 +63,9 @@ _KEY_ALGORITHMS: dict[str, dict] = {
         "platforms": {"win32", "linux"},
         "windows_certreq": "RSA",
         "windows_key_length": 4096,
+        "ncrypt_algo": "RSA",
+        "ncrypt_key_length": 4096,
+        "ncrypt_cng_class": "RSACng",
         "linux_tpm2": "rsa4096",
     },
 }

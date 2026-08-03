@@ -38,16 +38,19 @@ class TestCertGenerationCommandConstruction:
         assert _PS_CERT_PREAMBLE in cmd[3]
         assert "Microsoft.PowerShell.Security" in cmd[3]
 
+    @patch("wif_bunker.keystore.windows.ncrypt")
     @patch("wif_bunker.keystore.windows._require_command")
     @patch("wif_bunker.keystore.windows.subprocess.run")
-    def test_certreq_not_removed(self, mock_run, mock_require, sample_config):
+    def test_certreq_not_required(self, mock_run, mock_require, mock_ncrypt, sample_config):
+        """certreq is no longer needed — NCrypt ctypes replaced it."""
         try:
             _generate_cert_windows(sample_config)
         except Exception:
             pass
 
         called_commands = [call.args[0] for call in mock_require.call_args_list]
-        assert "certreq" in called_commands
+        assert "certreq" not in called_commands
+        assert "powershell" in called_commands
 
     @patch("wif_bunker.keystore.windows._require_command")
     @patch("wif_bunker.keystore.windows.subprocess.run")

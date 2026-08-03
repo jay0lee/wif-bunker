@@ -16,6 +16,9 @@ def config():
         "linux_tpm2": "ecc256",
         "windows_certreq": "ECDSA_P256",
         "windows_key_length": "256",
+        "ncrypt_algo": "ECDSA_P256",
+        "ncrypt_key_length": None,
+        "ncrypt_cng_class": "ECDsaCng",
     }
     cfg.linux_tpm_pin = "1234"
     cfg.soft_key = False
@@ -255,20 +258,17 @@ class TestLinuxKeystoreFlow:
 
 
 class TestWindowsKeystoreErrorPaths:
+    @patch("wif_bunker.keystore.windows.ncrypt")
     @patch("wif_bunker.keystore.windows._require_command")
     @patch("wif_bunker.keystore.windows.subprocess.run")
-    def test_certreq_failure_raises(self, mock_run, mock_require, config):
+    def test_ncrypt_failure_raises(self, mock_run, mock_require, mock_ncrypt, config):
         from wif_bunker.keystore.windows import _generate_cert_windows
 
-        def side_effect(*args, **kwargs):
-            cmd = args[0]
-            if cmd[0] == "certreq" and cmd[1] == "-new":
-                raise subprocess.CalledProcessError(returncode=1, cmd=cmd, stderr="certreq failed error")
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="")
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        mock_ncrypt.delete_key.return_value = False
+        mock_ncrypt.create_tpm_key.side_effect = RuntimeError("NCryptCreatePersistedKey failed: 0x80090020")
 
-        mock_run.side_effect = side_effect
-
-        with pytest.raises(RuntimeError, match="certreq failed error"):
+        with pytest.raises(RuntimeError, match="NCryptCreatePersistedKey"):
             _generate_cert_windows(config)
 
 

@@ -42,11 +42,13 @@ def _create_ca_and_sign(
         (CertificateBundle, workload_cert_pem) — the bundle for GCP plus
         the CA-signed workload cert PEM to install in the OS keystore.
     """
-    # Extract the public key from either a CSR or a self-signed cert
+    # Extract the public key from a CSR, self-signed cert, or raw public key
     pem_bytes = hw_public_key_pem.encode()
     if b"CERTIFICATE REQUEST" in pem_bytes:
         csr = cx509.load_pem_x509_csr(pem_bytes)
         workload_pub_key = csr.public_key()
+    elif b"PUBLIC KEY" in pem_bytes:
+        workload_pub_key = serialization.load_pem_public_key(pem_bytes)
     else:
         cert = cx509.load_pem_x509_certificate(pem_bytes)
         workload_pub_key = cert.public_key()

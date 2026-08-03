@@ -1,9 +1,15 @@
-"""Windows CNG/TPM keystore: key generation via certreq and certificate management."""
+"""Windows CNG/TPM keystore: key generation via NCrypt and certificate management.
+
+Creates TPM-backed keys directly via NCrypt ctypes (no certreq dependency)
+and imports certificates via PowerShell CNG classes.
+"""
 
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -12,7 +18,8 @@ from cryptography.hazmat.primitives import hashes, serialization
 
 from wif_bunker.cert import _create_ca_and_sign
 from wif_bunker.config import CertificateBundle, WorkloadConfig
-from wif_bunker.utils import _UNICODE, SYM_WARN, _require_command
+from wif_bunker.keystore import ncrypt
+from wif_bunker.utils import SYM_WARN, _require_command
 
 # Ensures Cert: drive + PKI cmdlets work in both Windows PowerShell 5.1 and PowerShell 7+.
 # Microsoft.PowerShell.Security provides the Cert: drive; PKI provides Import-Certificate.
@@ -25,22 +32,31 @@ logger = logging.getLogger(__name__)
 
 
 def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
-    """Generates a TPM 2.0-backed certificate via certreq + Microsoft Platform Crypto Provider.
+    """Generates a TPM 2.0-backed certificate via NCrypt + PowerShell.
 
-    Flow (mirrors macOS Secure Enclave approach):
+    Flow:
       1. Clean up stale bunker-workload-* certs from previous runs
-      2. certreq -new request.inf request.csr  → TPM key + CSR (no self-signed cert)
-      3. Ephemeral CA signs the CSR            → CA-signed workload cert
-      4. certreq -accept issued.cer            → associates CA cert with TPM key
+      2. Create TPM key via NCrypt ctypes (with attestation support)
+      3. Export public key from TPM
+      4. Ephemeral CA signs a workload cert for that public key
+      5. PowerShell imports cert + binds it to the TPM key container
+
+    Unlike the previous certreq-based flow, this approach:
+    - Does NOT require certreq.exe
+    - Does NOT install the ephemeral CA into the Root trust store
+    - Does NOT trigger a Windows security dialog
+    - Creates keys that support NCryptCreateClaim attestation
     """
-    # Pre-validate required commands.
-    _require_command(
-        "certreq", install_hint="Built-in Windows command — should be at C:\\Windows\\System32\\certreq.exe"
-    )
     _require_command("powershell", install_hint="Built-in Windows command — ensure PowerShell is on PATH")
+
+    algo = config.key_algo_config
+    ncrypt_algo = algo["ncrypt_algo"]
+    ncrypt_key_length = algo.get("ncrypt_key_length")
+    cng_class = algo["ncrypt_cng_class"]
 
     _tmpdir = tempfile.TemporaryDirectory(prefix="bunker_")  # pylint: disable=consider-using-with
     work_dir = Path(_tmpdir.name)
+    key_handle = None
 
     try:
         # 0. Clean up stale bunker-workload certs from previous runs.
@@ -57,178 +73,180 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
         )
         logger.info("    Cleaned up stale bunker-workload certs from CurrentUser store.")
 
-        # 1. Write certreq INF.
-        algo = config.key_algo_config
+        # Also clean up any stale NCrypt key container with the same name.
+        ncrypt.delete_key(config.workload_cn, soft_key=config.soft_key)
+
+        # 1. Create TPM key via NCrypt ctypes.
         if config.soft_key:
-            provider = "Microsoft Software Key Storage Provider"
             logger.warning(
                 "    %s  --soft-key: using software keys (NOT TPM-backed). "
                 "For production use, remove --soft-key to use the TPM.",
                 SYM_WARN,
             )
-        else:
-            provider = "Microsoft Platform Crypto Provider"
-        inf_path = work_dir / "request.inf"
-        inf_lines = [
-            "[Version]",
-            'Signature="$Windows NT$"',
-            "",
-            "[NewRequest]",
-            f'Subject = "CN={config.workload_cn}"',
-            f"KeyAlgorithm = {algo['windows_certreq']}",
-            "HashAlgorithm = SHA256",
-            f'ProviderName = "{provider}"',
-            "Exportable = FALSE",
-            "MachineKeySet = FALSE",
-            "RequestType = PKCS10",
-            "KeyUsage = 0x80",  # CERT_DIGITAL_SIGNATURE_KEY_USAGE
-        ]
-        if "windows_key_length" in algo:
-            inf_lines.append(f"KeyLength = {algo['windows_key_length']}")
-        inf_path.write_text("\n".join(inf_lines) + "\n")
-
-        # 2. Generate TPM key pair + CSR via certreq.
-        csr_path = work_dir / "request.csr"
-        result = subprocess.run(
-            ["certreq", "-new", "-f", str(inf_path), str(csr_path)],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        if not csr_path.exists():
-            raise FileNotFoundError(
-                f"CSR not found at {csr_path} after certreq -new. stdout: {result.stdout}, stderr: {result.stderr}"
-            )
-        csr_pem = csr_path.read_text().strip()
-        logger.info("    TPM key created and CSR generated: %s", config.workload_cn)
-
-        # 3. Ephemeral CA signs the CSR → CA-signed workload cert.
-        bundle, workload_pem = _create_ca_and_sign(csr_pem, config)
-
-        # 4. Install CA cert into trusted root store so certreq -accept
-        #    can validate the chain.  This triggers a Windows security
-        #    dialog — the user must click Yes.  We verify afterward.
-        logger.warning("")
-        if _UNICODE:
-            logger.warning(
-                "    \u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557"
-            )
-            logger.warning("    \u2551  ATTENTION: A Windows Security dialog will appear.      \u2551")
-            logger.warning("    \u2551  You MUST click YES to install the ephemeral CA cert.    \u2551")
-            logger.warning("    \u2551                                                          \u2551")
-            logger.warning("    \u2551  \u26a0  The dialog may appear BEHIND this window.            \u2551")
-            logger.warning("    \u2551     Check your taskbar for a 'Security Warning' prompt.  \u2551")
-            logger.warning(
-                "    \u255a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255d"
-            )
-        else:
-            logger.warning("    +------------------------------------------------------------+")
-            logger.warning("    |  ATTENTION: A Windows Security dialog will appear.      |")
-            logger.warning("    |  You MUST click YES to install the ephemeral CA cert.    |")
-            logger.warning("    |                                                          |")
-            logger.warning("    |  !!  The dialog may appear BEHIND this window.            |")
-            logger.warning("    |     Check your taskbar for a 'Security Warning' prompt.  |")
-            logger.warning("    +------------------------------------------------------------+")
-        logger.warning("")
-        ca_cert_obj = cx509.load_pem_x509_certificate(bundle.trust_anchor_pem.encode())
-        ca_der_path = work_dir / "ca.der"
-        ca_der_path.write_bytes(ca_cert_obj.public_bytes(serialization.Encoding.DER))
-        # Windows thumbprints are always SHA1 — this is not a security choice
-        ca_thumbprint = ca_cert_obj.fingerprint(hashes.SHA1()).hex().upper()
-        ps_install_ca = f"{_PS_CERT_PREAMBLE}Import-Certificate -FilePath '{ca_der_path}' -CertStoreLocation 'Cert:\\CurrentUser\\Root'"
-
-        # Import-Certificate MUST run without capture_output so Windows can
-        # display the root CA trust security dialog. Capturing stdout/stderr
-        # causes Windows to suppress the GUI prompt entirely.
-        subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps_install_ca],
-            check=True,
+        key_handle = ncrypt.create_tpm_key(
+            key_name=config.workload_cn,
+            algorithm=ncrypt_algo,
+            key_length=ncrypt_key_length,
+            soft_key=config.soft_key,
         )
 
-        # Verify the CA was actually accepted.
-        ps_verify_ca = (
-            f"{_PS_CERT_PREAMBLE}"
-            f"(Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object {{ $_.Thumbprint -eq '{ca_thumbprint}' }}).Count"
-        )
-        verify_result = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps_verify_ca],
-            capture_output=True,
-            text=True,
-        )
-        if verify_result.stdout.strip() != "1":
-            raise RuntimeError(
-                "Ephemeral CA was not added to the trusted root store. "
-                "You must click YES on the Windows security dialog to proceed."
-            )
-        logger.info("    Ephemeral CA added to trusted root store.")
+        # 2. Export public key from TPM.
+        pub_key_pem = ncrypt.export_public_key_pem(key_handle, ncrypt_algo)
+        logger.info("    Public key exported from TPM: %s", config.workload_cn)
 
-        # 5. certreq -accept associates the cert with the existing TPM key
-        #    in Cert:\CurrentUser\My, replacing the pending request.
+        # 3. Ephemeral CA signs a workload cert using the TPM's public key.
+        bundle, workload_pem = _create_ca_and_sign(pub_key_pem, config)
+
+        # 4. Import cert + bind to TPM key via PowerShell.
+        #    Uses .NET CNG classes to associate the cert with the NCrypt
+        #    key container — no certreq needed, no security dialog.
         issued_cert_path = work_dir / "issued.cer"
-        issued_cert_path.write_text(workload_pem)
+        workload_cert_obj = cx509.load_pem_x509_certificate(workload_pem.encode())
+        issued_cert_path.write_bytes(workload_cert_obj.public_bytes(serialization.Encoding.DER))
+
+        provider_class = (
+            "[System.Security.Cryptography.CngProvider]::MicrosoftSoftwareKeyStorageProvider"
+            if config.soft_key
+            else "[System.Security.Cryptography.CngProvider]::MicrosoftPlatformCryptoProvider"
+        )
+
+        # Build PowerShell script to bind cert to TPM key.
+        # CopyWithPrivateKey creates a new X509Certificate2 with the
+        # private key association — this is the .NET equivalent of
+        # certreq -accept but without the chain validation requirement.
+        ps_import = (
+            f"{_PS_CERT_PREAMBLE}"
+            f"$certBytes = [System.IO.File]::ReadAllBytes('{issued_cert_path}'); "
+            f"$cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certBytes); "
+            f"$cngKey = [System.Security.Cryptography.CngKey]::Open("
+            f"'{config.workload_cn}', {provider_class}); "
+            f"$key = [System.Security.Cryptography.{cng_class}]::new($cngKey); "
+        )
+
+        # CopyWithPrivateKey is an extension method — call it via the
+        # static extension class for PowerShell 5.1 compatibility.
+        if cng_class == "RSACng":
+            ps_import += (
+                "$certWithKey = [System.Security.Cryptography.X509Certificates."
+                "RSACertificateExtensions]::CopyWithPrivateKey($cert, $key); "
+            )
+        else:
+            ps_import += (
+                "$certWithKey = [System.Security.Cryptography.X509Certificates."
+                "ECDsaCertificateExtensions]::CopyWithPrivateKey($cert, $key); "
+            )
+
+        ps_import += (
+            "$store = [System.Security.Cryptography.X509Certificates.X509Store]"
+            "::new('My', 'CurrentUser'); "
+            "$store.Open('ReadWrite'); "
+            "$store.Add($certWithKey); "
+            "$store.Close()"
+        )
+
         subprocess.run(
-            ["certreq", "-accept", str(issued_cert_path)],
+            ["powershell", "-NoProfile", "-Command", ps_import],
             capture_output=True,
             text=True,
             check=True,
         )
         logger.info("    CA-signed cert associated with TPM key in CurrentUser store.")
 
-        # 6. Remove the ephemeral CA from trusted root store.
-        #    On Windows, this triggers a Security Warning dialog
-        #    requiring user confirmation (same as import).
-        logger.info("    Removing ephemeral CA from trusted root store...")
-        ps_delete_ca = (
+        # 5. Verify the cert was imported successfully.
+        workload_thumbprint = workload_cert_obj.fingerprint(hashes.SHA1()).hex().upper()
+        ps_verify = (
             f"{_PS_CERT_PREAMBLE}"
-            f"Get-ChildItem Cert:\\CurrentUser\\Root | "
-            f"Where-Object {{ $_.Thumbprint -eq '{ca_thumbprint}' }} | "
-            f"Remove-Item -Force"
-        )
-        subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps_delete_ca],
+            f"@(Get-ChildItem Cert:\\CurrentUser\\My | "
+            f"Where-Object {{ $_.Thumbprint -eq '{workload_thumbprint}' }}).Count"
         )
         verify_result = subprocess.run(
-            [
-                "powershell",
-                "-NoProfile",
-                "-Command",
-                f"{_PS_CERT_PREAMBLE}@(Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object Thumbprint -eq '{ca_thumbprint}').Count",
-            ],
+            ["powershell", "-NoProfile", "-Command", ps_verify],
             capture_output=True,
             text=True,
         )
-        if verify_result.stdout.strip() == "0":
-            logger.info("    Ephemeral CA removed from trusted root store.")
-        else:
-            logger.warning(
-                "    Ephemeral CA may still be in Cert:\\CurrentUser\\Root "
-                "(thumbprint: %s). Remove it manually if needed.",
-                ca_thumbprint,
+        if verify_result.stdout.strip() != "1":
+            raise RuntimeError(
+                f"Workload cert was not found in CurrentUser\\My store "
+                f"after import (thumbprint: {workload_thumbprint})."
             )
 
         return bundle
 
     except subprocess.CalledProcessError as exc:
         stderr = (exc.stderr or "").strip()
-        cmd_name = exc.cmd[0] if isinstance(exc.cmd, list) else str(exc.cmd)
-        if "NTE_DEVICE_NOT_FOUND" in stderr:
-            raise RuntimeError(
-                f"No TPM device found (command: {cmd_name}).\n"
-                "Windows could not find a TPM on this system.\n"
-                "\n"
-                "  Use --soft-key for software-only keys (no TPM required).\n"
-                "  NOTE: --soft-key does NOT provide hardware TPM protection."
-            ) from exc
-        if "NTE_NOT_SUPPORTED" in stderr:
-            raise RuntimeError(
-                f"TPM does not support the requested algorithm (command: {cmd_name}).\n"
-                "  Try a different --key-algorithm (e.g. es256 or rsa2048)."
-            ) from exc
         raise RuntimeError(
-            f"Windows certificate generation failed (command: {cmd_name}, "
+            f"Windows certificate generation failed (PowerShell, "
             f"exit code: {exc.returncode}).\n"
             f"  stdout: {(exc.stdout or '')[:300]}\n"
             f"  stderr: {stderr[:500]}"
         ) from exc
+    except RuntimeError:
+        # Re-raise RuntimeError directly (from ncrypt.py or our own checks)
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"Windows certificate generation failed: {exc}") from exc
     finally:
+        if key_handle is not None:
+            ncrypt.free_object(key_handle)
         _tmpdir.cleanup()
+
+
+def _find_ecp_binaries() -> tuple[Path, Path, Path]:
+    """Locates pre-installed ECP binaries.
+
+    Search order:
+      1. Bundled alongside the wif-bunker binary (<binary_dir>/ecp/)
+      2. Default platform location (~/.config/bunker-ecp or %LOCALAPPDATA%\\Google\\ECP)
+
+    Returns:
+        (ecp_binary, ecp_client_lib, tls_offload_lib) paths.
+
+    Raises:
+        FileNotFoundError: if ECP binaries are not found in any location.
+    """
+    from get_ecp import get_default_ecp_dir, get_ecp_binary_names  # pylint: disable=import-outside-toplevel
+
+    ecp_bin_name, libecp_name, tls_offload_name = get_ecp_binary_names()
+
+    # Determine the directory containing the wif-bunker binary.
+    if getattr(sys, "frozen", False):
+        binary_dir = Path(sys.executable).parent
+    else:
+        binary_dir = Path(__file__).parent
+
+    # Search locations in priority order.
+    search_dirs = [
+        binary_dir / "ecp",  # Bundled alongside binary
+        get_default_ecp_dir(),  # Platform default
+    ]
+
+    for ecp_dir in search_dirs:
+        ecp_bin = ecp_dir / ecp_bin_name
+        client = ecp_dir / libecp_name
+        offload = ecp_dir / tls_offload_name
+        if ecp_bin.exists() and client.exists() and offload.exists():
+            logger.info("    Using ECP binaries from %s", ecp_dir)
+            _add_ecp_to_path(ecp_dir)
+            return ecp_bin, client, offload
+
+    raise FileNotFoundError(
+        "ECP binaries not found. Install them with:\n"
+        "    python get_ecp.py\n"
+        "\n"
+        f"Searched: {[str(d) for d in search_dirs]}"
+    )
+
+
+def _add_ecp_to_path(ecp_dir: Path) -> None:
+    """Ensures the ECP binary directory is discoverable for DLL loading."""
+    ecp_dir_str = str(ecp_dir)
+
+    # os.add_dll_directory() is the ONLY mechanism that works on
+    # Python 3.8+ for DLL dependency resolution on Windows.
+    if sys.platform == "win32" and ecp_dir.is_dir():
+        os.add_dll_directory(ecp_dir_str)
+
+    # Also add to PATH for the current process.
+    current_path = os.environ.get("PATH", "")
+    if ecp_dir_str not in current_path:
+        os.environ["PATH"] = ecp_dir_str + os.pathsep + current_path
