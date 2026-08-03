@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 
 from cryptography import x509 as cx509
-from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives import hashes, serialization
 
 from wif_bunker.cert import _create_ca_and_sign
 from wif_bunker.config import CertificateBundle, WorkloadConfig
@@ -115,7 +115,8 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
         ca_cert_obj = cx509.load_pem_x509_certificate(bundle.trust_anchor_pem.encode())
         ca_der_path = work_dir / "ca.der"
         ca_der_path.write_bytes(ca_cert_obj.public_bytes(serialization.Encoding.DER))
-        ca_thumbprint = ca_cert_obj.fingerprint(ca_cert_obj.signature_hash_algorithm).hex().upper()
+        # Windows thumbprints are always SHA1 — this is not a security choice
+        ca_thumbprint = ca_cert_obj.fingerprint(hashes.SHA1()).hex().upper()
         ps_install_ca = f"Import-Certificate -FilePath '{ca_der_path}' -CertStoreLocation 'Cert:\\CurrentUser\\Root'"
 
         # Import-Certificate MUST run without capture_output so Windows can
