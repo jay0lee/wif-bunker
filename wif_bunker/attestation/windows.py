@@ -27,6 +27,13 @@ _MS_PLATFORM_CRYPTO_PROVIDER = "Microsoft Platform Crypto Provider"
 _MS_SOFTWARE_KSP = "Microsoft Software Key Storage Provider"
 _NCRYPT_CLAIM_KEY_ATTESTATION = 0x00000001
 
+# Attestation Key (AK) — a persistent RSA 2048 key in the TPM that signs
+# attestation claims.  NCryptCreateClaim requires an "authority key" handle;
+# without one the call fails on many TPMs (notably Dell/Nuvoton).
+_AK_KEY_NAME = "wif-bunker-attestation-key"
+_BCRYPT_RSA_ALGORITHM = "RSA"
+_NTE_BAD_KEYSET = 0x80090016  # "keyset does not exist" — key not found
+
 # Ensures Cert: drive + TPM cmdlets work in both Windows PowerShell 5.1 and PowerShell 7+.
 # Microsoft.PowerShell.Security provides the Cert: drive; PKI provides Import-Certificate.
 _PS_PREAMBLE = (
@@ -277,11 +284,85 @@ def _check_key_provider(config: WorkloadConfig) -> tuple[AttestationCheck, dict 
     )
 
 
+def _get_or_create_ak(ncrypt, ctypes, wintypes, provider_handle):
+    """Get or create a persistent Attestation Key (AK) in the TPM.
+
+    NCryptCreateClaim requires an "authority key" (the AK) to sign the
+    attestation claim.  The AK is a persistent RSA 2048 key stored in the
+    Platform Crypto Provider.  It is created once and reused on subsequent
+    attestation calls.
+
+    Returns:
+        A tuple of (ak_handle, error_detail).  On success error_detail is
+        None; on failure ak_handle is None and error_detail explains why.
+    """
+    ak_handle = wintypes.HANDLE()
+
+    # Try to open an existing AK first.
+    status = ncrypt.NCryptOpenKey(
+        provider_handle,
+        ctypes.byref(ak_handle),
+        _AK_KEY_NAME,
+        0,
+        0,
+    )
+    if status == 0:
+        logger.debug("Opened existing attestation key '%s'", _AK_KEY_NAME)
+        return ak_handle, None
+
+    # Convert to unsigned 32-bit for comparison (NCrypt returns SECURITY_STATUS
+    # which is a signed LONG; Python may interpret it as negative).
+    unsigned_status = status & 0xFFFFFFFF
+    if unsigned_status != _NTE_BAD_KEYSET:
+        return None, f"NCryptOpenKey for AK failed unexpectedly: 0x{unsigned_status:08X}"
+
+    # AK doesn't exist yet — create a persistent RSA 2048 key in the TPM.
+    logger.info("Creating attestation key '%s' in TPM (one-time operation)", _AK_KEY_NAME)
+    ak_handle = wintypes.HANDLE()
+    status = ncrypt.NCryptCreatePersistedKey(
+        provider_handle,
+        ctypes.byref(ak_handle),
+        _BCRYPT_RSA_ALGORITHM,
+        _AK_KEY_NAME,
+        0,  # dwLegacyKeySpec — 0 for CNG keys
+        0,  # dwFlags
+    )
+    if status != 0:
+        return None, f"NCryptCreatePersistedKey for AK failed: 0x{status & 0xFFFFFFFF:08X}"
+
+    # Set key length to 2048 bits.
+    key_length = wintypes.DWORD(2048)
+    status = ncrypt.NCryptSetProperty(
+        ak_handle,
+        "Length",
+        ctypes.byref(key_length),
+        ctypes.sizeof(key_length),
+        0,
+    )
+    if status != 0:
+        ncrypt.NCryptFreeObject(ak_handle)
+        return None, f"NCryptSetProperty(Length) for AK failed: 0x{status & 0xFFFFFFFF:08X}"
+
+    # Finalize (persist) the key in the TPM.
+    status = ncrypt.NCryptFinalizeKey(ak_handle, 0)
+    if status != 0:
+        ncrypt.NCryptFreeObject(ak_handle)
+        return None, f"NCryptFinalizeKey for AK failed: 0x{status & 0xFFFFFFFF:08X}"
+
+    logger.info("Attestation key '%s' created successfully", _AK_KEY_NAME)
+    return ak_handle, None
+
+
 def _ncrypt_create_claim(config: WorkloadConfig, key_info: dict | None = None) -> tuple[AttestationCheck, bytes | None]:
     """Create a TPM key attestation claim via NCrypt ctypes FFI.
 
     Uses NCryptCreateClaim with NCRYPT_CLAIM_KEY_ATTESTATION to produce
-    a cryptographic proof that the key resides in the TPM.
+    a cryptographic proof that the workload key resides in the TPM.
+
+    The call requires two key handles:
+    - **Subject key**: the workload key being attested
+    - **Authority key (AK)**: a persistent RSA 2048 key in the TPM that
+      signs the attestation claim.  Created automatically on first use.
 
     Args:
         config: Workload configuration.
@@ -316,6 +397,7 @@ def _ncrypt_create_claim(config: WorkloadConfig, key_info: dict | None = None) -
 
     provider_handle = wintypes.HANDLE()
     key_handle = wintypes.HANDLE()
+    ak_handle = None
 
     if not key_info:
         return (
@@ -347,7 +429,7 @@ def _ncrypt_create_claim(config: WorkloadConfig, key_info: dict | None = None) -
                 None,
             )
 
-        # Open the key using the actual CNG container name (not the cert CN)
+        # Open the subject key (the workload key being attested)
         status = ncrypt.NCryptOpenKey(
             provider_handle,
             ctypes.byref(key_handle),
@@ -367,13 +449,28 @@ def _ncrypt_create_claim(config: WorkloadConfig, key_info: dict | None = None) -
                 None,
             )
 
-        # Create attestation claim
+        # Get or create the Attestation Key (AK) — required as the
+        # "authority" that signs the claim.  Without this, NCryptCreateClaim
+        # fails on Dell/Nuvoton TPMs (and potentially others).
+        ak_handle, ak_error = _get_or_create_ak(ncrypt, ctypes, wintypes, provider_handle)
+        if ak_error:
+            return (
+                AttestationCheck(
+                    name="NCryptCreateClaim attestation",
+                    passed=False,
+                    detail=f"Could not provision attestation key (AK): {ak_error}",
+                ),
+                None,
+            )
+
+        # Create attestation claim — the AK signs a proof that the subject
+        # key is genuinely inside the TPM.
         claim_size = wintypes.DWORD(0)
 
         # First call to get required buffer size
         status = ncrypt.NCryptCreateClaim(
             key_handle,
-            None,  # no additional key
+            ak_handle,  # authority key signs the claim
             _NCRYPT_CLAIM_KEY_ATTESTATION,
             None,  # no parameters
             None,  # output buffer (null for size query)
@@ -387,8 +484,8 @@ def _ncrypt_create_claim(config: WorkloadConfig, key_info: dict | None = None) -
                     name="NCryptCreateClaim attestation",
                     passed=False,
                     detail=(
-                        f"NCryptCreateClaim size query failed: 0x{status:08X}. "
-                        "This is expected for software keys (--soft-key)."
+                        f"NCryptCreateClaim size query failed: 0x{status & 0xFFFFFFFF:08X}. "
+                        "The TPM may not support key attestation with this key type."
                     ),
                 ),
                 None,
@@ -399,7 +496,7 @@ def _ncrypt_create_claim(config: WorkloadConfig, key_info: dict | None = None) -
         result_size = wintypes.DWORD(0)
         status = ncrypt.NCryptCreateClaim(
             key_handle,
-            None,
+            ak_handle,
             _NCRYPT_CLAIM_KEY_ATTESTATION,
             None,
             claim_buffer,
@@ -412,7 +509,7 @@ def _ncrypt_create_claim(config: WorkloadConfig, key_info: dict | None = None) -
                 AttestationCheck(
                     name="NCryptCreateClaim attestation",
                     passed=False,
-                    detail=f"NCryptCreateClaim failed: 0x{status:08X}",
+                    detail=f"NCryptCreateClaim failed: 0x{status & 0xFFFFFFFF:08X}",
                 ),
                 None,
             )
@@ -431,6 +528,8 @@ def _ncrypt_create_claim(config: WorkloadConfig, key_info: dict | None = None) -
         )
 
     finally:
+        if ak_handle is not None and getattr(ak_handle, "value", 0):
+            ncrypt.NCryptFreeObject(ak_handle)
         if key_handle.value:  # pylint: disable=using-constant-test
             ncrypt.NCryptFreeObject(key_handle)
         if provider_handle.value:  # pylint: disable=using-constant-test

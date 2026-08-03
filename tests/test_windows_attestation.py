@@ -11,12 +11,14 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
 from wif_bunker.attestation.windows import (
+    _NTE_BAD_KEYSET,
     _PS_PREAMBLE,
     _check_ek_info,
     _check_exportability,
     _check_key_provider,
     _check_tpm_status,
     _extract_ek_certificate,
+    _get_or_create_ak,
     _ncrypt_create_claim,
     _run_powershell,
 )
@@ -269,21 +271,19 @@ class TestNcryptCreateClaim:
         import sys
 
         mock_ctypes = sys.modules["ctypes"]
-        # Configure mock specifically for ncrypt calls to fail gracefully and track arguments
         mock_ncrypt = MagicMock()
         mock_ctypes.windll.ncrypt = mock_ncrypt
         mock_ncrypt.NCryptOpenStorageProvider.return_value = 0
-        mock_ncrypt.NCryptOpenKey.return_value = 1  # Make it fail to return early
+        # First NCryptOpenKey is for the subject key — make it fail to return early
+        mock_ncrypt.NCryptOpenKey.return_value = 1
 
         check, _blob = _ncrypt_create_claim(sample_config, key_info=key_info)
 
         assert check.passed is False
 
-        # Check that NCryptOpenKey was called with the key_name from key_info
-        mock_ncrypt.NCryptOpenKey.assert_called_once()
-        args = mock_ncrypt.NCryptOpenKey.call_args[0]
-        # args[2] is the key name (pszKeyName)
-        assert args[2] == "{THE-KEY-NAME}"
+        # First NCryptOpenKey call should be for the subject key name
+        first_call_args = mock_ncrypt.NCryptOpenKey.call_args_list[0][0]
+        assert first_call_args[2] == "{THE-KEY-NAME}"
 
 
 class TestCheckTpmStatusMalformedJson:
@@ -342,3 +342,74 @@ class TestNcryptCreateClaimEdgeCases:
         assert check.passed is False
         assert "Skipped" in check.detail
         assert blob is None
+
+
+class TestGetOrCreateAk:
+    """Tests for _get_or_create_ak attestation key provisioning."""
+
+    def test_opens_existing_ak(self):
+        """If AK already exists, NCryptOpenKey returns 0 and we reuse it."""
+        mock_ncrypt = MagicMock()
+        mock_ctypes = MagicMock()
+        mock_wintypes = MagicMock()
+        mock_provider = MagicMock()
+
+        mock_ncrypt.NCryptOpenKey.return_value = 0
+
+        ak_handle, error = _get_or_create_ak(mock_ncrypt, mock_ctypes, mock_wintypes, mock_provider)
+
+        assert error is None
+        assert ak_handle is not None
+        # Should NOT have tried to create a new key
+        mock_ncrypt.NCryptCreatePersistedKey.assert_not_called()
+
+    def test_creates_new_ak_when_not_found(self):
+        """If AK doesn't exist (NTE_BAD_KEYSET), creates a new RSA 2048 key."""
+        mock_ncrypt = MagicMock()
+        mock_ctypes = MagicMock()
+        mock_wintypes = MagicMock()
+        mock_provider = MagicMock()
+
+        # NCryptOpenKey returns NTE_BAD_KEYSET (key not found)
+        # Python ctypes may return this as negative signed int
+        mock_ncrypt.NCryptOpenKey.return_value = _NTE_BAD_KEYSET
+        mock_ncrypt.NCryptCreatePersistedKey.return_value = 0
+        mock_ncrypt.NCryptSetProperty.return_value = 0
+        mock_ncrypt.NCryptFinalizeKey.return_value = 0
+
+        _ak_handle, error = _get_or_create_ak(mock_ncrypt, mock_ctypes, mock_wintypes, mock_provider)
+
+        assert error is None
+        # Verify key creation was called
+        mock_ncrypt.NCryptCreatePersistedKey.assert_called_once()
+        # Verify key was finalized
+        mock_ncrypt.NCryptFinalizeKey.assert_called_once()
+
+    def test_creation_failure_returns_error(self):
+        """If NCryptCreatePersistedKey fails, returns a clear error."""
+        mock_ncrypt = MagicMock()
+        mock_ctypes = MagicMock()
+        mock_wintypes = MagicMock()
+        mock_provider = MagicMock()
+
+        mock_ncrypt.NCryptOpenKey.return_value = _NTE_BAD_KEYSET
+        mock_ncrypt.NCryptCreatePersistedKey.return_value = 0x80090020  # some error
+
+        ak_handle, error = _get_or_create_ak(mock_ncrypt, mock_ctypes, mock_wintypes, mock_provider)
+
+        assert ak_handle is None
+        assert "NCryptCreatePersistedKey for AK failed" in error
+
+    def test_unexpected_open_error_returns_error(self):
+        """If NCryptOpenKey fails with unexpected error (not NTE_BAD_KEYSET), returns error."""
+        mock_ncrypt = MagicMock()
+        mock_ctypes = MagicMock()
+        mock_wintypes = MagicMock()
+        mock_provider = MagicMock()
+
+        mock_ncrypt.NCryptOpenKey.return_value = 0x80090005  # NTE_BAD_DATA or similar
+
+        ak_handle, error = _get_or_create_ak(mock_ncrypt, mock_ctypes, mock_wintypes, mock_provider)
+
+        assert ak_handle is None
+        assert "NCryptOpenKey for AK failed unexpectedly" in error

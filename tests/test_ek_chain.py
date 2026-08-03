@@ -285,3 +285,92 @@ class TestVerifyEkChainIntermediates:
         monkeypatch.setattr("wif_bunker.attestation.base.__file__", str(tmp_path / "base.py"))
         result = verify_ek_chain(ek_pem)
         assert result.passed is False
+
+
+class TestPyOpenSSLFallback:
+    """Tests for the pyOpenSSL-based fallback when cryptography's strict parser rejects a cert."""
+
+    def test_load_cert_lenient_normal_path(self):
+        """_load_cert_lenient succeeds via cryptography for well-formed certs."""
+        from wif_bunker.attestation.base import _load_cert_lenient
+
+        _, ek_pem = _generate_ca_and_signed_cert()
+        cert = _load_cert_lenient(ek_pem.encode())
+        assert cert.subject is not None
+
+    def test_load_cert_lenient_pyopenssl_fallback(self):
+        """_load_cert_lenient falls back to pyOpenSSL when strict parser fails."""
+        from unittest.mock import patch
+
+        from wif_bunker.attestation.base import _load_cert_lenient
+
+        _, ek_pem = _generate_ca_and_signed_cert()
+
+        # Make cryptography's parser fail on first call, succeed on second
+        original_load = x509.load_pem_x509_certificate
+        call_count = 0
+
+        def fail_then_succeed(data, *args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ValueError("Simulated InvalidSetOrdering")
+            return original_load(data, *args, **kwargs)
+
+        with patch(
+            "wif_bunker.attestation.base.x509.load_pem_x509_certificate",
+            side_effect=fail_then_succeed,
+        ):
+            cert = _load_cert_lenient(ek_pem.encode())
+
+        assert cert.subject is not None
+        assert call_count == 2
+
+    def test_pyopenssl_fallback_verifies_chain(self, tmp_path, monkeypatch):
+        """When strict parser fails for EK cert, pyOpenSSL re-encode allows chain verification."""
+        from unittest.mock import patch
+
+        ca_pem, ek_pem = _generate_ca_and_signed_cert()
+
+        roots_dir = tmp_path / "roots" / "roots"
+        roots_dir.mkdir(parents=True)
+        (roots_dir / "ca.pem").write_text(ca_pem)
+        monkeypatch.setattr("wif_bunker.attestation.base.__file__", str(tmp_path / "base.py"))
+
+        # Make _load_cert_lenient's first attempt (strict) fail for the EK cert.
+        # pyOpenSSL will re-encode it, and the second load attempt will succeed.
+        original_load = x509.load_pem_x509_certificate
+        call_count = 0
+
+        def strict_fails_first_time(data, *args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            # First call is for the EK cert — simulate strict parser rejection
+            if call_count == 1:
+                raise ValueError("Simulated InvalidSetOrdering")
+            # All subsequent calls succeed (re-encoded EK cert, CA certs)
+            return original_load(data, *args, **kwargs)
+
+        with patch(
+            "wif_bunker.attestation.base.x509.load_pem_x509_certificate",
+            side_effect=strict_fails_first_time,
+        ):
+            result = verify_ek_chain(ek_pem)
+
+        assert result.passed is True
+
+    def test_both_parsers_fail_gives_clear_error(self, tmp_path, monkeypatch):
+        """When both cryptography and pyOpenSSL fail, error is clear."""
+
+        ca_pem, _ = _generate_ca_and_signed_cert()
+        roots_dir = tmp_path / "roots" / "roots"
+        roots_dir.mkdir(parents=True)
+        (roots_dir / "ca.pem").write_text(ca_pem)
+        monkeypatch.setattr("wif_bunker.attestation.base.__file__", str(tmp_path / "base.py"))
+
+        garbage_pem = "-----BEGIN CERTIFICATE-----\nbm90YWNlcnQ=\n-----END CERTIFICATE-----"
+
+        result = verify_ek_chain(garbage_pem)
+
+        assert result.passed is False
+        assert "Could not parse EK certificate" in result.detail
