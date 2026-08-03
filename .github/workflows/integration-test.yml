@@ -7,9 +7,9 @@ on:
   workflow_call:
     inputs:
       wif_bunker_cmd:
-        description: 'Command to invoke wif-bunker (e.g. python wif_bunker.py or ./wif-bunker)'
+        description: 'Command to invoke wif-bunker (e.g. python -m wif_bunker or ./wif-bunker)'
         required: false
-        default: 'python wif_bunker.py'
+        default: 'python -m wif_bunker'
         type: string
       use_built_binary:
         description: 'Set true to download and test a pre-built binary artifact (ECP bundled)'
@@ -291,7 +291,7 @@ jobs:
             ALGOS="$ALGOS rsa2048 rsa3072"
           fi
 
-          WIF_CMD="${{ inputs.wif_bunker_cmd || 'python wif_bunker.py' }}"
+          WIF_CMD="${{ inputs.wif_bunker_cmd || 'python -m wif_bunker' }}"
 
           for algo in $ALGOS; do
             echo "--- Testing --cert-only --key-algorithm $algo ---"
@@ -333,7 +333,7 @@ jobs:
           echo "=== Testing --cert-only overwrite protection ==="
           outdir=$(mktemp -d)
           echo '{}' > "$outdir/adc.json"
-          WIF_CMD="${{ inputs.wif_bunker_cmd || 'python wif_bunker.py' }}"
+          WIF_CMD="${{ inputs.wif_bunker_cmd || 'python -m wif_bunker' }}"
           if $WIF_CMD --cert-only --output-dir "$outdir" 2>&1; then
             echo "FAIL: --cert-only should have refused to overwrite"
             exit 1
@@ -353,7 +353,7 @@ jobs:
             DIALOG_PID=$!
             echo "Dialog auto-accept PID: $DIALOG_PID"
           fi
-          ${{ inputs.wif_bunker_cmd || 'python wif_bunker.py' }} \
+          ${{ inputs.wif_bunker_cmd || 'python -m wif_bunker' }} \
             --use-adc \
             --create-project="${{ steps.config.outputs.project_id }}" \
             --folder="${{ secrets.SANDBOX_FOLDER_ID }}" \
@@ -367,7 +367,7 @@ jobs:
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             powershell -NoProfile -File .github/scripts/win_dialog_accept.ps1 &
           fi
-          ${{ inputs.wif_bunker_cmd || 'python wif_bunker.py' }} \
+          ${{ inputs.wif_bunker_cmd || 'python -m wif_bunker' }} \
             --use-adc \
             --use-project="${{ steps.config.outputs.project_id }}" \
             --use-pool=bunker-wif-pool \
@@ -411,7 +411,7 @@ jobs:
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             powershell -NoProfile -File .github/scripts/win_dialog_accept.ps1 &
           fi
-          ${{ inputs.wif_bunker_cmd || 'python wif_bunker.py' }} \
+          ${{ inputs.wif_bunker_cmd || 'python -m wif_bunker' }} \
             --use-adc \
             --use-project="${{ steps.config.outputs.project_id }}" \
             --use-pool=bunker-wif-pool \
@@ -449,7 +449,7 @@ jobs:
           export GOOGLE_API_USE_CLIENT_CERTIFICATE=true
           export GOOGLE_API_CERTIFICATE_CONFIG="$PWD/certificate_config.json"
           unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE 2>/dev/null || true
-          ${{ inputs.wif_bunker_cmd || 'python wif_bunker.py' }} --status
+          ${{ inputs.wif_bunker_cmd || 'python -m wif_bunker' }} --status
 
 
       # ── Upload Windows screenshots for dialog debugging ──

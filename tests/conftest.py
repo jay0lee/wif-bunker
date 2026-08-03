@@ -4,7 +4,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.x509.oid import NameOID
 
-from wif_bunker import WorkloadConfig
+from wif_bunker.config import WorkloadConfig
 
 
 @pytest.fixture

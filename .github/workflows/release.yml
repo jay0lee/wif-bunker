@@ -55,9 +55,9 @@ jobs:
       - name: Inject version
         shell: bash
         run: |
-          sed -i.bak "s/__version__ = \"dev\"/__version__ = \"$VERSION\"/" wif_bunker.py
-          rm -f wif_bunker.py.bak
-          grep __version__ wif_bunker.py
+          sed -i.bak "s/__version__ = \"dev\"/__version__ = \"$VERSION\"/" wif_bunker/__init__.py
+          rm -f wif_bunker/__init__.py.bak
+          grep __version__ wif_bunker/__init__.py
 
       - name: Generate Windows version info
         if: matrix.platform_name == 'windows'

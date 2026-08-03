@@ -2,7 +2,8 @@ import subprocess
 
 import pytest
 
-from wif_bunker import _check_tpm_linux, _require_command
+from wif_bunker.keystore.linux import _check_tpm_linux
+from wif_bunker.utils import _require_command
 
 
 def test_require_command_found(monkeypatch):

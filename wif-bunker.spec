@@ -7,7 +7,7 @@ from PyInstaller.utils.hooks import copy_metadata
 block_cipher = None
 
 # ── Hidden imports ──
-# These are NOT imported by wif_bunker.py — they're loaded internally by
+# These are NOT imported by wif_bunker — they're loaded internally by
 # google-auth's _default.py at runtime based on credential type. PyInstaller
 # can't trace them because they're string-based dynamic imports inside
 # google-auth, not our code.
@@ -45,7 +45,7 @@ excludes = [
 ]
 
 a = Analysis(
-    ['wif_bunker.py'],
+    ['wif_bunker/cli.py'],
     pathex=[],
     binaries=[],
     datas=datas,

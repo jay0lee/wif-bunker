@@ -2,7 +2,8 @@ import json
 
 from cryptography import x509
 
-from wif_bunker import _DEFAULT_CERT_LIFETIME_DAYS, CertificateBundle, _create_ca_and_sign
+from wif_bunker.cert import _create_ca_and_sign
+from wif_bunker.config import _DEFAULT_CERT_LIFETIME_DAYS, CertificateBundle
 
 
 def test_create_ca_and_sign_returns_bundle(sample_config, sample_csr_pem):

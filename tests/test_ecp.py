@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 from get_ecp import get_default_ecp_dir, get_ecp_binary_names, get_ecp_platform_info
-from wif_bunker import _find_ecp_binaries
+from wif_bunker.cert import _find_ecp_binaries
 
 
 def test_platform_info_linux(monkeypatch):

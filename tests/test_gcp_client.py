@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
-from wif_bunker import GCPClient
+from wif_bunker.gcp_client import GCPClient
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -42,7 +42,7 @@ def test_init_adc_mode():
     mock_creds.token = "adc-token"
     mock_creds.service_account_email = "sa@test.iam.gserviceaccount.com"
 
-    with patch("wif_bunker.google_auth_default", return_value=(mock_creds, "project-id")):
+    with patch("google.auth.default", return_value=(mock_creds, "project-id")):
         client = GCPClient(use_adc=True)
 
     mock_creds.refresh.assert_called_once()
@@ -98,7 +98,7 @@ def test_api_call_get_adc():
     mock_creds.token = "adc-token"
     mock_creds.service_account_email = "sa@test.iam.gserviceaccount.com"
 
-    with patch("wif_bunker.google_auth_default", return_value=(mock_creds, "proj")):
+    with patch("google.auth.default", return_value=(mock_creds, "proj")):
         client = GCPClient(use_adc=True)
 
     mock_resp = _mock_response(json_data={"result": "ok"})
@@ -167,7 +167,7 @@ def test_wait_for_lro_polls_until_done():
 
     with (
         patch.object(client, "api_call", side_effect=responses),
-        patch("wif_bunker.time.sleep"),
+        patch("wif_bunker.gcp_client.time.sleep"),
     ):
         result = client.wait_for_lro("cloudresourcemanager.googleapis.com", "operations/op1")
 
@@ -181,8 +181,8 @@ def test_wait_for_lro_timeout():
 
     with (
         patch.object(client, "api_call", return_value={"done": False}),
-        patch("wif_bunker.time.sleep"),
-        patch("wif_bunker.time.monotonic", side_effect=[0, 0, 1000]),
+        patch("wif_bunker.gcp_client.time.sleep"),
+        patch("wif_bunker.gcp_client.time.monotonic", side_effect=[0, 0, 1000]),
         pytest.raises(TimeoutError, match="did not complete"),
     ):
         client.wait_for_lro("cloudresourcemanager.googleapis.com", "operations/op1", timeout=10)
@@ -218,7 +218,7 @@ def test_wait_for_wif_resource_polls_until_active():
 
     with (
         patch.object(client, "api_call", side_effect=responses),
-        patch("wif_bunker.time.sleep"),
+        patch("wif_bunker.gcp_client.time.sleep"),
     ):
         result = client.wait_for_wif_resource("https://iam.googleapis.com/v1/pool/123")
 
@@ -232,7 +232,7 @@ def test_wait_for_wif_resource_timeout():
 
     with (
         patch.object(client, "api_call", return_value={"state": "CREATING"}),
-        patch("wif_bunker.time.sleep"),
+        patch("wif_bunker.gcp_client.time.sleep"),
         pytest.raises(TimeoutError, match="did not become ACTIVE"),
     ):
         client.wait_for_wif_resource("https://iam.googleapis.com/v1/pool/123", max_attempts=2)

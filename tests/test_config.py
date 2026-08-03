@@ -1,4 +1,4 @@
-from wif_bunker import WorkloadConfig
+from wif_bunker.config import WorkloadConfig
 
 
 def test_config_defaults():

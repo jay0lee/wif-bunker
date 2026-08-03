@@ -13,7 +13,7 @@ def test_version_exists():
 def test_version_flag():
     repo_root = Path(__file__).parent.parent
     result = subprocess.run(
-        [sys.executable, "wif_bunker.py", "--version"], capture_output=True, text=True, cwd=str(repo_root)
+        [sys.executable, "-m", "wif_bunker", "--version"], capture_output=True, text=True, cwd=str(repo_root)
     )
     assert result.returncode == 0
     assert __version__ in result.stdout or result.stdout.strip() != ""

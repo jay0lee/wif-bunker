@@ -4,7 +4,7 @@ from unittest.mock import Mock
 import pytest
 import requests
 
-from wif_bunker import with_retries
+from wif_bunker.utils import with_retries
 
 
 @pytest.fixture(autouse=True)
