@@ -1,0 +1,197 @@
+"""Tests for attestation base module — EK chain verification and cert loading."""
+
+from __future__ import annotations
+
+import datetime
+
+import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
+
+from wif_bunker.attestation.base import AttestationCheck, _load_certs, verify_ek_chain
+
+
+def _generate_ca_and_signed_cert() -> tuple[str, str]:
+    """Generate a self-signed CA cert and a cert signed by that CA.
+
+    Returns (ca_pem, signed_cert_pem) as strings.
+    """
+    ca_key = ec.generate_private_key(ec.SECP256R1())
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test TPM Root CA")])
+    ca_cert = (
+        x509.CertificateBuilder()
+        .subject_name(ca_name)
+        .issuer_name(ca_name)
+        .public_key(ca_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
+        .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=365))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()),
+            critical=False,
+        )
+        .sign(ca_key, hashes.SHA256())
+    )
+    ca_pem = ca_cert.public_bytes(serialization.Encoding.PEM).decode()
+
+    ek_key = ec.generate_private_key(ec.SECP256R1())
+    ek_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test EK Certificate")])
+    ek_cert = (
+        x509.CertificateBuilder()
+        .subject_name(ek_name)
+        .issuer_name(ca_name)
+        .public_key(ek_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
+        .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=365))
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()),
+            critical=False,
+        )
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(ek_key.public_key()),
+            critical=False,
+        )
+        .sign(ca_key, hashes.SHA256())
+    )
+    ek_pem = ek_cert.public_bytes(serialization.Encoding.PEM).decode()
+
+    return ca_pem, ek_pem
+
+
+def _generate_self_signed_cert() -> str:
+    """Generate a self-signed certificate not in any trust bundle."""
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Untrusted Self-Signed")])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
+        .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=365))
+        .sign(key, hashes.SHA256())
+    )
+    return cert.public_bytes(serialization.Encoding.PEM).decode()
+
+
+class TestLoadCerts:
+    """Tests for _load_certs helper."""
+
+    def test_loads_pem_files_from_directory(self, tmp_path):
+        """Loads all .pem files from a directory."""
+        ca_pem, _ = _generate_ca_and_signed_cert()
+        (tmp_path / "root1.pem").write_text(ca_pem)
+        (tmp_path / "root2.pem").write_text(_generate_self_signed_cert())
+
+        certs = _load_certs(tmp_path)
+        assert len(certs) == 2
+        assert all(isinstance(c, x509.Certificate) for c in certs)
+
+    def test_ignores_non_pem_files(self, tmp_path):
+        """Non-.pem files are not loaded."""
+        ca_pem, _ = _generate_ca_and_signed_cert()
+        (tmp_path / "root.pem").write_text(ca_pem)
+        (tmp_path / "readme.txt").write_text("not a cert")
+        (tmp_path / "cert.der").write_bytes(b"\x00\x01")
+
+        certs = _load_certs(tmp_path)
+        assert len(certs) == 1
+
+    def test_empty_directory(self, tmp_path):
+        """Empty directory returns empty list."""
+        certs = _load_certs(tmp_path)
+        assert certs == []
+
+
+class TestVerifyEkChain:
+    """Tests for verify_ek_chain using cryptography library."""
+
+    def test_no_roots_returns_failed(self, tmp_path, monkeypatch):
+        """Returns failed check when roots directory doesn't exist."""
+        monkeypatch.setattr(
+            "wif_bunker.attestation.base.__file__",
+            str(tmp_path / "base.py"),
+        )
+        result = verify_ek_chain("-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----")
+        assert isinstance(result, AttestationCheck)
+        assert result.passed is False
+
+    def test_valid_chain_passes(self, tmp_path, monkeypatch):
+        """EK cert signed by a bundled root CA passes verification."""
+        ca_pem, ek_pem = _generate_ca_and_signed_cert()
+
+        roots_dir = tmp_path / "roots" / "roots"
+        roots_dir.mkdir(parents=True)
+        (roots_dir / "test_ca.pem").write_text(ca_pem)
+
+        monkeypatch.setattr(
+            "wif_bunker.attestation.base.__file__",
+            str(tmp_path / "base.py"),
+        )
+        result = verify_ek_chain(ek_pem)
+        assert isinstance(result, AttestationCheck)
+        assert result.passed is True
+        assert "verified" in result.detail.lower()
+
+    def test_untrusted_cert_fails(self, tmp_path, monkeypatch):
+        """Self-signed cert not in bundle fails verification."""
+        ca_pem, _ = _generate_ca_and_signed_cert()
+        untrusted_pem = _generate_self_signed_cert()
+
+        roots_dir = tmp_path / "roots" / "roots"
+        roots_dir.mkdir(parents=True)
+        (roots_dir / "test_ca.pem").write_text(ca_pem)
+
+        monkeypatch.setattr(
+            "wif_bunker.attestation.base.__file__",
+            str(tmp_path / "base.py"),
+        )
+        result = verify_ek_chain(untrusted_pem)
+        assert isinstance(result, AttestationCheck)
+        assert result.passed is False
+
+    def test_malformed_pem_fails(self, tmp_path, monkeypatch):
+        """Garbage PEM data fails gracefully."""
+        ca_pem, _ = _generate_ca_and_signed_cert()
+        roots_dir = tmp_path / "roots" / "roots"
+        roots_dir.mkdir(parents=True)
+        (roots_dir / "test_ca.pem").write_text(ca_pem)
+
+        monkeypatch.setattr(
+            "wif_bunker.attestation.base.__file__",
+            str(tmp_path / "base.py"),
+        )
+        result = verify_ek_chain("not-a-certificate")
+        assert isinstance(result, AttestationCheck)
+        assert result.passed is False
+
+    def test_does_not_call_openssl(self, tmp_path, monkeypatch):
+        """verify_ek_chain uses cryptography library, not openssl CLI."""
+        import subprocess
+
+        original_run = subprocess.run
+
+        def fail_on_openssl(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get("args", [])
+            if isinstance(cmd, list) and cmd and cmd[0] == "openssl":
+                pytest.fail("verify_ek_chain should not call openssl CLI")
+            return original_run(*args, **kwargs)
+
+        ca_pem, ek_pem = _generate_ca_and_signed_cert()
+        roots_dir = tmp_path / "roots" / "roots"
+        roots_dir.mkdir(parents=True)
+        (roots_dir / "test_ca.pem").write_text(ca_pem)
+
+        monkeypatch.setattr(
+            "wif_bunker.attestation.base.__file__",
+            str(tmp_path / "base.py"),
+        )
+        monkeypatch.setattr(subprocess, "run", fail_on_openssl)
+
+        result = verify_ek_chain(ek_pem)
+        assert result.passed is True

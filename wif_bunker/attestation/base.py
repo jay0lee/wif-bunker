@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from cryptography import x509
-from cryptography.x509.verification import PolicyBuilder, Store
+from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 
 
 @dataclass
@@ -106,23 +106,71 @@ def verify_ek_chain(ek_pem: str) -> AttestationCheck:
         ek_cert = x509.load_pem_x509_certificate(ek_pem.encode("utf-8"))
 
         roots = _load_certs(roots_dir)
-        store = Store(roots)
-        builder = PolicyBuilder().store(store)
-
         intermediates = []
         if intermediates_dir.exists():
             intermediates = _load_certs(intermediates_dir)
 
-        verifier = builder.build_client_verifier()
-        verifier.verify(ek_cert, intermediates)
+        # Build a lookup of potential issuers by subject.
+        all_ca_certs = {cert.subject: cert for cert in roots + intermediates}
+
+        # Walk up the chain from the EK cert to a trusted root.
+        current = ek_cert
+        depth = 0
+        max_depth = 10
+        while depth < max_depth:
+            # Find the issuer cert.
+            issuer_cert = all_ca_certs.get(current.issuer)
+            if issuer_cert is None:
+                return AttestationCheck(
+                    name="EK certificate chain verified",
+                    passed=False,
+                    detail=(
+                        f"Could not find issuer '{current.issuer.rfc4514_string()}' "
+                        "in bundled manufacturer CA certificates."
+                    ),
+                )
+
+            # Verify the signature.
+            issuer_pub = issuer_cert.public_key()
+            if isinstance(issuer_pub, rsa.RSAPublicKey):
+                issuer_pub.verify(
+                    current.signature,
+                    current.tbs_certificate_bytes,
+                    padding.PKCS1v15(),
+                    current.signature_hash_algorithm,
+                )
+            elif isinstance(issuer_pub, ec.EllipticCurvePublicKey):
+                issuer_pub.verify(
+                    current.signature,
+                    current.tbs_certificate_bytes,
+                    ec.ECDSA(current.signature_hash_algorithm),
+                )
+            else:
+                return AttestationCheck(
+                    name="EK certificate chain verified",
+                    passed=False,
+                    detail=f"Unsupported key type: {type(issuer_pub).__name__}",
+                )
+
+            # If the issuer is a trusted root, chain is verified.
+            if issuer_cert in roots:
+                return AttestationCheck(
+                    name="EK certificate chain verified",
+                    passed=True,
+                    detail=(
+                        "EK certificate verified against tpm-ca-certificates bundle "
+                        "(https://github.com/loicsikidi/tpm-ca-certificates)"
+                    ),
+                )
+
+            # Move up the chain.
+            current = issuer_cert
+            depth += 1
 
         return AttestationCheck(
             name="EK certificate chain verified",
-            passed=True,
-            detail=(
-                "EK certificate verified against tpm-ca-certificates bundle "
-                "(https://github.com/loicsikidi/tpm-ca-certificates)"
-            ),
+            passed=False,
+            detail="Certificate chain too deep (exceeded 10 levels).",
         )
     except Exception as e:
         stderr_hint = f" Error: {e}"
