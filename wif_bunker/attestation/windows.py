@@ -285,40 +285,21 @@ def _check_key_provider(config: WorkloadConfig) -> tuple[AttestationCheck, dict 
     )
 
 
-def _get_or_create_ak(ncrypt, ctypes, wintypes, provider_handle):
-    """Get or create a persistent Attestation Key (AK) in the TPM.
+def _create_ak_fresh(ncrypt, ctypes, wintypes, provider_handle, overwrite=False):
+    """Create a new Attestation Key (AK) with IDENTITY_KEY policy.
 
-    NCryptCreateClaim requires an "authority key" (the AK) to sign the
-    attestation claim.  The AK is a persistent RSA 2048 key stored in the
-    Platform Crypto Provider.  It is created once and reused on subsequent
-    attestation calls.
+    Args:
+        overwrite: If True, replaces any existing key with the same name.
 
     Returns:
-        A tuple of (ak_handle, error_detail).  On success error_detail is
-        None; on failure ak_handle is None and error_detail explains why.
+        A tuple of (ak_handle, error_detail).
     """
-    ak_handle = wintypes.HANDLE()
-
-    # Try to open an existing AK first.
-    status = ncrypt.NCryptOpenKey(
-        provider_handle,
-        ctypes.byref(ak_handle),
+    dwFlags = 0x00000080 if overwrite else 0  # NCRYPT_OVERWRITE_KEY_FLAG
+    logger.info(
+        "%s attestation key '%s' in TPM",
+        "Recreating" if overwrite else "Creating",
         _AK_KEY_NAME,
-        0,
-        0,
     )
-    if status == 0:
-        logger.debug("Opened existing attestation key '%s'", _AK_KEY_NAME)
-        return ak_handle, None
-
-    # Convert to unsigned 32-bit for comparison (NCrypt returns SECURITY_STATUS
-    # which is a signed LONG; Python may interpret it as negative).
-    unsigned_status = status & 0xFFFFFFFF
-    if unsigned_status != _NTE_BAD_KEYSET:
-        return None, f"NCryptOpenKey for AK failed unexpectedly: 0x{unsigned_status:08X}"
-
-    # AK doesn't exist yet — create a persistent RSA 2048 key in the TPM.
-    logger.info("Creating attestation key '%s' in TPM (one-time operation)", _AK_KEY_NAME)
     ak_handle = wintypes.HANDLE()
     status = ncrypt.NCryptCreatePersistedKey(
         provider_handle,
@@ -326,7 +307,7 @@ def _get_or_create_ak(ncrypt, ctypes, wintypes, provider_handle):
         _BCRYPT_RSA_ALGORITHM,
         _AK_KEY_NAME,
         0,  # dwLegacyKeySpec — 0 for CNG keys
-        0,  # dwFlags
+        dwFlags,
     )
     if status != 0:
         return None, f"NCryptCreatePersistedKey for AK failed: 0x{status & 0xFFFFFFFF:08X}"
@@ -348,7 +329,7 @@ def _get_or_create_ak(ncrypt, ctypes, wintypes, provider_handle):
     # a "restricted signing key" that can only sign TPM-internal structures
     # (attestation claims).  NCryptCreateClaim requires the authority key
     # to have this policy; without it, it fails with PCP_E_KEY_NOT_LOADED
-    # (0x8029040F).
+    # (0x8029040F) or TPM scheme errors (0x80280092).
     _NCRYPT_PCP_IDENTITY_KEY = 0x00000008
     usage_policy = wintypes.DWORD(_NCRYPT_PCP_IDENTITY_KEY)
     status = ncrypt.NCryptSetProperty(
@@ -368,8 +349,49 @@ def _get_or_create_ak(ncrypt, ctypes, wintypes, provider_handle):
         ncrypt.NCryptFreeObject(ak_handle)
         return None, f"NCryptFinalizeKey for AK failed: 0x{status & 0xFFFFFFFF:08X}"
 
-    logger.info("Attestation key '%s' created successfully", _AK_KEY_NAME)
+    logger.info("Attestation key '%s' ready", _AK_KEY_NAME)
     return ak_handle, None
+
+
+def _get_or_create_ak(ncrypt, ctypes, wintypes, provider_handle):
+    """Get an existing or create a new Attestation Key (AK) in the TPM.
+
+    NCryptCreateClaim requires an "authority key" (the AK) to sign the
+    attestation claim.  The AK is a persistent RSA 2048 identity key
+    stored in the Platform Crypto Provider.
+
+    If the AK already exists, it is reused (good TPM citizenship — we
+    don't churn TPM non-volatile storage).  If it doesn't exist, a new
+    one is created with the correct IDENTITY_KEY policy.
+
+    If the caller finds the AK is stale (NCryptCreateClaim fails), it
+    should call _create_ak_fresh(overwrite=True) to replace it.
+
+    Returns:
+        A tuple of (ak_handle, error_detail).  On success error_detail is
+        None; on failure ak_handle is None and error_detail explains why.
+    """
+    ak_handle = wintypes.HANDLE()
+
+    # Try to open an existing AK first.
+    status = ncrypt.NCryptOpenKey(
+        provider_handle,
+        ctypes.byref(ak_handle),
+        _AK_KEY_NAME,
+        0,
+        0,
+    )
+    if status == 0:
+        logger.debug("Reusing existing attestation key '%s'", _AK_KEY_NAME)
+        return ak_handle, None
+
+    # Convert to unsigned 32-bit for comparison.
+    unsigned_status = status & 0xFFFFFFFF
+    if unsigned_status != _NTE_BAD_KEYSET:
+        return None, f"NCryptOpenKey for AK failed unexpectedly: 0x{unsigned_status:08X}"
+
+    # AK doesn't exist yet — create a fresh one.
+    return _create_ak_fresh(ncrypt, ctypes, wintypes, provider_handle)
 
 
 def _ncrypt_create_claim(config: WorkloadConfig, key_info: dict | None = None) -> tuple[AttestationCheck, bytes | None]:
@@ -484,42 +506,77 @@ def _ncrypt_create_claim(config: WorkloadConfig, key_info: dict | None = None) -
 
         # Create attestation claim — the AK signs a proof that the subject
         # key is genuinely inside the TPM.
+        #
+        # If the claim fails, the AK may be stale (created before we added
+        # PCP_KEY_USAGE_POLICY=IDENTITY_KEY).  In that case, recreate the
+        # AK with the correct properties and retry once.
         claim_size = wintypes.DWORD(0)
-
-        # First call to get required buffer size
         status = ncrypt.NCryptCreateClaim(
             key_handle,
-            ak_handle,  # authority key signs the claim
+            ak_handle,
             _NCRYPT_CLAIM_KEY_ATTESTATION,
-            None,  # no parameters
-            None,  # output buffer (null for size query)
+            None,
+            None,
             0,
             ctypes.byref(claim_size),
             0,
         )
+
         if status != 0:
-            unsigned = status & 0xFFFFFFFF
-            if unsigned == _PCP_E_KEY_NOT_LOADED:
-                detail = (
-                    f"NCryptCreateClaim failed: 0x{unsigned:08X} "
-                    "(PCP_E_KEY_NOT_LOADED — the workload key was not created with "
-                    "the attestation capability flag). "
-                    "To fix: delete and re-create the workload identity so the key "
-                    "is generated with attestation support."
-                )
-            else:
-                detail = (
-                    f"NCryptCreateClaim size query failed: 0x{unsigned:08X}. "
-                    "The TPM may not support key attestation with this key type."
-                )
-            return (
-                AttestationCheck(
-                    name="NCryptCreateClaim attestation",
-                    passed=False,
-                    detail=detail,
-                ),
-                None,
+            # Stale AK — recreate with correct identity key properties.
+            logger.info(
+                "NCryptCreateClaim failed (0x%08X) — AK may be stale, recreating with identity policy",
+                status & 0xFFFFFFFF,
             )
+            ncrypt.NCryptFreeObject(ak_handle)
+            ak_handle = None
+
+            ak_handle, ak_error = _create_ak_fresh(ncrypt, ctypes, wintypes, provider_handle, overwrite=True)
+            if ak_error:
+                return (
+                    AttestationCheck(
+                        name="NCryptCreateClaim attestation",
+                        passed=False,
+                        detail=f"Could not recreate attestation key (AK): {ak_error}",
+                    ),
+                    None,
+                )
+
+            # Retry with the fresh AK.
+            claim_size = wintypes.DWORD(0)
+            status = ncrypt.NCryptCreateClaim(
+                key_handle,
+                ak_handle,
+                _NCRYPT_CLAIM_KEY_ATTESTATION,
+                None,
+                None,
+                0,
+                ctypes.byref(claim_size),
+                0,
+            )
+            if status != 0:
+                unsigned = status & 0xFFFFFFFF
+                if unsigned == _PCP_E_KEY_NOT_LOADED:
+                    detail = (
+                        f"NCryptCreateClaim failed: 0x{unsigned:08X} "
+                        "(PCP_E_KEY_NOT_LOADED — the workload key was not created with "
+                        "the attestation capability flag). "
+                        "To fix: delete and re-create the workload identity so the key "
+                        "is generated with attestation support."
+                    )
+                else:
+                    detail = (
+                        f"NCryptCreateClaim failed after AK recreation: 0x{unsigned:08X}. "
+                        "The TPM may not support key attestation with this key type."
+                    )
+                return (
+                    AttestationCheck(
+                        name="NCryptCreateClaim attestation",
+                        passed=False,
+                        detail=detail,
+                    ),
+                    None,
+                )
 
         # Second call with allocated buffer
         claim_buffer = (ctypes.c_ubyte * claim_size.value)()
