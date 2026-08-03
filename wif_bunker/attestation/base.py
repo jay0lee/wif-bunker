@@ -68,13 +68,27 @@ class AttestationReport:
         }
 
 
+def _concat_pems(directory: Path) -> str:
+    """Concatenate all PEM files in a directory into a single string."""
+    parts = []
+    for pem_file in sorted(directory.glob("*.pem")):
+        parts.append(pem_file.read_text(encoding="utf-8").strip())
+    return "\n".join(parts)
+
+
 def verify_ek_chain(ek_pem: str) -> AttestationCheck:
     """Verify EK certificate against known manufacturer root CAs.
 
-    Shared by Linux and Windows attestation modules. Writes the EK PEM
-    to a temp file, iterates over bundled root CAs, and runs ``openssl verify``.
+    Shared by Linux and Windows attestation modules. Concatenates individual
+    root and intermediate CA PEMs from the ``roots/roots/`` and
+    ``roots/intermediates/`` directories (sourced from
+    https://github.com/loicsikidi/tpm-ca-certificates) and runs
+    ``openssl verify``.
     """
-    roots_dir = Path(__file__).parent / "roots"
+    certs_dir = Path(__file__).parent / "roots"
+    roots_dir = certs_dir / "roots"
+    intermediates_dir = certs_dir / "intermediates"
+
     if not roots_dir.exists() or not any(roots_dir.glob("*.pem")):
         return AttestationCheck(
             name="EK certificate chain verified",
@@ -82,32 +96,48 @@ def verify_ek_chain(ek_pem: str) -> AttestationCheck:
             detail="No manufacturer root CA certificates bundled. Chain verification skipped.",
         )
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".pem", delete=False, encoding="utf-8") as tmp:
-        tmp.write(ek_pem)
-        ek_path = tmp.name
+    with tempfile.TemporaryDirectory() as work_dir:
+        work = Path(work_dir)
 
-    try:
-        for root_ca in sorted(roots_dir.glob("*.pem")):
-            result = subprocess.run(
-                ["openssl", "verify", "-CAfile", str(root_ca), ek_path],
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode == 0 and ": OK" in result.stdout:
-                manufacturer = root_ca.stem.replace("_", " ").title()
-                return AttestationCheck(
-                    name="EK certificate chain verified",
-                    passed=True,
-                    detail=f"EK certificate verified against {manufacturer} root CA ({root_ca.name})",
-                )
-    finally:
-        Path(ek_path).unlink(missing_ok=True)
+        # Write EK cert to verify
+        ek_path = work / "ek.pem"
+        ek_path.write_text(ek_pem, encoding="utf-8")
+
+        # Concatenate roots into a single CA bundle
+        roots_bundle = work / "roots_bundle.pem"
+        roots_bundle.write_text(_concat_pems(roots_dir), encoding="utf-8")
+
+        # Build openssl verify command
+        cmd = ["openssl", "verify", "-CAfile", str(roots_bundle)]
+
+        # Add intermediates if available
+        if intermediates_dir.exists() and any(intermediates_dir.glob("*.pem")):
+            intermediates_bundle = work / "intermediates_bundle.pem"
+            intermediates_bundle.write_text(_concat_pems(intermediates_dir), encoding="utf-8")
+            cmd.extend(["-untrusted", str(intermediates_bundle)])
+
+        cmd.append(str(ek_path))
+        result = subprocess.run(cmd, capture_output=True, text=True)
+
+    if result.returncode == 0 and ": OK" in result.stdout:
+        return AttestationCheck(
+            name="EK certificate chain verified",
+            passed=True,
+            detail=(
+                "EK certificate verified against tpm-ca-certificates bundle "
+                "(https://github.com/loicsikidi/tpm-ca-certificates)"
+            ),
+        )
+
+    stderr_hint = ""
+    if result.stderr:
+        for line in result.stderr.strip().splitlines():
+            if "error" in line.lower():
+                stderr_hint = f" OpenSSL: {line.strip()}"
+                break
 
     return AttestationCheck(
         name="EK certificate chain verified",
         passed=False,
-        detail=(
-            "EK certificate did not chain to any bundled manufacturer root CA. "
-            "The TPM manufacturer's root CA may not be bundled yet."
-        ),
+        detail=(f"EK certificate did not chain to any bundled manufacturer root CA.{stderr_hint}"),
     )
