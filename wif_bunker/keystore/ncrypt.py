@@ -555,6 +555,58 @@ def import_cert_to_store(
             ("dwKeySpec", wintypes.DWORD),
         ]
 
+    # ---------------------------------------------------------------
+    # Declare argtypes/restype for every crypt32 function we call.
+    # WITHOUT these, ctypes defaults to c_int (32-bit) for return
+    # values.  On 64-bit Windows, HCERTSTORE and PCCERT_CONTEXT are
+    # 64-bit pointers — truncating them to 32 bits causes an access
+    # violation (segfault) when the pointer is later dereferenced.
+    # ---------------------------------------------------------------
+
+    # HCERTSTORE CertOpenStore(LPCSTR, DWORD, HCRYPTPROV_LEGACY, DWORD, const void*)
+    crypt32.CertOpenStore.argtypes = [
+        ctypes.c_void_p,  # lpszStoreProvider (int constant, not a real pointer)
+        wintypes.DWORD,  # dwEncodingType
+        ctypes.c_void_p,  # hCryptProv (NULL)
+        wintypes.DWORD,  # dwFlags
+        wintypes.LPCWSTR,  # pvPara (store name)
+    ]
+    crypt32.CertOpenStore.restype = ctypes.c_void_p  # HCERTSTORE (64-bit ptr)
+
+    # PCCERT_CONTEXT CertCreateCertificateContext(DWORD, const BYTE*, DWORD)
+    crypt32.CertCreateCertificateContext.argtypes = [
+        wintypes.DWORD,  # dwCertEncodingType
+        ctypes.c_char_p,  # pbCertEncoded (DER bytes)
+        wintypes.DWORD,  # cbCertEncoded
+    ]
+    crypt32.CertCreateCertificateContext.restype = ctypes.c_void_p  # PCCERT_CONTEXT
+
+    # BOOL CertAddCertificateContextToStore(HCERTSTORE, PCCERT_CONTEXT, DWORD, PCCERT_CONTEXT*)
+    crypt32.CertAddCertificateContextToStore.argtypes = [
+        ctypes.c_void_p,  # hCertStore
+        ctypes.c_void_p,  # pCertContext
+        wintypes.DWORD,  # dwAddDisposition
+        ctypes.POINTER(ctypes.c_void_p),  # ppStoreContext (out)
+    ]
+    crypt32.CertAddCertificateContextToStore.restype = wintypes.BOOL
+
+    # BOOL CertSetCertificateContextProperty(PCCERT_CONTEXT, DWORD, DWORD, const void*)
+    crypt32.CertSetCertificateContextProperty.argtypes = [
+        ctypes.c_void_p,  # pCertContext
+        wintypes.DWORD,  # dwPropId
+        wintypes.DWORD,  # dwFlags
+        ctypes.c_void_p,  # pvData (pointer to CRYPT_KEY_PROV_INFO)
+    ]
+    crypt32.CertSetCertificateContextProperty.restype = wintypes.BOOL
+
+    # BOOL CertFreeCertificateContext(PCCERT_CONTEXT)
+    crypt32.CertFreeCertificateContext.argtypes = [ctypes.c_void_p]
+    crypt32.CertFreeCertificateContext.restype = wintypes.BOOL
+
+    # BOOL CertCloseStore(HCERTSTORE, DWORD)
+    crypt32.CertCloseStore.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+    crypt32.CertCloseStore.restype = wintypes.BOOL
+
     store_handle = None
     cert_context = None
     stored_context = None
@@ -609,7 +661,7 @@ def import_cert_to_store(
             stored_context,
             _CERT_KEY_PROV_INFO_PROP_ID,
             0,
-            ctypes.byref(key_prov_info),
+            ctypes.addressof(key_prov_info),
         )
         if not ok:
             raise RuntimeError("CertSetCertificateContextProperty(CERT_KEY_PROV_INFO) failed")
