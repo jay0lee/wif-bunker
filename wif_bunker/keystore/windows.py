@@ -14,6 +14,13 @@ from wif_bunker.cert import _create_ca_and_sign
 from wif_bunker.config import CertificateBundle, WorkloadConfig
 from wif_bunker.utils import _UNICODE, SYM_WARN, _require_command
 
+# Ensures Cert: drive + PKI cmdlets work in both Windows PowerShell 5.1 and PowerShell 7+.
+# Microsoft.PowerShell.Security provides the Cert: drive; PKI provides Import-Certificate.
+_PS_CERT_PREAMBLE = (
+    "Import-Module Microsoft.PowerShell.Security -ErrorAction SilentlyContinue; "
+    "Import-Module PKI -ErrorAction SilentlyContinue; "
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -30,9 +37,6 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
     _require_command(
         "certreq", install_hint="Built-in Windows command — should be at C:\\Windows\\System32\\certreq.exe"
     )
-    _require_command(
-        "certutil", install_hint="Built-in Windows command — should be at C:\\Windows\\System32\\certutil.exe"
-    )
     _require_command("powershell", install_hint="Built-in Windows command — ensure PowerShell is on PATH")
 
     _tmpdir = tempfile.TemporaryDirectory(prefix="bunker_")  # pylint: disable=consider-using-with
@@ -41,7 +45,7 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
     try:
         # 0. Clean up stale bunker-workload certs from previous runs.
         ps_cleanup = (
-            "Import-Module PKI; "
+            f"{_PS_CERT_PREAMBLE}"
             "Get-ChildItem Cert:\\CurrentUser\\My | "
             "Where-Object { $_.Subject -like 'CN=bunker-workload-*' } | "
             "Remove-Item -Force"
@@ -131,7 +135,7 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
         ca_der_path.write_bytes(ca_cert_obj.public_bytes(serialization.Encoding.DER))
         # Windows thumbprints are always SHA1 — this is not a security choice
         ca_thumbprint = ca_cert_obj.fingerprint(hashes.SHA1()).hex().upper()
-        ps_install_ca = f"Import-Module PKI; Import-Certificate -FilePath '{ca_der_path}' -CertStoreLocation 'Cert:\\CurrentUser\\Root'"
+        ps_install_ca = f"{_PS_CERT_PREAMBLE}Import-Certificate -FilePath '{ca_der_path}' -CertStoreLocation 'Cert:\\CurrentUser\\Root'"
 
         # Import-Certificate MUST run without capture_output so Windows can
         # display the root CA trust security dialog. Capturing stdout/stderr
@@ -143,7 +147,7 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
 
         # Verify the CA was actually accepted.
         ps_verify_ca = (
-            "Import-Module PKI; "
+            f"{_PS_CERT_PREAMBLE}"
             f"(Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object {{ $_.Thumbprint -eq '{ca_thumbprint}' }}).Count"
         )
         verify_result = subprocess.run(
@@ -173,37 +177,22 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
         # 6. Remove the ephemeral CA from trusted root store.
         #    On Windows, this triggers a Security Warning dialog
         #    requiring user confirmation (same as import).
-        logger.warning("")
-        if _UNICODE:
-            logger.warning(
-                "    \u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557"
-            )
-            logger.warning("    \u2551  ATTENTION: Another Windows Security dialog will appear. \u2551")
-            logger.warning("    \u2551  Click YES to remove the ephemeral CA (cleanup step).    \u2551")
-            logger.warning("    \u2551                                                          \u2551")
-            logger.warning("    \u2551  \u26a0  Check your taskbar if you don't see it.              \u2551")
-            logger.warning(
-                "    \u255a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255d"
-            )
-        else:
-            logger.warning("    +------------------------------------------------------------+")
-            logger.warning("    |  ATTENTION: Another Windows Security dialog will appear. |")
-            logger.warning("    |  Click YES to remove the ephemeral CA (cleanup step).    |")
-            logger.warning("    |                                                          |")
-            logger.warning("    |  !!  Check your taskbar if you don't see it.              |")
-            logger.warning("    +------------------------------------------------------------+")
-        logger.warning("")
         logger.info("    Removing ephemeral CA from trusted root store...")
-        # certutil -delstore also triggers a security dialog — must not capture.
+        ps_delete_ca = (
+            f"{_PS_CERT_PREAMBLE}"
+            f"Get-ChildItem Cert:\\CurrentUser\\Root | "
+            f"Where-Object {{ $_.Thumbprint -eq '{ca_thumbprint}' }} | "
+            f"Remove-Item -Force"
+        )
         subprocess.run(
-            ["certutil", "-user", "-delstore", "Root", ca_thumbprint],
+            ["powershell", "-NoProfile", "-Command", ps_delete_ca],
         )
         verify_result = subprocess.run(
             [
                 "powershell",
                 "-NoProfile",
                 "-Command",
-                f"Import-Module PKI; @(Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object Thumbprint -eq '{ca_thumbprint}').Count",
+                f"{_PS_CERT_PREAMBLE}@(Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object Thumbprint -eq '{ca_thumbprint}').Count",
             ],
             capture_output=True,
             text=True,

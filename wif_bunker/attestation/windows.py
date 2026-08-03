@@ -9,8 +9,8 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
-import tempfile
-from pathlib import Path
+
+from cryptography import x509 as cx509
 
 from wif_bunker.attestation.base import (
     AttestationArtifact,
@@ -27,11 +27,23 @@ _MS_PLATFORM_CRYPTO_PROVIDER = "Microsoft Platform Crypto Provider"
 _MS_SOFTWARE_KSP = "Microsoft Software Key Storage Provider"
 _NCRYPT_CLAIM_KEY_ATTESTATION = 0x00000001
 
+# Ensures Cert: drive + TPM cmdlets work in both Windows PowerShell 5.1 and PowerShell 7+.
+# Microsoft.PowerShell.Security provides the Cert: drive; PKI provides Import-Certificate.
+_PS_PREAMBLE = (
+    "Import-Module Microsoft.PowerShell.Security -ErrorAction SilentlyContinue; "
+    "Import-Module PKI -ErrorAction SilentlyContinue; "
+)
 
-def _run_powershell(command: str) -> subprocess.CompletedProcess:
-    """Run a PowerShell command and return the result."""
+
+def _run_powershell(command: str, *, preamble: bool = True) -> subprocess.CompletedProcess:
+    """Run a PowerShell command and return the result.
+
+    When *preamble* is True (default), prepends module imports that
+    ensure the Cert: drive and PKI cmdlets are available in PS 7+.
+    """
+    full_cmd = f"{_PS_PREAMBLE}{command}" if preamble else command
     return subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", full_cmd],
         capture_output=True,
         text=True,
     )
@@ -39,7 +51,7 @@ def _run_powershell(command: str) -> subprocess.CompletedProcess:
 
 def _check_tpm_status() -> tuple[AttestationCheck, dict | None]:
     """Query TPM status via PowerShell Get-Tpm."""
-    result = _run_powershell("Get-Tpm | ConvertTo-Json -Depth 3")
+    result = _run_powershell("Get-Tpm | ConvertTo-Json -Depth 3", preamble=False)
     if result.returncode != 0:
         return (
             AttestationCheck(
@@ -79,7 +91,9 @@ def _check_tpm_status() -> tuple[AttestationCheck, dict | None]:
 
 def _check_ek_info() -> tuple[AttestationCheck, dict | None]:
     """Extract Endorsement Key info via PowerShell."""
-    result = _run_powershell("Get-TpmEndorsementKeyInfo -HashAlgorithm Sha256 | ConvertTo-Json -Depth 3")
+    result = _run_powershell(
+        "Get-TpmEndorsementKeyInfo -HashAlgorithm Sha256 | ConvertTo-Json -Depth 3", preamble=False
+    )
     if result.returncode != 0:
         return (
             AttestationCheck(
@@ -132,7 +146,7 @@ def _extract_ek_certificate() -> tuple[AttestationCheck, str | None]:
         "Write-Output $pem "
         "} else { Write-Output 'NO_CERT' }"
     )
-    result = _run_powershell(ps_command)
+    result = _run_powershell(ps_command, preamble=False)
     if result.returncode != 0:
         return (
             AttestationCheck(
@@ -154,20 +168,12 @@ def _extract_ek_certificate() -> tuple[AttestationCheck, str | None]:
             None,
         )
 
-    # Extract issuer for identification
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".pem", delete=False, encoding="utf-8") as tmp:
-        tmp.write(output)
-        tmp_path = tmp.name
-
+    # Extract issuer using the cryptography library (no openssl CLI needed)
     try:
-        info = subprocess.run(
-            ["openssl", "x509", "-in", tmp_path, "-issuer", "-noout"],
-            capture_output=True,
-            text=True,
-        )
-        issuer = info.stdout.strip() if info.returncode == 0 else "unknown"
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)
+        cert_obj = cx509.load_pem_x509_certificate(output.encode())
+        issuer = cert_obj.issuer.rfc4514_string()
+    except Exception:  # pylint: disable=broad-except
+        issuer = "unknown"
 
     return (
         AttestationCheck(
@@ -185,63 +191,84 @@ def _verify_ek_chain_windows(ek_pem: str) -> AttestationCheck:
 
 
 def _check_key_provider(config: WorkloadConfig) -> tuple[AttestationCheck, dict | None]:
-    """Verify the bunker key's CNG storage provider."""
-    # List keys in the Platform Crypto Provider
-    result = subprocess.run(
-        ["certutil", "-csp", _MS_PLATFORM_CRYPTO_PROVIDER, "-key"],
-        capture_output=True,
-        text=True,
-    )
-
+    """Verify the bunker key's CNG storage provider via cert private key info."""
     key_cn = config.workload_cn
-    is_platform = key_cn in result.stdout if result.returncode == 0 else False
+    # Query the cert's private key provider using .NET CNG APIs via PowerShell.
+    # This works for both RSA and ECDSA keys and avoids certutil -csp (legacy).
+    ps_cmd = (
+        f"$cert = Get-ChildItem Cert:\\CurrentUser\\My | "
+        f"Where-Object {{ $_.Subject -eq 'CN={key_cn}' }}; "
+        f"if (-not $cert) {{ Write-Output 'CERT_NOT_FOUND'; exit }}; "
+        f"if (-not $cert.HasPrivateKey) {{ Write-Output 'NO_PRIVATE_KEY'; exit }}; "
+        # Try RSA first, then ECDSA — one will succeed depending on key algorithm
+        f"$key = $null; "
+        f"try {{ $k = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($cert); "
+        f"if ($k -is [System.Security.Cryptography.RSACng]) {{ $key = $k.Key }} }} catch {{}}; "
+        f"if (-not $key) {{ "
+        f"try {{ $k = [System.Security.Cryptography.X509Certificates.ECDsaCertificateExtensions]::GetECDsaPrivateKey($cert); "
+        f"if ($k -is [System.Security.Cryptography.ECDsaCng]) {{ $key = $k.Key }} }} catch {{}} }}; "
+        f'if ($key) {{ Write-Output ("$($key.Provider.Provider)|$($key.KeyName)") }} '
+        f"else {{ Write-Output 'NO_CNG_KEY' }}"
+    )
+    result = _run_powershell(ps_cmd)
+    output = result.stdout.strip()
 
-    if is_platform:
+    if output == "CERT_NOT_FOUND":
+        return (
+            AttestationCheck(
+                name="Key storage provider",
+                passed=False,
+                detail=f"Certificate with CN '{key_cn}' not found in Cert:\\CurrentUser\\My",
+            ),
+            None,
+        )
+
+    if output in ("NO_PRIVATE_KEY", "NO_CNG_KEY") or "|" not in output:
+        return (
+            AttestationCheck(
+                name="Key storage provider",
+                passed=False,
+                detail=f"Could not determine CNG key provider for '{key_cn}'. Output: {output[:200]}",
+            ),
+            None,
+        )
+
+    provider, key_name = output.split("|", 1)
+
+    if provider == _MS_PLATFORM_CRYPTO_PROVIDER:
         return (
             AttestationCheck(
                 name="Key storage provider",
                 passed=True,
                 detail=f"Key '{key_cn}' found in {_MS_PLATFORM_CRYPTO_PROVIDER} (TPM-backed)",
             ),
-            {"provider": _MS_PLATFORM_CRYPTO_PROVIDER, "key_name": key_cn},
-        )
-
-    # Check if it's in the software KSP instead
-    result_sw = subprocess.run(
-        ["certutil", "-csp", _MS_SOFTWARE_KSP, "-key"],
-        capture_output=True,
-        text=True,
-    )
-    is_software = key_cn in result_sw.stdout if result_sw.returncode == 0 else False
-
-    if is_software:
-        return (
-            AttestationCheck(
-                name="Key storage provider",
-                passed=False,
-                detail=(
-                    f"Key '{key_cn}' is in {_MS_SOFTWARE_KSP} (software-backed, not TPM). "
-                    "Use a TPM-backed key (remove --soft-key) for hardware attestation."
-                ),
-            ),
-            {"provider": _MS_SOFTWARE_KSP, "key_name": key_cn},
+            {"provider": provider, "key_name": key_name},
         )
 
     return (
         AttestationCheck(
             name="Key storage provider",
             passed=False,
-            detail=f"Key '{key_cn}' not found in any CNG provider",
+            detail=(
+                f"Key '{key_cn}' is in {provider} (not TPM-backed). "
+                "Use a TPM-backed key (remove --soft-key) for hardware attestation."
+            ),
         ),
-        None,
+        {"provider": provider, "key_name": key_name},
     )
 
 
-def _ncrypt_create_claim(config: WorkloadConfig) -> tuple[AttestationCheck, bytes | None]:
+def _ncrypt_create_claim(config: WorkloadConfig, key_info: dict | None = None) -> tuple[AttestationCheck, bytes | None]:
     """Create a TPM key attestation claim via NCrypt ctypes FFI.
 
     Uses NCryptCreateClaim with NCRYPT_CLAIM_KEY_ATTESTATION to produce
     a cryptographic proof that the key resides in the TPM.
+
+    Args:
+        config: Workload configuration.
+        key_info: Output from _check_key_provider containing 'provider'
+            and 'key_name' (the actual CNG container name). If None,
+            the function cannot open the key.
     """
     try:
         import ctypes  # pylint: disable=import-outside-toplevel
@@ -270,7 +297,19 @@ def _ncrypt_create_claim(config: WorkloadConfig) -> tuple[AttestationCheck, byte
 
     provider_handle = wintypes.HANDLE()
     key_handle = wintypes.HANDLE()
-    provider_name = _MS_PLATFORM_CRYPTO_PROVIDER
+
+    if not key_info:
+        return (
+            AttestationCheck(
+                name="NCryptCreateClaim attestation",
+                passed=False,
+                detail=("Skipped — key provider info not available. Run key storage provider check first."),
+            ),
+            None,
+        )
+
+    provider_name = key_info.get("provider", _MS_PLATFORM_CRYPTO_PROVIDER)
+    key_name = key_info.get("key_name", config.workload_cn)
 
     try:
         # Open the Platform Crypto Provider
@@ -289,8 +328,7 @@ def _ncrypt_create_claim(config: WorkloadConfig) -> tuple[AttestationCheck, byte
                 None,
             )
 
-        # Open the key
-        key_name = config.workload_cn
+        # Open the key using the actual CNG container name (not the cert CN)
         status = ncrypt.NCryptOpenKey(
             provider_handle,
             ctypes.byref(key_handle),
@@ -473,7 +511,7 @@ def _attest_windows(config: WorkloadConfig) -> AttestationReport:
         )
 
     # Step 5: NCryptCreateClaim attestation
-    claim_check, claim_blob = _ncrypt_create_claim(config)
+    claim_check, claim_blob = _ncrypt_create_claim(config, key_info=provider_info)
     checks.append(claim_check)
     if claim_blob:
         artifacts.append(

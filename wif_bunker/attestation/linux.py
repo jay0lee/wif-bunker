@@ -15,6 +15,9 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from cryptography import x509
+from cryptography.hazmat.primitives import serialization
+
 from wif_bunker.attestation.base import (
     AttestationArtifact,
     AttestationCheck,
@@ -52,29 +55,14 @@ def _extract_ek_certificate(work_dir: Path) -> tuple[AttestationCheck, str | Non
             work_dir,
         )
         if result.returncode == 0:
-            # Convert DER to PEM
-            conv = subprocess.run(
-                [
-                    "openssl",
-                    "x509",
-                    "-inform",
-                    "DER",
-                    "-in",
-                    str(work_dir / "ek_cert.der"),
-                    "-out",
-                    str(ek_pem_path),
-                ],
-                capture_output=True,
-                text=True,
-            )
-            if conv.returncode == 0:
-                # Extract issuer for manufacturer identification
-                info = subprocess.run(
-                    ["openssl", "x509", "-in", str(ek_pem_path), "-issuer", "-noout"],
-                    capture_output=True,
-                    text=True,
-                )
-                issuer = info.stdout.strip() if info.returncode == 0 else "unknown"
+            # Convert DER to PEM and extract issuer
+            try:
+                der_data = (work_dir / "ek_cert.der").read_bytes()
+                cert = x509.load_der_x509_certificate(der_data)
+                pem_data = cert.public_bytes(serialization.Encoding.PEM)
+                ek_pem_path.write_bytes(pem_data)
+
+                issuer = cert.issuer.rfc4514_string()
                 return (
                     AttestationCheck(
                         name="EK certificate extracted",
@@ -83,6 +71,8 @@ def _extract_ek_certificate(work_dir: Path) -> tuple[AttestationCheck, str | Non
                     ),
                     ek_pem_path.read_text(encoding="utf-8"),
                 )
+            except Exception:
+                pass
 
     # No EK cert found — expected for swtpm
     return (
@@ -399,7 +389,6 @@ def _certify_key(work_dir: Path) -> tuple[AttestationCheck, bool]:
 def _attest_linux(config: WorkloadConfig) -> AttestationReport:  # pylint: disable=unused-argument
     """Perform full TPM 2.0 key attestation chain."""
     _require_command("tpm2_createek", package="tpm2-tools")
-    _require_command("openssl")
 
     checks: list[AttestationCheck] = []
     artifacts: list[AttestationArtifact] = []

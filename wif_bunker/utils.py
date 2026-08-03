@@ -25,10 +25,13 @@ def _supports_unicode() -> bool:
     if sys.platform == "win32":
         # Windows consoles use cp1252 by default. Only trust UTF-8 if the
         # console code page is 65001 or stdout is explicitly UTF-8.
+        import ctypes
+
         try:
-            if "65001" in os.popen("chcp 2>NUL").read():
+            cp = ctypes.windll.kernel32.GetConsoleOutputCP()
+            if cp == 65001:
                 return True
-        except OSError:
+        except (AttributeError, OSError):
             pass
         try:
             return bool(sys.stdout.encoding and sys.stdout.encoding.lower().startswith("utf"))
@@ -127,10 +130,21 @@ def with_retries(
 def write_secure_file(filepath: Path | str, content: str) -> None:
     """Writes a file to disk enforcing strictly locked down 0600 permissions."""
     filepath = Path(filepath)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    mode = 0o600
-    with os.fdopen(os.open(filepath, flags, mode), "w") as out:
-        out.write(content)
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        mode = 0o600
+        with os.fdopen(os.open(filepath, flags, mode), "w") as out:
+            out.write(content)
+    except PermissionError as exc:
+        raise RuntimeError(
+            f"Cannot write to '{filepath}'.\n"
+            f"  Directory: {filepath.parent}\n"
+            f"  Error: {exc}\n\n"
+            "You may not have write permission to the current directory.\n"
+            "Try running from a directory you own, for example:\n"
+            "  cd %USERPROFILE%\\Desktop && wif-bunker ...  (Windows)\n"
+            "  cd ~/Desktop && wif-bunker ...                (macOS/Linux)"
+        ) from exc
 
 
 def _require_command(name: str, *, package: str = "", install_hint: str = "") -> str:

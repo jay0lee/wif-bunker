@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from cryptography import x509
+from cryptography.x509.verification import PolicyBuilder, Store
 
 
 @dataclass
@@ -69,22 +70,22 @@ class AttestationReport:
         }
 
 
-def _concat_pems(directory: Path) -> str:
-    """Concatenate all PEM files in a directory into a single string."""
-    parts = []
+def _load_certs(directory: Path) -> list[x509.Certificate]:
+    """Load all PEM certificates from a directory."""
+    certs = []
     for pem_file in sorted(directory.glob("*.pem")):
-        parts.append(pem_file.read_text(encoding="utf-8").strip())
-    return "\n".join(parts)
+        certs.append(x509.load_pem_x509_certificate(pem_file.read_bytes()))
+    return certs
 
 
 def verify_ek_chain(ek_pem: str) -> AttestationCheck:
     """Verify EK certificate against known manufacturer root CAs.
 
-    Shared by Linux and Windows attestation modules. Concatenates individual
+    Shared by Linux and Windows attestation modules. Loads individual
     root and intermediate CA PEMs from the ``roots/roots/`` and
     ``roots/intermediates/`` directories (sourced from
-    https://github.com/loicsikidi/tpm-ca-certificates) and runs
-    ``openssl verify``.
+    https://github.com/loicsikidi/tpm-ca-certificates) and uses
+    cryptography.x509.verification.
     """
     # In PyInstaller builds, data files are extracted under sys._MEIPASS
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
@@ -101,30 +102,20 @@ def verify_ek_chain(ek_pem: str) -> AttestationCheck:
             detail="No manufacturer root CA certificates bundled. Chain verification skipped.",
         )
 
-    with tempfile.TemporaryDirectory() as work_dir:
-        work = Path(work_dir)
+    try:
+        ek_cert = x509.load_pem_x509_certificate(ek_pem.encode("utf-8"))
 
-        # Write EK cert to verify
-        ek_path = work / "ek.pem"
-        ek_path.write_text(ek_pem, encoding="utf-8")
+        roots = _load_certs(roots_dir)
+        store = Store(roots)
+        builder = PolicyBuilder().store(store)
 
-        # Concatenate roots into a single CA bundle
-        roots_bundle = work / "roots_bundle.pem"
-        roots_bundle.write_text(_concat_pems(roots_dir), encoding="utf-8")
+        intermediates = []
+        if intermediates_dir.exists():
+            intermediates = _load_certs(intermediates_dir)
 
-        # Build openssl verify command
-        cmd = ["openssl", "verify", "-CAfile", str(roots_bundle)]
+        verifier = builder.build_client_verifier()
+        verifier.verify(ek_cert, intermediates)
 
-        # Add intermediates if available
-        if intermediates_dir.exists() and any(intermediates_dir.glob("*.pem")):
-            intermediates_bundle = work / "intermediates_bundle.pem"
-            intermediates_bundle.write_text(_concat_pems(intermediates_dir), encoding="utf-8")
-            cmd.extend(["-untrusted", str(intermediates_bundle)])
-
-        cmd.append(str(ek_path))
-        result = subprocess.run(cmd, capture_output=True, text=True)
-
-    if result.returncode == 0 and ": OK" in result.stdout:
         return AttestationCheck(
             name="EK certificate chain verified",
             passed=True,
@@ -133,16 +124,10 @@ def verify_ek_chain(ek_pem: str) -> AttestationCheck:
                 "(https://github.com/loicsikidi/tpm-ca-certificates)"
             ),
         )
-
-    stderr_hint = ""
-    if result.stderr:
-        for line in result.stderr.strip().splitlines():
-            if "error" in line.lower():
-                stderr_hint = f" OpenSSL: {line.strip()}"
-                break
-
-    return AttestationCheck(
-        name="EK certificate chain verified",
-        passed=False,
-        detail=(f"EK certificate did not chain to any bundled manufacturer root CA.{stderr_hint}"),
-    )
+    except Exception as e:
+        stderr_hint = f" Error: {e}"
+        return AttestationCheck(
+            name="EK certificate chain verified",
+            passed=False,
+            detail=f"EK certificate did not chain to any bundled manufacturer root CA.{stderr_hint}",
+        )
