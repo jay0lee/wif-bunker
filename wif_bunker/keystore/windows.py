@@ -41,6 +41,7 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
     try:
         # 0. Clean up stale bunker-workload certs from previous runs.
         ps_cleanup = (
+            "Import-Module PKI; "
             "Get-ChildItem Cert:\\CurrentUser\\My | "
             "Where-Object { $_.Subject -like 'CN=bunker-workload-*' } | "
             "Remove-Item -Force"
@@ -130,7 +131,7 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
         ca_der_path.write_bytes(ca_cert_obj.public_bytes(serialization.Encoding.DER))
         # Windows thumbprints are always SHA1 — this is not a security choice
         ca_thumbprint = ca_cert_obj.fingerprint(hashes.SHA1()).hex().upper()
-        ps_install_ca = f"Import-Certificate -FilePath '{ca_der_path}' -CertStoreLocation 'Cert:\\CurrentUser\\Root'"
+        ps_install_ca = f"Import-Module PKI; Import-Certificate -FilePath '{ca_der_path}' -CertStoreLocation 'Cert:\\CurrentUser\\Root'"
 
         # Import-Certificate MUST run without capture_output so Windows can
         # display the root CA trust security dialog. Capturing stdout/stderr
@@ -142,6 +143,7 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
 
         # Verify the CA was actually accepted.
         ps_verify_ca = (
+            "Import-Module PKI; "
             f"(Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object {{ $_.Thumbprint -eq '{ca_thumbprint}' }}).Count"
         )
         verify_result = subprocess.run(
@@ -201,7 +203,7 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
                 "powershell",
                 "-NoProfile",
                 "-Command",
-                f"@(Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object Thumbprint -eq '{ca_thumbprint}').Count",
+                f"Import-Module PKI; @(Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object Thumbprint -eq '{ca_thumbprint}').Count",
             ],
             capture_output=True,
             text=True,
