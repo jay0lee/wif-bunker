@@ -115,19 +115,20 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
         ca_cert_obj = cx509.load_pem_x509_certificate(bundle.trust_anchor_pem.encode())
         ca_der_path = work_dir / "ca.der"
         ca_der_path.write_bytes(ca_cert_obj.public_bytes(serialization.Encoding.DER))
+        ca_thumbprint = ca_cert_obj.fingerprint(ca_cert_obj.signature_hash_algorithm).hex().upper()
         ps_install_ca = (
-            f"$cert = Import-Certificate "
+            f"Import-Certificate "
             f"-FilePath '{ca_der_path}' "
-            f"-CertStoreLocation 'Cert:\\CurrentUser\\Root'; "
-            f"Write-Output $cert.Thumbprint"
+            f"-CertStoreLocation 'Cert:\\CurrentUser\\Root'"
         )
-        ca_result = subprocess.run(
+
+        # Import-Certificate MUST run without capture_output so Windows can
+        # display the root CA trust security dialog. Capturing stdout/stderr
+        # causes Windows to suppress the GUI prompt entirely.
+        subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_install_ca],
-            capture_output=True,
-            text=True,
             check=True,
         )
-        ca_thumbprint = ca_result.stdout.strip()
 
         # Verify the CA was actually accepted.
         ps_verify_ca = (
@@ -169,10 +170,9 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
         logger.warning("    ╚══════════════════════════════════════════════════════════╝")
         logger.warning("")
         logger.info("    Removing ephemeral CA from trusted root store...")
+        # certutil -delstore also triggers a security dialog — must not capture.
         subprocess.run(
             ["certutil", "-user", "-delstore", "Root", ca_thumbprint],
-            capture_output=True,
-            text=True,
         )
         verify_result = subprocess.run(
             [

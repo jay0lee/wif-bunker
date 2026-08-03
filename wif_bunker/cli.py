@@ -32,7 +32,7 @@ from wif_bunker.config import (
 )
 from wif_bunker.gcp_client import GCPClient
 from wif_bunker.keystore import generate_os_keystore_cert
-from wif_bunker.modes import _run_cert_only, _run_status
+from wif_bunker.modes import _run_attest, _run_cert_only, _run_status
 from wif_bunker.utils import (
     SYM_FAIL,
     SYM_OK,
@@ -66,10 +66,20 @@ def main() -> None:
         action="store_true",
         help=("Show current WIF Bunker configuration status, certificate expiry, and test ECP and ADC connectivity."),
     )
+    mode_group.add_argument(
+        "--attest",
+        action="store_true",
+        help="Generate hardware attestation artifacts proving keys reside in hardware.",
+    )
     parser.add_argument(
         "--output-dir",
         metavar="DIR",
-        help="Output directory for certificate files (default: current directory). Only used with --cert-only.",
+        help="Output directory for --cert-only or --attest artifacts.",
+    )
+    parser.add_argument(
+        "--cert-file",
+        metavar="PATH",
+        help="Path to workload certificate PEM to attest. Used with --attest.",
     )
     project_group = parser.add_mutually_exclusive_group()
     project_group.add_argument(
@@ -218,13 +228,21 @@ def main() -> None:
             )
         config.key_algorithm = args.key_algorithm
 
-    # Validate --output-dir is only used with --cert-only
-    if args.output_dir and not args.cert_only:
-        parser.error("--output-dir can only be used with --cert-only")
+    # Validate --output-dir is only used with --cert-only or --attest
+    if args.output_dir and not (args.cert_only or args.attest):
+        parser.error("--output-dir can only be used with --cert-only or --attest")
 
-    # --- Mode dispatch: --status or --cert-only exit early ---
+    # Validate --cert-file is only used with --attest
+    if args.cert_file and not args.attest:
+        parser.error("--cert-file can only be used with --attest")
+
+    # --- Mode dispatch: --status, --attest, or --cert-only exit early ---
     if args.status:
         _run_status()
+        return
+
+    if args.attest:
+        _run_attest(config, args.output_dir, args.cert_file)
         return
 
     if args.cert_only:

@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import tempfile
+from pathlib import Path
 
 from wif_bunker.attestation.base import (
     AttestationArtifact,
@@ -76,9 +78,7 @@ def _check_tpm_status() -> tuple[AttestationCheck, dict | None]:
 
 def _check_ek_info() -> tuple[AttestationCheck, dict | None]:
     """Extract Endorsement Key info via PowerShell."""
-    result = _run_powershell(
-        "Get-TpmEndorsementKeyInfo -HashAlgorithm Sha256 | ConvertTo-Json -Depth 3"
-    )
+    result = _run_powershell("Get-TpmEndorsementKeyInfo -HashAlgorithm Sha256 | ConvertTo-Json -Depth 3")
     if result.returncode != 0:
         return (
             AttestationCheck(
@@ -112,6 +112,108 @@ def _check_ek_info() -> tuple[AttestationCheck, dict | None]:
             ),
             None,
         )
+
+
+def _extract_ek_certificate() -> tuple[AttestationCheck, str | None]:
+    """Extract the EK certificate as PEM via PowerShell."""
+    # Export the manufacturer EK certificate to PEM format
+    ps_command = (
+        "$ekInfo = Get-TpmEndorsementKeyInfo -HashAlgorithm Sha256; "
+        "if ($ekInfo.ManufacturerCertificates -and "
+        "$ekInfo.ManufacturerCertificates.Count -gt 0) { "
+        "$cert = $ekInfo.ManufacturerCertificates[0]; "
+        "$pem = '-----BEGIN CERTIFICATE-----' + "
+        "[Environment]::NewLine + "
+        "[Convert]::ToBase64String($cert.RawData, "
+        "'InsertLineBreaks') + "
+        "[Environment]::NewLine + "
+        "'-----END CERTIFICATE-----'; "
+        "Write-Output $pem "
+        "} else { Write-Output 'NO_CERT' }"
+    )
+    result = _run_powershell(ps_command)
+    if result.returncode != 0:
+        return (
+            AttestationCheck(
+                name="EK certificate extracted",
+                passed=False,
+                detail=(f"Could not extract EK certificate: {result.stderr.strip()[:200]}"),
+            ),
+            None,
+        )
+
+    output = result.stdout.strip()
+    if output == "NO_CERT" or "BEGIN CERTIFICATE" not in output:
+        return (
+            AttestationCheck(
+                name="EK certificate extracted",
+                passed=False,
+                detail=("No manufacturer EK certificate found. The TPM may not have a provisioned EK certificate."),
+            ),
+            None,
+        )
+
+    # Extract issuer for identification
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".pem", delete=False, encoding="utf-8") as tmp:
+        tmp.write(output)
+        tmp_path = tmp.name
+
+    try:
+        info = subprocess.run(
+            ["openssl", "x509", "-in", tmp_path, "-issuer", "-noout"],
+            capture_output=True,
+            text=True,
+        )
+        issuer = info.stdout.strip() if info.returncode == 0 else "unknown"
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+    return (
+        AttestationCheck(
+            name="EK certificate extracted",
+            passed=True,
+            detail=f"EK certificate extracted from TPM. Issuer: {issuer}",
+        ),
+        output,
+    )
+
+
+def _verify_ek_chain(ek_pem: str) -> AttestationCheck:
+    """Verify EK certificate against known manufacturer root CAs."""
+    roots_dir = Path(__file__).parent / "roots"
+    if not roots_dir.exists() or not any(roots_dir.glob("*.pem")):
+        return AttestationCheck(
+            name="EK certificate chain verified",
+            passed=False,
+            detail=("No manufacturer root CA certificates bundled. Chain verification skipped."),
+        )
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".pem", delete=False, encoding="utf-8") as tmp:
+        tmp.write(ek_pem)
+        ek_path = tmp.name
+
+    try:
+        for root_ca in sorted(roots_dir.glob("*.pem")):
+            result = subprocess.run(
+                ["openssl", "verify", "-CAfile", str(root_ca), ek_path],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0 and ": OK" in result.stdout:
+                manufacturer = root_ca.stem.replace("_", " ").title()
+                return AttestationCheck(
+                    name="EK certificate chain verified",
+                    passed=True,
+                    detail=(f"EK certificate verified against {manufacturer} root CA ({root_ca.name})"),
+                )
+    finally:
+        Path(ek_path).unlink(missing_ok=True)
+
+    return AttestationCheck(
+        name="EK certificate chain verified",
+        passed=False,
+        detail=("EK certificate did not chain to any bundled manufacturer root CA."),
+    )
 
 
 def _check_key_provider(config: WorkloadConfig) -> tuple[AttestationCheck, dict | None]:
@@ -234,8 +336,7 @@ def _ncrypt_create_claim(config: WorkloadConfig) -> tuple[AttestationCheck, byte
                     name="NCryptCreateClaim attestation",
                     passed=False,
                     detail=(
-                        f"NCryptOpenKey failed for '{key_name}': 0x{status:08X}. "
-                        "Key may be in software KSP (not TPM)."
+                        f"NCryptOpenKey failed for '{key_name}': 0x{status:08X}. Key may be in software KSP (not TPM)."
                     ),
                 ),
                 None,
@@ -305,9 +406,9 @@ def _ncrypt_create_claim(config: WorkloadConfig) -> tuple[AttestationCheck, byte
         )
 
     finally:
-        if key_handle.value:
+        if key_handle.value:  # pylint: disable=using-constant-test
             ncrypt.NCryptFreeObject(key_handle)
-        if provider_handle.value:
+        if provider_handle.value:  # pylint: disable=using-constant-test
             ncrypt.NCryptFreeObject(provider_handle)
 
 
@@ -357,7 +458,7 @@ def _attest_windows(config: WorkloadConfig) -> AttestationReport:
             )
         )
 
-    # Step 2: EK information
+    # Step 2: EK certificate extraction and chain verification
     ek_check, ek_info = _check_ek_info()
     checks.append(ek_check)
     if ek_info:
@@ -369,7 +470,29 @@ def _attest_windows(config: WorkloadConfig) -> AttestationReport:
             )
         )
 
-    # Step 3: Key provider verification
+    # Step 3: Extract EK certificate and verify chain
+    ek_cert_check, ek_pem = _extract_ek_certificate()
+    checks.append(ek_cert_check)
+    if ek_pem:
+        artifacts.append(
+            AttestationArtifact(
+                filename="ek_certificate.pem",
+                content=ek_pem,
+                description="TPM Endorsement Key certificate (manufacturer-signed)",
+            )
+        )
+        chain_check = _verify_ek_chain(ek_pem)
+        checks.append(chain_check)
+    else:
+        checks.append(
+            AttestationCheck(
+                name="EK certificate chain verified",
+                passed=False,
+                detail="Skipped — no EK certificate to verify",
+            )
+        )
+
+    # Step 4: Key provider verification
     provider_check, provider_info = _check_key_provider(config)
     checks.append(provider_check)
     if provider_info:
@@ -381,7 +504,7 @@ def _attest_windows(config: WorkloadConfig) -> AttestationReport:
             )
         )
 
-    # Step 4: NCryptCreateClaim attestation
+    # Step 5: NCryptCreateClaim attestation
     claim_check, claim_blob = _ncrypt_create_claim(config)
     checks.append(claim_check)
     if claim_blob:
@@ -394,7 +517,7 @@ def _attest_windows(config: WorkloadConfig) -> AttestationReport:
             )
         )
 
-    # Step 5: Non-exportability check
+    # Step 6: Non-exportability check
     export_check = _check_exportability(config)
     checks.append(export_check)
 
@@ -425,12 +548,14 @@ def _attest_windows(config: WorkloadConfig) -> AttestationReport:
         documentation_urls=[
             "https://learn.microsoft.com/en-us/windows/win32/api/ncrypt/nf-ncrypt-ncryptcreateclaim",
             "https://learn.microsoft.com/en-us/powershell/module/tpm/get-tpmendorsementkeyinfo",
-            "https://learn.microsoft.com/en-us/windows/security/identity-protection/hello-for-business/hello-key-attestation",
+            "https://learn.microsoft.com/en-us/windows/security/"
+            "identity-protection/hello-for-business/hello-key-attestation",
         ],
         verification_steps=[
             "1. Verify TPM is present and ready: Get-Tpm",
-            "2. Verify key is in Platform Crypto Provider: certutil -csp 'Microsoft Platform Crypto Provider' -key",
-            "3. Verify claim blob: NCryptVerifyClaim with the attestation blob",
-            "4. Verify EK: Get-TpmEndorsementKeyInfo -HashAlgorithm Sha256",
+            "2. Verify EK certificate chain: openssl verify -CAfile <manufacturer_root.pem> ek_certificate.pem",
+            "3. Verify key is in Platform Crypto Provider: certutil -csp 'Microsoft Platform Crypto Provider' -key",
+            "4. Verify claim blob: NCryptVerifyClaim with the attestation blob",
+            "5. Verify EK: Get-TpmEndorsementKeyInfo -HashAlgorithm Sha256",
         ],
     )

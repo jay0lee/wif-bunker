@@ -56,14 +56,8 @@ class AttestationReport:
             "hardware_type": self.hardware_type,
             "checks_passed": self.checks_passed,
             "checks_total": self.checks_total,
-            "checks": [
-                {"name": chk.name, "passed": chk.passed, "detail": chk.detail}
-                for chk in self.checks
-            ],
-            "artifacts": [
-                {"filename": art.filename, "description": art.description}
-                for art in self.artifacts
-            ],
+            "checks": [{"name": chk.name, "passed": chk.passed, "detail": chk.detail} for chk in self.checks],
+            "artifacts": [{"filename": art.filename, "description": art.description} for art in self.artifacts],
             "summary": self.summary,
             "not_supported_reason": self.not_supported_reason,
             "documentation_urls": self.documentation_urls,

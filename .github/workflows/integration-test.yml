@@ -326,6 +326,57 @@ jobs:
           done
           echo "=== All --cert-only algorithm tests passed ==="
 
+      # ── Test --attest after --cert-only ──
+      - name: "Test --attest (hardware attestation)"
+        shell: bash
+        run: |
+          echo "=== Testing --attest ==="
+          certdir=$(mktemp -d)
+          attestdir=$(mktemp -d)
+          WIF_CMD="${{ inputs.wif_bunker_cmd || 'python -m wif_bunker' }}"
+
+          # Generate a cert first so there's something to attest
+          DIALOG_PID=""
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            powershell -NoProfile -File .github/scripts/win_dialog_accept.ps1 &
+            DIALOG_PID=$!
+          fi
+
+          $WIF_CMD \
+            --cert-only \
+            --output-dir "$certdir" \
+            ${{ matrix.soft_key_flag }}
+
+          if [[ -n "$DIALOG_PID" ]]; then
+            kill "$DIALOG_PID" 2>/dev/null || true
+            wait "$DIALOG_PID" 2>/dev/null || true
+          fi
+
+          # Run attestation against the cert we just created
+          $WIF_CMD --attest \
+            --cert-file "$certdir/workload_cert.pem" \
+            --output-dir "$attestdir" || true
+
+          # Verify attestation report was created
+          test -f "$attestdir/attestation_report.json" || { echo "FAIL: no attestation_report.json"; exit 1; }
+          test -f "$attestdir/attestation_report.txt"  || { echo "FAIL: no attestation_report.txt"; exit 1; }
+          echo "  ✓ Attestation report files created"
+
+          # Verify JSON is valid and has expected structure
+          python3 -c "
+          import json, sys
+          with open('$attestdir/attestation_report.json') as f:
+              r = json.load(f)
+          assert 'platform' in r, 'Missing platform'
+          assert 'checks' in r, 'Missing checks'
+          assert 'checks_passed' in r, 'Missing checks_passed'
+          assert r['checks_total'] > 0, 'No checks ran'
+          print(f'  ✓ Report valid: {r[\"platform\"]}, {r[\"checks_passed\"]}/{r[\"checks_total\"]} checks passed')
+          "
+
+          rm -rf "$certdir" "$attestdir"
+          echo "=== --attest test passed ==="
+
       # ── Test --cert-only refuses to overwrite existing config ──
       - name: "Test --cert-only overwrite protection"
         shell: bash

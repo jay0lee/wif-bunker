@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # Symbols for terminal output
 _SYM_OK = "\u2713"
 _SYM_FAIL = "\u2717"
-_SYM_WARN = "\u26A0"
+_SYM_WARN = "\u26a0"
 
 
 def generate_attestation(config: WorkloadConfig) -> AttestationReport:
@@ -31,7 +31,7 @@ def generate_attestation(config: WorkloadConfig) -> AttestationReport:
         "win32": "_attest_windows",
     }
 
-    for prefix, func_name in generators.items():
+    for prefix, _ in generators.items():
         if platform.startswith(prefix):
             # Lazy import to avoid loading platform-specific code on wrong OS
             if prefix == "linux":

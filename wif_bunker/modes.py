@@ -1,4 +1,4 @@
-"""Alternate CLI modes: --cert-only and --status."""  # pylint: disable=duplicate-code
+"""Alternate CLI modes: --cert-only, --status, and --attest."""  # pylint: disable=duplicate-code
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import sys
 from pathlib import Path
 
 import google.auth
@@ -15,6 +16,7 @@ from cryptography import x509 as cx509
 from cryptography.x509.oid import NameOID
 from google.auth.transport.requests import AuthorizedSession
 
+from wif_bunker.attestation import generate_attestation, print_attestation_summary, write_attestation_report
 from wif_bunker.config import _CONFIG_FILES, WorkloadConfig
 from wif_bunker.keystore import generate_os_keystore_cert
 from wif_bunker.utils import (
@@ -51,6 +53,51 @@ def _run_cert_only(config: WorkloadConfig, output_dir: str) -> None:
     logger.info("Files written:")
     logger.info("  %s", cert_path)
     logger.info("  %s", chain_path)
+
+
+def _default_attest_dir() -> str:
+    """Return the platform-appropriate default attestation output directory."""
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
+        return str(Path(base) / "wif-bunker" / "attestation")
+    return str(Path.home() / ".config" / "wif-bunker" / "attestation")
+
+
+def _run_attest(config: WorkloadConfig, output_dir: str | None, cert_file: str | None) -> None:
+    """Generate hardware attestation artifacts for the current platform."""
+    target_dir = output_dir or _default_attest_dir()
+    logger.info("=== Hardware Key Attestation ===")
+
+    # If a cert file is provided, extract the CN to target the correct key
+    if cert_file:
+        cert_path = Path(cert_file)
+        if not cert_path.exists():
+            logger.error("Certificate file not found: %s", cert_file)
+            raise SystemExit(1)
+        cert_pem = cert_path.read_bytes()
+        cert = cx509.load_pem_x509_certificate(cert_pem)
+        cn_attrs = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+        if cn_attrs:
+            config.workload_cn = cn_attrs[0].value
+            logger.info("  Attesting key: %s (from %s)", config.workload_cn, cert_file)
+        else:
+            logger.warning("  Certificate has no CN — using default config")
+    else:
+        logger.info("  No --cert-file specified — attesting platform TPM capabilities only")
+
+    logger.info("  Output directory: %s", target_dir)
+    logger.info("")
+
+    report = generate_attestation(config)
+
+    # Write artifacts and reports
+    write_attestation_report(report, Path(target_dir))
+
+    # Print summary to terminal
+    print_attestation_summary(report)
+
+    logger.info("")
+    logger.info("Attestation artifacts written to: %s", target_dir)
 
 
 def _run_status() -> None:

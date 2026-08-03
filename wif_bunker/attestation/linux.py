@@ -54,9 +54,14 @@ def _extract_ek_certificate(work_dir: Path) -> tuple[AttestationCheck, str | Non
             # Convert DER to PEM
             conv = subprocess.run(
                 [
-                    "openssl", "x509", "-inform", "DER",
-                    "-in", str(work_dir / "ek_cert.der"),
-                    "-out", str(ek_pem_path),
+                    "openssl",
+                    "x509",
+                    "-inform",
+                    "DER",
+                    "-in",
+                    str(work_dir / "ek_cert.der"),
+                    "-out",
+                    str(ek_pem_path),
                 ],
                 capture_output=True,
                 text=True,
@@ -151,9 +156,21 @@ def _create_ek_and_ak(work_dir: Path) -> tuple[AttestationCheck, bool]:
     # Create AK bound to EK
     result = _run_tpm2(
         [
-            "tpm2_createak", "-C", "ek.ctx", "-c", "ak.ctx",
-            "-G", "rsa", "-g", "sha256",
-            "-u", "ak_pub.pem", "-f", "pem", "-n", "ak.name",
+            "tpm2_createak",
+            "-C",
+            "ek.ctx",
+            "-c",
+            "ak.ctx",
+            "-G",
+            "rsa",
+            "-g",
+            "sha256",
+            "-u",
+            "ak_pub.pem",
+            "-f",
+            "pem",
+            "-n",
+            "ak.name",
         ],
         work_dir,
     )
@@ -196,8 +213,16 @@ def _credential_activation(work_dir: Path) -> AttestationCheck:
     # Make credential (simulates verifier side)
     result = _run_tpm2(
         [
-            "tpm2_makecredential", "-u", "ek_pub.pem", "-s", "challenge.txt",
-            "-n", f"file:ak.name", "-o", "credential.secret", "-e",
+            "tpm2_makecredential",
+            "-u",
+            "ek_pub.pem",
+            "-s",
+            "challenge.txt",
+            "-n",
+            "file:ak.name",
+            "-o",
+            "credential.secret",
+            "-e",
         ],
         work_dir,
     )
@@ -211,8 +236,15 @@ def _credential_activation(work_dir: Path) -> AttestationCheck:
     # Activate credential (proves AK is on same TPM as EK)
     result = _run_tpm2(
         [
-            "tpm2_activatecredential", "-c", "ak.ctx", "-C", "ek.ctx",
-            "-i", "credential.secret", "-o", "decrypted_challenge.txt",
+            "tpm2_activatecredential",
+            "-c",
+            "ak.ctx",
+            "-C",
+            "ek.ctx",
+            "-i",
+            "credential.secret",
+            "-o",
+            "decrypted_challenge.txt",
         ],
         work_dir,
     )
@@ -256,9 +288,9 @@ def _find_pkcs11_store() -> Path | None:
 
 
 def _extract_workload_key_from_pkcs11(
-    config: WorkloadConfig, work_dir: Path
+    work_dir: Path,  # reserved for future blob extraction  # pylint: disable=unused-argument
 ) -> tuple[AttestationCheck, dict | None]:
-    """Extract workload key blobs from tpm2-pkcs11 SQLite store."""
+    """Extract workload key metadata from tpm2-pkcs11 SQLite store."""
     db_path = _find_pkcs11_store()
     if db_path is None:
         return (
@@ -305,10 +337,7 @@ def _extract_workload_key_from_pkcs11(
             AttestationCheck(
                 name="Workload key found in PKCS#11 store",
                 passed=True,
-                detail=(
-                    f"Token '{token['label']}' found in {db_path} "
-                    f"with {len(objects)} object(s)"
-                ),
+                detail=(f"Token '{token['label']}' found in {db_path} with {len(objects)} object(s)"),
             ),
             token_info,
         )
@@ -324,7 +353,7 @@ def _extract_workload_key_from_pkcs11(
         )
 
 
-def _certify_key(work_dir: Path, config: WorkloadConfig) -> tuple[AttestationCheck, bool]:
+def _certify_key(work_dir: Path) -> tuple[AttestationCheck, bool]:
     """Certify a key using tpm2_certify with the AK.
 
     Attempts to certify the primary key in the owner hierarchy, which is
@@ -334,8 +363,15 @@ def _certify_key(work_dir: Path, config: WorkloadConfig) -> tuple[AttestationChe
     # Create a primary in the owner hierarchy matching the pkcs11 parent
     result = _run_tpm2(
         [
-            "tpm2_createprimary", "-C", "o", "-g", "sha256", "-G", "rsa",
-            "-c", "owner_primary.ctx",
+            "tpm2_createprimary",
+            "-C",
+            "o",
+            "-g",
+            "sha256",
+            "-G",
+            "rsa",
+            "-c",
+            "owner_primary.ctx",
         ],
         work_dir,
     )
@@ -354,12 +390,18 @@ def _certify_key(work_dir: Path, config: WorkloadConfig) -> tuple[AttestationChe
     result = _run_tpm2(
         [
             "tpm2_certify",
-            "-c", "owner_primary.ctx",
-            "-C", "ak.ctx",
-            "-g", "sha256",
-            "-o", "certify_attest.bin",
-            "-s", "certify_signature.bin",
-            "-q", nonce,
+            "-c",
+            "owner_primary.ctx",
+            "-C",
+            "ak.ctx",
+            "-g",
+            "sha256",
+            "-o",
+            "certify_attest.bin",
+            "-s",
+            "certify_signature.bin",
+            "-q",
+            nonce,
         ],
         work_dir,
     )
@@ -387,7 +429,7 @@ def _certify_key(work_dir: Path, config: WorkloadConfig) -> tuple[AttestationChe
     )
 
 
-def _attest_linux(config: WorkloadConfig) -> AttestationReport:
+def _attest_linux(config: WorkloadConfig) -> AttestationReport:  # pylint: disable=unused-argument
     """Perform full TPM 2.0 key attestation chain."""
     _require_command("tpm2_createek", package="tpm2-tools")
     _require_command("openssl")
@@ -442,7 +484,7 @@ def _attest_linux(config: WorkloadConfig) -> AttestationReport:
             checks.append(cred_check)
 
             # Step 5: Certify the key
-            certify_check, certified = _certify_key(work_dir, config)
+            certify_check, certified = _certify_key(work_dir)
             checks.append(certify_check)
 
             if certified:
@@ -483,7 +525,7 @@ def _attest_linux(config: WorkloadConfig) -> AttestationReport:
             )
 
         # Step 6: PKCS#11 store cross-reference
-        pkcs11_check, token_info = _extract_workload_key_from_pkcs11(config, work_dir)
+        pkcs11_check, token_info = _extract_workload_key_from_pkcs11(work_dir)
         checks.append(pkcs11_check)
         if token_info:
             artifacts.append(
@@ -524,7 +566,8 @@ def _attest_linux(config: WorkloadConfig) -> AttestationReport:
         verification_steps=[
             "1. Verify EK certificate chain: openssl verify -CAfile <manufacturer_root.pem> ek_certificate.pem",
             "2. Verify AK is bound to genuine TPM via credential activation challenge/response",
-            "3. Verify attestation signature: use AK public key to verify certify_signature.bin over certify_attest.bin",
+            "3. Verify attestation signature: use AK public key to verify "
+            "certify_signature.bin over certify_attest.bin",
             "4. Parse certify_attest.bin to confirm magic=0xFF54504D (TPM_GENERATED_VALUE) "
             "and type=0x8017 (TPM_ST_ATTEST_CERTIFY)",
         ],

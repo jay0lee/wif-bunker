@@ -20,7 +20,8 @@ logger = logging.getLogger(__name__)
 
 _APPLE_DOCS = [
     "https://developer.apple.com/documentation/devicecheck/dcappattestservice",
-    "https://developer.apple.com/documentation/security/certificate_key_and_trust_services/keys/storing_keys_in_the_secure_enclave",
+    "https://developer.apple.com/documentation/security/"
+    "certificate_key_and_trust_services/keys/storing_keys_in_the_secure_enclave",
     "https://support.apple.com/guide/deployment/managed-device-attestation-dep2ba3d4a0a/web",
 ]
 
