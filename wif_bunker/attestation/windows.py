@@ -344,6 +344,24 @@ def _get_or_create_ak(ncrypt, ctypes, wintypes, provider_handle):
         ncrypt.NCryptFreeObject(ak_handle)
         return None, f"NCryptSetProperty(Length) for AK failed: 0x{status & 0xFFFFFFFF:08X}"
 
+    # Set PCP key usage policy to IDENTITY_KEY — this marks the AK as
+    # a "restricted signing key" that can only sign TPM-internal structures
+    # (attestation claims).  NCryptCreateClaim requires the authority key
+    # to have this policy; without it, it fails with PCP_E_KEY_NOT_LOADED
+    # (0x8029040F).
+    _NCRYPT_PCP_IDENTITY_KEY = 0x00000008
+    usage_policy = wintypes.DWORD(_NCRYPT_PCP_IDENTITY_KEY)
+    status = ncrypt.NCryptSetProperty(
+        ak_handle,
+        "PCP_KEY_USAGE_POLICY",
+        ctypes.byref(usage_policy),
+        ctypes.sizeof(usage_policy),
+        0,
+    )
+    if status != 0:
+        ncrypt.NCryptFreeObject(ak_handle)
+        return None, f"NCryptSetProperty(PCP_KEY_USAGE_POLICY) for AK failed: 0x{status & 0xFFFFFFFF:08X}"
+
     # Finalize (persist) the key in the TPM.
     status = ncrypt.NCryptFinalizeKey(ak_handle, 0)
     if status != 0:
