@@ -27,7 +27,7 @@ from wif_bunker.attestation.base import (
     verify_ek_chain,
 )
 from wif_bunker.config import WorkloadConfig
-from wif_bunker.utils import _require_command
+from wif_bunker.utils import require_commands
 
 logger = logging.getLogger(__name__)
 
@@ -83,14 +83,59 @@ def _extract_ek_certificate(work_dir: Path) -> tuple[AttestationCheck, str | Non
             except Exception:
                 pass
 
-    # No EK cert found — expected for swtpm
+    # No EK cert in NVRAM — try tpm2_getekcertificate to fetch from manufacturer.
+    # Requires the EK public key in native TPM2B_PUBLIC format.
+    ek_pub_native = work_dir / "ek_pub_native.tpm2"
+    if not ek_pub_native.exists():
+        # Create EK just for the pub key export (native format)
+        _run_tpm2(
+            ["tpm2_createek", "-c", "ek_tmp.ctx", "-G", "rsa", "-u", "ek_pub_native.tpm2"],
+            work_dir,
+        )
+    if ek_pub_native.exists():
+        result = _run_tpm2(
+            ["tpm2_getekcertificate", "-u", "ek_pub_native.tpm2", "-o", "ek_cert_fetched.pem"],
+            work_dir,
+        )
+        if result.returncode == 0:
+            try:
+                raw = (work_dir / "ek_cert_fetched.pem").read_bytes().lstrip()
+                # tpm2_getekcertificate may return PEM or DER
+                if raw.startswith(b"-----BEGIN"):
+                    cert = x509.load_pem_x509_certificate(raw)
+                else:
+                    cert = x509.load_der_x509_certificate(raw)
+                pem_data = cert.public_bytes(serialization.Encoding.PEM)
+                ek_pem_path.write_bytes(pem_data)
+
+                ek_pem = pem_data.decode("utf-8")
+                ek_details = parse_ek_details(ek_pem)
+                issuer = ek_details.get("issuer", cert.issuer.rfc4514_string())
+
+                detail = f"EK certificate retrieved from manufacturer provisioning service. Issuer: {issuer}"
+                if "tpm_model" in ek_details:
+                    detail += f" (Model: {ek_details['tpm_model']})"
+
+                return (
+                    AttestationCheck(
+                        name="EK certificate extracted",
+                        passed=True,
+                        detail=detail,
+                    ),
+                    ek_pem,
+                )
+            except Exception:
+                pass
+
     return (
         AttestationCheck(
             name="EK certificate extracted",
             passed=False,
             detail=(
-                "No EK certificate found in TPM NVRAM. This is expected for software TPMs (swtpm). "
-                "On real hardware, the TPM manufacturer provisions an EK certificate at manufacturing."
+                "No EK certificate found in TPM NVRAM or via manufacturer "
+                "provisioning (tpm2_getekcertificate). This is expected for "
+                "software TPMs. On real hardware, check network connectivity "
+                "for Intel PTT or ensure the BIOS has provisioned the EK."
             ),
         ),
         None,
@@ -156,11 +201,17 @@ def _get_tpm_info(work_dir: Path) -> dict | None:
 
 def _create_ek_and_ak(work_dir: Path) -> tuple[AttestationCheck, bool]:
     """Create Endorsement Key context and Attestation Key."""
-    # Create EK
+    # Create EK — output pub key in both native (for makecredential) and PEM (for reports)
     result = _run_tpm2(
-        ["tpm2_createek", "-c", "ek.ctx", "-G", "rsa", "-u", "ek_pub.pem", "-f", "pem"],
+        ["tpm2_createek", "-c", "ek.ctx", "-G", "rsa", "-u", "ek_pub.tpm2"],
         work_dir,
     )
+    if result.returncode == 0:
+        # Also export in PEM for the attestation report
+        _run_tpm2(
+            ["tpm2_createek", "-c", "ek.ctx", "-G", "rsa", "-u", "ek_pub.pem", "-f", "pem"],
+            work_dir,
+        )
     if result.returncode != 0:
         return (
             AttestationCheck(
@@ -219,7 +270,7 @@ def _credential_activation(work_dir: Path) -> AttestationCheck:
     challenge_path = work_dir / "challenge.txt"
     challenge_path.write_text(challenge, encoding="utf-8")
 
-    # Read AK name
+    # Read AK name as hex (tpm2_makecredential expects hex, not file: prefix)
     ak_name_path = work_dir / "ak.name"
     if not ak_name_path.exists():
         return AttestationCheck(
@@ -227,20 +278,21 @@ def _credential_activation(work_dir: Path) -> AttestationCheck:
             passed=False,
             detail="AK name file not found — AK creation may have failed",
         )
+    ak_name_hex = ak_name_path.read_bytes().hex()
 
-    # Make credential (simulates verifier side)
+    # Make credential using native TPM2B_PUBLIC format for EK pub key
+    # and hex-encoded AK name (file: prefix not supported in all versions)
     result = _run_tpm2(
         [
             "tpm2_makecredential",
             "-u",
-            "ek_pub.pem",
+            "ek_pub.tpm2",
             "-s",
             "challenge.txt",
             "-n",
-            "file:ak.name",
+            ak_name_hex,
             "-o",
             "credential.secret",
-            "-e",
         ],
         work_dir,
     )
@@ -404,7 +456,8 @@ def _certify_key(work_dir: Path) -> tuple[AttestationCheck, bool]:
         )
 
     # Certify the primary key with the AK
-    nonce = base64.b16encode(os.urandom(8)).decode().lower()
+    # Note: qualifying-data / -q flag is not available in tpm2-tools 5.6
+    # and below, so we omit it for maximum compatibility.
     result = _run_tpm2(
         [
             "tpm2_certify",
@@ -418,8 +471,6 @@ def _certify_key(work_dir: Path) -> tuple[AttestationCheck, bool]:
             "certify_attest.bin",
             "-s",
             "certify_signature.bin",
-            "-q",
-            nonce,
         ],
         work_dir,
     )
@@ -439,8 +490,8 @@ def _certify_key(work_dir: Path) -> tuple[AttestationCheck, bool]:
             passed=True,
             detail=(
                 "tpm2_certify produced attestation blob and signature. "
-                f"Nonce: {nonce}. The TPM cryptographically certifies "
-                "this key exists within its boundary with fixedTPM attributes."
+                "The TPM cryptographically certifies this key exists "
+                "within its boundary with fixedTPM attributes."
             ),
         ),
         True,
@@ -449,7 +500,14 @@ def _certify_key(work_dir: Path) -> tuple[AttestationCheck, bool]:
 
 def _attest_linux(config: WorkloadConfig) -> AttestationReport:  # pylint: disable=unused-argument
     """Perform full TPM 2.0 key attestation chain."""
-    _require_command("tpm2_createek", package="tpm2-tools")
+    require_commands([
+        ("tpm2_createek", "tpm2-tools", "sudo apt install tpm2-tools"),
+        ("tpm2_createak", "tpm2-tools", "sudo apt install tpm2-tools"),
+        ("tpm2_certify", "tpm2-tools", "sudo apt install tpm2-tools"),
+        ("tpm2_nvread", "tpm2-tools", "sudo apt install tpm2-tools"),
+        ("tpm2_makecredential", "tpm2-tools", "sudo apt install tpm2-tools"),
+        ("tpm2_activatecredential", "tpm2-tools", "sudo apt install tpm2-tools"),
+    ])
 
     checks: list[AttestationCheck] = []
     artifacts: list[AttestationArtifact] = []

@@ -18,7 +18,7 @@ class TestPsCertPreamble:
 
 
 class TestCertGenerationCommandConstruction:
-    @patch("wif_bunker.keystore.windows._require_command")
+    @patch("wif_bunker.keystore.windows.require_commands")
     @patch("wif_bunker.keystore.windows.subprocess.run")
     def test_cleanup_uses_preamble(self, mock_run, mock_require, sample_config):
         # We can let the function fail later on in the process because
@@ -39,7 +39,7 @@ class TestCertGenerationCommandConstruction:
         assert "Microsoft.PowerShell.Security" in cmd[3]
 
     @patch("wif_bunker.keystore.windows.ncrypt")
-    @patch("wif_bunker.keystore.windows._require_command")
+    @patch("wif_bunker.keystore.windows.require_commands")
     @patch("wif_bunker.keystore.windows.subprocess.run")
     def test_certreq_not_required(self, mock_run, mock_require, mock_ncrypt, sample_config):
         """certreq is no longer needed — NCrypt ctypes replaced it."""
@@ -48,11 +48,14 @@ class TestCertGenerationCommandConstruction:
         except Exception:
             pass
 
-        called_commands = [call.args[0] for call in mock_require.call_args_list]
-        assert "certreq" not in called_commands
-        assert "powershell" in called_commands
+        # require_commands is called once with a list of (name, pkg, hint) tuples
+        mock_require.assert_called_once()
+        cmd_tuples = mock_require.call_args.args[0]
+        requested_names = [t[0] for t in cmd_tuples]
+        assert "certreq" not in requested_names
+        assert "powershell" in requested_names
 
-    @patch("wif_bunker.keystore.windows._require_command")
+    @patch("wif_bunker.keystore.windows.require_commands")
     @patch("wif_bunker.keystore.windows.subprocess.run")
     def test_certutil_not_required(self, mock_run, mock_require, sample_config):
         try:
@@ -60,5 +63,7 @@ class TestCertGenerationCommandConstruction:
         except Exception:
             pass
 
-        called_commands = [call.args[0] for call in mock_require.call_args_list]
-        assert "certutil" not in called_commands
+        mock_require.assert_called_once()
+        cmd_tuples = mock_require.call_args.args[0]
+        requested_names = [t[0] for t in cmd_tuples]
+        assert "certutil" not in requested_names

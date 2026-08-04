@@ -18,7 +18,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from wif_bunker.cert import _create_ca_and_sign
 from wif_bunker.config import CertificateBundle, WorkloadConfig
 from wif_bunker.keystore import ncrypt
-from wif_bunker.utils import SYM_WARN, _require_command
+from wif_bunker.utils import SYM_WARN, require_commands
 
 # Ensures Cert: drive + PKI cmdlets work in both Windows PowerShell 5.1 and PowerShell 7+.
 # Microsoft.PowerShell.Security provides the Cert: drive; PKI provides Import-Certificate.
@@ -46,7 +46,9 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
     - Does NOT trigger a Windows security dialog
     - Creates keys that support NCryptCreateClaim attestation
     """
-    _require_command("powershell", install_hint="Built-in Windows command — ensure PowerShell is on PATH")
+    require_commands([
+        ("powershell", "", "Built-in Windows command — ensure PowerShell is on PATH"),
+    ])
 
     algo = config.key_algo_config
     ncrypt_algo = algo["ncrypt_algo"]

@@ -162,3 +162,44 @@ def _require_command(name: str, *, package: str = "", install_hint: str = "") ->
     if install_hint:
         msg += f"\n  Install: {install_hint}"
     raise RuntimeError(msg)
+
+
+def require_commands(
+    commands: list[tuple[str, str, str]],
+) -> dict[str, str]:
+    """Check all required commands upfront and report every missing one at once.
+
+    Args:
+        commands: List of (name, package, install_hint) tuples.
+
+    Returns:
+        Dict mapping command name to resolved path.
+
+    Raises:
+        RuntimeError: Lists *all* missing commands with install instructions.
+    """
+    found: dict[str, str] = {}
+    missing: list[str] = []
+    apt_packages: set[str] = set()
+
+    for name, package, install_hint in commands:
+        path = shutil.which(name)
+        if path:
+            found[name] = path
+        else:
+            line = f"  • {name}"
+            if package:
+                line += f"  (package: {package})"
+                apt_packages.add(package)
+            if install_hint:
+                line += f"  — {install_hint}"
+            missing.append(line)
+
+    if missing:
+        msg = f"Missing {len(missing)} required command(s):\n" + "\n".join(missing)
+        if apt_packages:
+            pkg_list = " ".join(sorted(apt_packages))
+            msg += f"\n\nInstall all with:\n  sudo apt install {pkg_list}"
+        raise RuntimeError(msg)
+
+    return found

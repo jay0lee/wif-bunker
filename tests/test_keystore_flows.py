@@ -28,7 +28,7 @@ def config():
 class TestMacOSKeystoreFlow:
     @pytest.mark.skipif(sys.platform != "darwin", reason="macOS only")
     @patch("wif_bunker.keystore.macos._create_ca_and_sign")
-    @patch("wif_bunker.keystore.macos._require_command")
+    @patch("wif_bunker.keystore.macos.require_commands")
     @patch("wif_bunker.keystore.macos.subprocess.run")
     def test_cleanup_deletes_stale_identities(self, mock_run, mock_require, mock_ca, config):
         from wif_bunker.keystore.macos import _generate_cert_macos
@@ -72,7 +72,7 @@ class TestMacOSKeystoreFlow:
 
     @pytest.mark.skipif(sys.platform != "darwin", reason="macOS only")
     @patch("wif_bunker.keystore.macos.platform.mac_ver")
-    @patch("wif_bunker.keystore.macos._require_command")
+    @patch("wif_bunker.keystore.macos.require_commands")
     def test_version_check_rejects_old_macos(self, mock_require, mock_mac_ver, config):
         from wif_bunker.keystore.macos import _generate_cert_macos
 
@@ -84,7 +84,7 @@ class TestMacOSKeystoreFlow:
     @pytest.mark.skipif(sys.platform != "darwin", reason="macOS only")
     @patch("wif_bunker.keystore.macos._create_ca_and_sign")
     @patch("wif_bunker.keystore.macos.platform.mac_ver")
-    @patch("wif_bunker.keystore.macos._require_command")
+    @patch("wif_bunker.keystore.macos.require_commands")
     @patch("wif_bunker.keystore.macos.subprocess.run")
     def test_version_check_accepts_macos15(self, mock_run, mock_require, mock_mac_ver, mock_ca, config):
         from wif_bunker.keystore.macos import _generate_cert_macos
@@ -123,7 +123,7 @@ class TestMacOSKeystoreFlow:
         _generate_cert_macos(config)
 
     @pytest.mark.skipif(sys.platform != "darwin", reason="macOS only")
-    @patch("wif_bunker.keystore.macos._require_command")
+    @patch("wif_bunker.keystore.macos.require_commands")
     @patch("wif_bunker.keystore.macos.subprocess.run")
     def test_se_auth_failed_gives_clear_error(self, mock_run, mock_require, config):
         from wif_bunker.keystore.macos import _generate_cert_macos
@@ -165,7 +165,7 @@ class TestLinuxKeystoreFlow:
 
     @patch("wif_bunker.keystore.linux.Path.home")
     @patch("wif_bunker.keystore.linux._resolve_tpm2_ptool", return_value=["tpm2_ptool"])
-    @patch("wif_bunker.keystore.linux._require_command")
+    @patch("wif_bunker.keystore.linux.require_commands")
     @patch("wif_bunker.keystore.linux._check_tpm_linux")
     @patch("wif_bunker.keystore.linux.subprocess.run")
     @patch("wif_bunker.keystore.linux.write_secure_file")
@@ -210,7 +210,7 @@ class TestLinuxKeystoreFlow:
 
     @patch("wif_bunker.keystore.linux.Path.home")
     @patch("wif_bunker.keystore.linux._resolve_tpm2_ptool", return_value=["tpm2_ptool"])
-    @patch("wif_bunker.keystore.linux._require_command")
+    @patch("wif_bunker.keystore.linux.require_commands")
     @patch("wif_bunker.keystore.linux._check_tpm_linux")
     @patch("wif_bunker.keystore.linux.subprocess.run")
     @patch("wif_bunker.keystore.linux.write_secure_file")
@@ -251,7 +251,7 @@ class TestLinuxKeystoreFlow:
 
 class TestWindowsKeystoreErrorPaths:
     @patch("wif_bunker.keystore.windows.ncrypt")
-    @patch("wif_bunker.keystore.windows._require_command")
+    @patch("wif_bunker.keystore.windows.require_commands")
     @patch("wif_bunker.keystore.windows.subprocess.run")
     def test_ncrypt_failure_raises(self, mock_run, mock_require, mock_ncrypt, config):
         from wif_bunker.keystore.windows import _generate_cert_windows

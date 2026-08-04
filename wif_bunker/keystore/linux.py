@@ -11,7 +11,7 @@ from pathlib import Path
 
 from wif_bunker.cert import _create_ca_and_sign
 from wif_bunker.config import CertificateBundle, WorkloadConfig
-from wif_bunker.utils import _require_command, write_secure_file
+from wif_bunker.utils import require_commands, write_secure_file
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +76,34 @@ def _check_tpm_linux() -> None:
     # 1. Hardware TPM device node
     tpm_device = Path("/dev/tpmrm0")
     if tpm_device.exists():
-        return  # Hardware TPM available
+        if os.access(tpm_device, os.R_OK | os.W_OK):
+            return  # Hardware TPM available and accessible
+
+        # Device exists but user can't access it — almost always a group issue
+        import grp
+        import pwd
+
+        username = pwd.getpwuid(os.getuid()).pw_name
+        try:
+            device_group = grp.getgrgid(tpm_device.stat().st_gid).gr_name
+            user_groups = [g.gr_name for g in grp.getgrall() if username in g.gr_mem]
+        except (KeyError, OSError):
+            device_group = "tss"
+            user_groups = []
+
+        raise RuntimeError(
+            f"/dev/tpmrm0 exists but is not accessible by user '{username}'.\n"
+            f"\n"
+            f"  The device is owned by group '{device_group}', "
+            f"but '{username}' is not a member.\n"
+            f"  Current groups: {', '.join(user_groups) or '(none)'}\n"
+            f"\n"
+            f"  Fix:\n"
+            f"    sudo usermod -aG {device_group} {username}\n"
+            f"\n"
+            f"  Then log out and back in, or run:\n"
+            f"    newgrp {device_group}"
+        )
 
     # 2. Check for software TPM (swtpm) via TCTI env or port probe
     if os.environ.get("TPM2TOOLS_TCTI"):
@@ -92,32 +119,26 @@ def _check_tpm_linux() -> None:
         pass
 
     raise RuntimeError(
-        "No TPM device or service found.\n"
+        "No TPM device found.\n"
         "\n"
-        "  wif_bunker requires a TPM 2.0 for hardware-backed keys.\n"
+        "  wif-bunker requires a TPM 2.0 for hardware-backed keys.\n"
+        "  Ensure the TPM is enabled in BIOS/UEFI and check:\n"
+        "    ls -la /dev/tpmrm0\n"
         "\n"
-        "  Options:\n"
-        "    1. Hardware TPM — check that /dev/tpmrm0 exists:\n"
-        "         ls -la /dev/tpmrm0\n"
-        "       If missing, ensure the TPM is enabled in BIOS/UEFI.\n"
-        "\n"
-        "    2. Software TPM (development/testing) — install and start swtpm:\n"
-        "         sudo apt install swtpm swtpm-tools\n"
-        "         mkdir -p /tmp/swtpm\n"
-        "         swtpm socket --tpmstate dir=/tmp/swtpm --tpm2 "
-        "--server type=tcp,port=2321 --ctrl type=tcp,port=2322 &\n"
-        "         export TPM2TOOLS_TCTI='swtpm:host=127.0.0.1,port=2321'"
+        "  For development/testing, a software TPM (swtpm) can be\n"
+        "  used by setting the TPM2TOOLS_TCTI environment variable."
     )
 
 
 def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
     """Generates a TPM 2.0-backed certificate via PKCS#11 toolchain (Ubuntu 24+)."""
-    # Pre-validate required commands.
+    # Pre-validate all required commands upfront.
     ptool_cmd = _resolve_tpm2_ptool()
-    _require_command("p11tool", package="gnutls-bin", install_hint="sudo apt install gnutls-bin")
-    _require_command("pkcs11-tool", package="opensc", install_hint="sudo apt install opensc")
-    # Also need certtool from gnutls-bin for CSR generation.
-    _require_command("certtool", package="gnutls-bin", install_hint="sudo apt install gnutls-bin")
+    require_commands([
+        ("p11tool", "gnutls-bin", "sudo apt install gnutls-bin"),
+        ("pkcs11-tool", "opensc", "sudo apt install opensc"),
+        ("certtool", "gnutls-bin", "sudo apt install gnutls-bin"),
+    ])
 
     # Check TPM availability.
     _check_tpm_linux()

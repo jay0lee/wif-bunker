@@ -193,7 +193,7 @@ class TestAttestationWithSelfSignedCert:
         assert tpm_check is not None
         assert tpm_check.passed is False
 
-    @patch("wif_bunker.attestation.linux._require_command")
+    @patch("wif_bunker.attestation.linux.require_commands")
     @patch("wif_bunker.attestation.linux.subprocess.run")
     @patch("sys.platform", "linux")
     def test_linux_no_tpm_device_fails(self, mock_run, _mock_req):
