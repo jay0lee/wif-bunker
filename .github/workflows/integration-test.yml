@@ -158,7 +158,11 @@ jobs:
             echo "Installing cryptography wheel: $WHEEL_URL"
             pip install "$WHEEL_URL"
           fi
-          pip install .
+          if [ "${{ matrix.use_yubikey }}" = "true" ]; then
+            pip install ".[yubikey]"
+          else
+            pip install .
+          fi
 
       # ── Generate unique project ID for this job ──
       - name: Set project ID
