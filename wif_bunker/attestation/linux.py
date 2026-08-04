@@ -22,6 +22,8 @@ from wif_bunker.attestation.base import (
     AttestationArtifact,
     AttestationCheck,
     AttestationReport,
+    _decode_manufacturer_id,
+    parse_ek_details,
     verify_ek_chain,
 )
 from wif_bunker.config import WorkloadConfig
@@ -62,14 +64,21 @@ def _extract_ek_certificate(work_dir: Path) -> tuple[AttestationCheck, str | Non
                 pem_data = cert.public_bytes(serialization.Encoding.PEM)
                 ek_pem_path.write_bytes(pem_data)
 
-                issuer = cert.issuer.rfc4514_string()
+                ek_pem = pem_data.decode("utf-8")
+                ek_details = parse_ek_details(ek_pem)
+                issuer = ek_details.get("issuer", cert.issuer.rfc4514_string())
+
+                detail = f"{algo_name} EK certificate from NVRAM index {nv_index}. Issuer: {issuer}"
+                if "tpm_model" in ek_details:
+                    detail += f" (Model: {ek_details['tpm_model']})"
+
                 return (
                     AttestationCheck(
                         name="EK certificate extracted",
                         passed=True,
-                        detail=f"{algo_name} EK certificate from NVRAM index {nv_index}. Issuer: {issuer}",
+                        detail=detail,
                     ),
-                    ek_pem_path.read_text(encoding="utf-8"),
+                    ek_pem,
                 )
             except Exception:
                 pass
@@ -91,6 +100,58 @@ def _extract_ek_certificate(work_dir: Path) -> tuple[AttestationCheck, str | Non
 def _verify_ek_chain(ek_pem: str, work_dir: Path) -> AttestationCheck:  # pylint: disable=unused-argument
     """Verify EK certificate against known manufacturer root CAs."""
     return verify_ek_chain(ek_pem)
+
+
+def _get_tpm_info(work_dir: Path) -> dict | None:
+    """Get TPM hardware info via tpm2_getcap."""
+    result = _run_tpm2(["tpm2_getcap", "properties-fixed"], work_dir)
+    if result.returncode != 0:
+        return None
+
+    info = {}
+    current_key = None
+    props = {}
+
+    for line in result.stdout.splitlines():
+        line = line.rstrip()
+        if not line:
+            continue
+        if not line.startswith(" ") and line.endswith(":"):
+            current_key = line[:-1]
+            props[current_key] = {}
+        elif line.startswith(" ") and ":" in line and current_key:
+            k, v = line.split(":", 1)
+            props[current_key][k.strip()] = v.strip()
+        elif ":" in line and not line.startswith(" "):
+            # Flat format fallback
+            k, v = line.split(":", 1)
+            props[k.strip()] = {"value": v.strip()}
+
+    if "TPM2_PT_MANUFACTURER" in props:
+        val = props["TPM2_PT_MANUFACTURER"].get("value") or props["TPM2_PT_MANUFACTURER"].get("raw") or ""
+        val = val.strip('"').strip("'")
+        if val:
+            info["manufacturer"] = _decode_manufacturer_id(val)
+
+    if "TPM2_PT_FIRMWARE_VERSION_1" in props:
+        val = props["TPM2_PT_FIRMWARE_VERSION_1"].get("value") or props["TPM2_PT_FIRMWARE_VERSION_1"].get("raw") or ""
+        val = val.strip('"').strip("'")
+        if val:
+            try:
+                num = int(val, 16) if val.lower().startswith("0x") else int(val)
+                major = num >> 16
+                minor = num & 0xFFFF
+                info["firmware"] = f"{major}.{minor}"
+            except ValueError:
+                info["firmware"] = val
+
+    if "TPM2_PT_FAMILY_INDICATOR" in props:
+        val = props["TPM2_PT_FAMILY_INDICATOR"].get("value") or props["TPM2_PT_FAMILY_INDICATOR"].get("raw") or ""
+        val = val.strip('"').strip("'")
+        if val:
+            info["family"] = val
+
+    return info if info else None
 
 
 def _create_ek_and_ak(work_dir: Path) -> tuple[AttestationCheck, bool]:
@@ -392,14 +453,18 @@ def _attest_linux(config: WorkloadConfig) -> AttestationReport:  # pylint: disab
 
     checks: list[AttestationCheck] = []
     artifacts: list[AttestationArtifact] = []
+    tpm_info = None
+    ek_details = None
 
     with tempfile.TemporaryDirectory(prefix="bunker_attest_") as tmpdir:
         work_dir = Path(tmpdir)
+        tpm_info = _get_tpm_info(work_dir)
 
         # Step 1: Extract EK certificate
         ek_check, ek_pem = _extract_ek_certificate(work_dir)
         checks.append(ek_check)
         if ek_pem:
+            ek_details = parse_ek_details(ek_pem)
             artifacts.append(
                 AttestationArtifact(
                     filename="ek_certificate.pem",
@@ -492,21 +557,57 @@ def _attest_linux(config: WorkloadConfig) -> AttestationReport:  # pylint: disab
                 )
             )
 
-    passed = sum(1 for chk in checks if chk.passed)
-    total = len(checks)
+    check_map = {chk.name: chk.passed for chk in checks}
 
-    if passed == total:
+    ek_cert_ok = check_map.get("EK certificate extracted", False)
+    ek_chain_ok = check_map.get("EK certificate chain verified", False)
+    ak_ok = check_map.get("Attestation Key created", False)
+    cred_ok = check_map.get("Credential activation", False)
+    certify_ok = check_map.get("Key attestation (tpm2_certify)", False)
+
+    tpm_verified = ek_cert_ok and ek_chain_ok
+    key_proven = ak_ok and cred_ok and certify_ok
+
+    if tpm_verified and key_proven:
         summary = (
-            f"{passed}/{total} checks passed. Full TPM 2.0 attestation chain verified. "
-            "The workload key is cryptographically proven to reside in a genuine TPM."
+            "Cryptographically proven: your workload private key resides in a "
+            "genuine TPM whose identity has been verified against the "
+            "manufacturer's root certificate."
         )
-    elif passed > 0:
+    elif tpm_verified and ak_ok and not certify_ok:
         summary = (
-            f"{passed}/{total} checks passed. Partial attestation — some checks failed. "
-            "On software TPMs (swtpm), EK chain verification is expected to fail."
+            "Your device has a verified, genuine TPM and an Attestation Key "
+            "was created, but the workload key could not be certified. The key "
+            "is likely on the TPM but this cannot be independently proven."
         )
+    elif ek_cert_ok and not ek_chain_ok:
+        if key_proven:
+            summary = (
+                "Your workload key is confirmed to reside in a TPM, but the "
+                "TPM's EK certificate chain could not be verified against known "
+                "manufacturer roots. On software TPMs (swtpm), this is expected."
+            )
+        else:
+            summary = (
+                "Your device has a TPM with an EK certificate but its identity "
+                "could not be verified and the workload key could not be "
+                "certified."
+            )
+    elif not ek_cert_ok:
+        if key_proven:
+            summary = (
+                "Your workload key is confirmed to reside in a TPM via "
+                "credential activation and key certification, but no EK "
+                "certificate was found. On software TPMs (swtpm), this "
+                "is expected."
+            )
+        else:
+            summary = (
+                "No EK certificate found and attestation failed. Ensure "
+                "tpm2-tools is installed and the TPM is accessible."
+            )
     else:
-        summary = f"{passed}/{total} checks passed. Attestation failed."
+        summary = "Attestation could not be completed."
 
     return AttestationReport(
         platform="linux-tpm2",
@@ -515,16 +616,6 @@ def _attest_linux(config: WorkloadConfig) -> AttestationReport:  # pylint: disab
         artifacts=artifacts,
         checks=checks,
         summary=summary,
-        documentation_urls=[
-            "https://tpm2-tools.readthedocs.io/en/latest/man/tpm2_certify.8/",
-            "https://trustedcomputinggroup.org/resource/tpm-library-specification/",
-        ],
-        verification_steps=[
-            "1. Verify EK certificate chain: openssl verify -CAfile <manufacturer_root.pem> ek_certificate.pem",
-            "2. Verify AK is bound to genuine TPM via credential activation challenge/response",
-            "3. Verify attestation signature: use AK public key to verify "
-            "certify_signature.bin over certify_attest.bin",
-            "4. Parse certify_attest.bin to confirm magic=0xFF54504D (TPM_GENERATED_VALUE) "
-            "and type=0x8017 (TPM_ST_ATTEST_CERTIFY)",
-        ],
+        ek_details=ek_details,
+        tpm_info=tpm_info,
     )

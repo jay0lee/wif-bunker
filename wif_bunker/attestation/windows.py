@@ -16,6 +16,8 @@ from wif_bunker.attestation.base import (
     AttestationArtifact,
     AttestationCheck,
     AttestationReport,
+    _decode_manufacturer_id,
+    parse_ek_details,
     verify_ek_chain,
 )
 from wif_bunker.config import WorkloadConfig
@@ -42,38 +44,6 @@ _PS_PREAMBLE = (
     "Import-Module PKI -ErrorAction SilentlyContinue; "
 )
 
-# TPM Manufacturer IDs — the ManufacturerId from Get-Tpm is a 32-bit int
-# encoding 4 ASCII bytes (the TCG-registered vendor ID).
-# See: https://trustedcomputinggroup.org/resource/vendor-id-registry/
-_TPM_MANUFACTURERS: dict[int, tuple[str, str]] = {
-    # decimal: (short_name, full_name)
-    1095582720: ("AMD", "Advanced Micro Devices"),
-    1096043852: ("ATML", "Atmel"),
-    1112687437: ("BRCM", "Broadcom"),
-    1213220096: ("HPE", "HPE"),
-    1229081856: ("IBM", "IBM"),
-    1229346816: ("IFX", "Infineon"),
-    1229870147: ("INTC", "Intel"),
-    1280398708: ("LEN", "Lenovo"),
-    1314145024: ("NTC", "Nuvoton Technology"),
-    1314406208: ("NTZ", "Nationz Technologies"),
-    1363365956: ("QCOM", "Qualcomm"),
-    1397576515: ("SMSC", "SMSC"),
-    1398033696: ("STM", "STMicroelectronics"),
-    1398895469: ("SMSN", "Samsung"),
-    1413828608: ("TXN", "Texas Instruments"),
-    1464156928: ("WEC", "Winbond"),
-    1380926275: ("ROCC", "Futurex"),
-    1196379975: ("GOOG", "Google"),
-    1297302852: ("MSFT", "Microsoft"),
-}
-
-# TCG EK certificate OIDs for TPM hardware attributes.
-# These appear in the Subject Alternative Name or Subject Directory Attributes.
-_TCG_OID_TPM_MANUFACTURER = "2.23.133.2.1"
-_TCG_OID_TPM_MODEL = "2.23.133.2.2"
-_TCG_OID_TPM_VERSION = "2.23.133.2.3"
-
 
 def _run_powershell(command: str, *, preamble: bool = True) -> subprocess.CompletedProcess:
     """Run a PowerShell command and return the result.
@@ -87,83 +57,6 @@ def _run_powershell(command: str, *, preamble: bool = True) -> subprocess.Comple
         capture_output=True,
         text=True,
     )
-
-
-def _parse_tcg_attributes(cert_obj: cx509.Certificate) -> dict[str, str]:
-    """Extract TCG hardware attributes from an EK certificate.
-
-    TCG EK certificates encode TPM manufacturer, model, and firmware
-    version in the Subject Alternative Name (SAN) extension using
-    OIDs under 2.23.133.2.
-
-    Returns a dict with keys like 'tpm_manufacturer', 'tpm_model',
-    'tpm_version' when found.
-    """
-    attrs: dict[str, str] = {}
-    tcg_oid_map = {
-        _TCG_OID_TPM_MANUFACTURER: "tpm_manufacturer",
-        _TCG_OID_TPM_MODEL: "tpm_model",
-        _TCG_OID_TPM_VERSION: "tpm_version",
-    }
-
-    # Try Subject Directory Attributes first, then SAN.
-    # Both are used by different manufacturers.
-    for ext in cert_obj.extensions:
-        oid_str = ext.oid.dotted_string
-
-        # Check if this is a TCG attribute extension directly
-        if oid_str in tcg_oid_map:
-            try:
-                raw = ext.value.value if hasattr(ext.value, "value") else bytes(ext.value)
-                decoded = raw.decode("utf-8", errors="replace").strip("\x00").strip()
-                if decoded:
-                    attrs[tcg_oid_map[oid_str]] = decoded
-            except Exception:  # pylint: disable=broad-except
-                pass
-            continue
-
-        # Check SubjectAlternativeName — TCG attributes may be in
-        # directoryName entries within the SAN
-        if oid_str == "2.5.29.17":  # subjectAltName
-            try:
-                san = ext.value
-                for name in san:
-                    if isinstance(name, cx509.DirectoryName):
-                        for attr in name.value:
-                            attr_oid = attr.oid.dotted_string
-                            if attr_oid in tcg_oid_map:
-                                attrs[tcg_oid_map[attr_oid]] = attr.value
-            except Exception:  # pylint: disable=broad-except
-                pass
-
-    return attrs
-
-
-def _decode_manufacturer_id(mfr_id: int | str) -> str:
-    """Decode a TPM ManufacturerId to a human-readable name.
-
-    The ManufacturerId from Get-Tpm is a 32-bit integer encoding
-    4 ASCII bytes — the TCG-registered vendor ID.
-    e.g. 1314145024 = 0x4E544300 = 'NTC\0' = Nuvoton Technology.
-    """
-    try:
-        mfr_int = int(mfr_id)
-    except (TypeError, ValueError):
-        return str(mfr_id)
-
-    entry = _TPM_MANUFACTURERS.get(mfr_int)
-    if entry:
-        short, full = entry
-        return f"{full} ({short})"
-
-    # Fallback: try to decode as ASCII
-    try:
-        ascii_str = mfr_int.to_bytes(4, "big").decode("ascii").rstrip("\x00").strip()
-        if ascii_str:
-            return f"{ascii_str} (0x{mfr_int:08X})"
-    except (UnicodeDecodeError, OverflowError):
-        pass
-    return f"0x{mfr_int:08X}"
 
 
 def _check_tpm_status() -> tuple[AttestationCheck, dict | None]:
@@ -305,19 +198,7 @@ def _extract_ek_certificate() -> tuple[AttestationCheck, str | None]:
         )
 
     # Extract detailed info using the cryptography library
-    details: dict[str, str] = {}
-    try:
-        cert_obj = cx509.load_pem_x509_certificate(output.encode())
-        details["issuer"] = cert_obj.issuer.rfc4514_string()
-        details["serial"] = format(cert_obj.serial_number, "X")
-        details["not_before"] = cert_obj.not_valid_before_utc.strftime("%Y-%m-%d")
-        details["not_after"] = cert_obj.not_valid_after_utc.strftime("%Y-%m-%d")
-
-        # Parse TCG OIDs from Subject Alternative Name or Subject Directory Attributes
-        tcg_attrs = _parse_tcg_attributes(cert_obj)
-        details.update(tcg_attrs)
-    except Exception:  # pylint: disable=broad-except
-        details.setdefault("issuer", "unknown")
+    details = parse_ek_details(output)
 
     # Build rich detail string
     detail_parts = [f"Issuer: {details.get('issuer', 'unknown')}"]

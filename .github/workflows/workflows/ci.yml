@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.x'
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install ruff pylint
+      - run: python -m pip install --only-deps .
+      - name: Ruff lint
+        run: ruff check .
+      - name: Ruff format check
+        run: ruff format --check .
+      - name: Pylint
+        run: pylint wif_bunker/ --fail-under=9.0
+
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.x'
+      - run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install pytest pytest-cov
+      - run: python -m pip install --only-deps ".[yubikey]"
+      - name: Run tests
+        run: pytest --cov --cov-report=term-missing
+
+  build:
+    name: Build (${{ matrix.platform_name }})
+    needs: [lint, test]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-26.04
+            platform_name: linux
+            arch: x86_64
+          - os: macos-15
+            platform_name: macos
+            arch: arm64
+          - os: windows-2025
+            platform_name: windows
+            arch: x86_64
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.x'
+
+      - name: Install system dependencies (Linux)
+        if: matrix.platform_name == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller
+          python -m pip install --only-deps ".[yubikey]"
+
+      - name: Run PyInstaller
+        run: pyinstaller wif-bunker.spec
+
+      - name: Download ECP
+        run: python get_ecp.py --output dist/wif-bunker/ecp
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Smoke test (Unix)
+        if: matrix.platform_name != 'windows'
+        run: dist/wif-bunker/wif-bunker --help
+
+      - name: Smoke test (Windows)
+        if: matrix.platform_name == 'windows'
+        run: dist\wif-bunker\wif-bunker.exe --help
+
+      - name: Verify ECP bundled
+        shell: bash
+        run: |
+          if [ "${{ matrix.platform_name }}" = "windows" ]; then
+            ls dist/wif-bunker/ecp/ecp.exe dist/wif-bunker/ecp/libecp.dll dist/wif-bunker/ecp/tls_offload.dll
+          elif [ "${{ matrix.platform_name }}" = "macos" ]; then
+            ls dist/wif-bunker/ecp/ecp dist/wif-bunker/ecp/libecp.dylib dist/wif-bunker/ecp/libtls_offload.dylib
+          else
+            ls dist/wif-bunker/ecp/ecp dist/wif-bunker/ecp/libecp.so dist/wif-bunker/ecp/libtls_offload.so
+          fi

@@ -10,6 +10,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
+from wif_bunker.attestation.base import _decode_manufacturer_id, _parse_tcg_attributes
 from wif_bunker.attestation.windows import (
     _NTE_BAD_KEYSET,
     _PS_PREAMBLE,
@@ -18,11 +19,9 @@ from wif_bunker.attestation.windows import (
     _check_key_provider,
     _check_tpm_status,
     _create_ak_fresh,
-    _decode_manufacturer_id,
     _extract_ek_certificate,
     _get_or_create_ak,
     _ncrypt_create_claim,
-    _parse_tcg_attributes,
     _run_powershell,
 )
 
