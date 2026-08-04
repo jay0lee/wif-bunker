@@ -115,8 +115,9 @@ def _generate_cert_macos(config: WorkloadConfig) -> CertificateBundle:
         # 2. Look up the key's SHA-1 hash from sc_auth identities.
         #    Retry briefly — the CTK token may need a moment to register
         #    the new identity after creation and stale identity deletion.
+        #    CI runners (especially macOS ARM64) can be slow; allow up to ~10s.
         key_hash: str | None = None
-        for _attempt in range(5):
+        for _attempt in range(10):
             id_result = subprocess.run(
                 ["sc_auth", "identities"],
                 check=True,

@@ -665,11 +665,24 @@ def _main_impl() -> None:
                     yk_pin = yk_cfg.get("pin", "")
                 except Exception:
                     pass
+            # libykcs11 token labels are "YubiKey PIV #<serial>" and PKCS#11
+            # slot indices correspond to the order ykman enumerates devices.
+            # Determine the slot index for the target serial.
+            yk_slot = "0"
+            yk_label = "YubiKey PIV #" + str(config.yubikey_serial or "")
+            try:
+                from ykman.device import list_all_devices as _yk_list
+                for idx, (_, info) in enumerate(_yk_list()):
+                    if info.serial == config.yubikey_serial:
+                        yk_slot = str(idx)
+                        break
+            except Exception:
+                pass
             cert_configs: dict = {
                 "pkcs11": {
                     "module": ykcs11_module,
-                    "slot": "0",
-                    "label": config.workload_cn,
+                    "slot": yk_slot,
+                    "label": yk_label,
                     "user_pin": yk_pin,
                 },
             }
@@ -993,26 +1006,23 @@ def _main_impl() -> None:
                 logger.info("   Authenticated SA: %s", sa_email)
             logger.info("   Target Project:   %s", proj_result.get("name"))
 
-            # ── "Who am I?" via the 403 trick ──
-            # Request a non-existent project. GCP's IAM returns a 403
-            # whose error message contains the exact principal string.
+            # ── Discover the federated principal via token introspection ──
             try:
                 adc_creds, _ = google.auth.default(
                     scopes=["https://www.googleapis.com/auth/cloud-platform"],
                 )
-                whoami_session = AuthorizedSession(adc_creds)
-                whoami_session.configure_mtls_offload_channel(str(cert_config_path))
-                whoami_res = whoami_session.get(
-                    f"https://{crm_base}/v1/projects/wif-bunker-whoami-00000",
+                adc_creds.refresh(google.auth.transport.requests.Request())
+                token = adc_creds.token
+                token_resp = requests.get(
+                    f"https://oauth2.googleapis.com/tokeninfo?access_token={token}",
+                    timeout=10,
                 )
-                if whoami_res.status_code == 403:
-                    error_msg = whoami_res.json().get("error", {}).get("message", "")
-                    match = re.search(r"principal://\S+", error_msg)
-                    if match:
-                        principal = match.group(0).rstrip(".")
-                        logger.info("   Principal:        %s", principal)
-                    else:
-                        logger.debug("   Could not parse principal from 403: %s", error_msg)
+                if token_resp.ok:
+                    info = token_resp.json()
+                    if info.get("email"):
+                        logger.info("   Principal:        %s", info["email"])
+                    elif info.get("sub"):
+                        logger.info("   Subject:          %s", info["sub"])
             except Exception:
                 logger.debug("   Principal identity check skipped", exc_info=True)
         except Exception:
