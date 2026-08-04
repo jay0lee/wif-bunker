@@ -71,9 +71,16 @@ jobs:
           # - os: windows-11-arm
           #   name: Windows ARM64
           #   soft_key_flag: "--soft-key"
+          - name: Hardware TPM (NUC8)
+            runs_on: '["self-hosted", "linux", "x64", "tpm-hardware"]'
+            soft_key_flag: ""
+            artifact_name: wif-bunker-linux-x86_64
+            self_hosted: true
 
-    runs-on: ${{ matrix.os }}
+    # Self-hosted entries set runs_on to a JSON label array; GH-hosted use os
+    runs-on: ${{ matrix.runs_on && fromJSON(matrix.runs_on) || matrix.os }}
     name: ${{ matrix.name }}
+    environment: ${{ matrix.self_hosted && 'tpm-hardware' || '' }}
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -87,7 +94,8 @@ jobs:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
 
-      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+      - if: ${{ !matrix.self_hosted }}
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
       # ── Setup: Linux Software TPM ──
       # NOTE: tpm2-abrmd is only needed here because swtpm exposes a TCP socket,
@@ -95,7 +103,7 @@ jobs:
       # manager — on real hardware the kernel provides /dev/tpmrm0, but for
       # swtpm in CI we need the userspace abrmd bridge.
       - name: "Linux: Setup Software TPM (swtpm)"
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && !matrix.self_hosted
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
@@ -127,8 +135,9 @@ jobs:
           echo "TPM2_PKCS11_TCTI=tabrmd:bus_type=session" >> "$GITHUB_ENV"
 
 
-      # ── Setup: Python ──
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      # ── Setup: Python (skip on self-hosted — system python3 pre-installed) ──
+      - if: ${{ !matrix.self_hosted }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.x"
 
@@ -292,16 +301,21 @@ jobs:
         run: |
           echo "=== Testing --cert-only for all supported algorithms ==="
           # Algorithms supported per platform:
-          #   Windows: es256 es384 rsa2048 rsa3072 rsa4096
-          #   Linux:   es256 es384 rsa2048 rsa3072 (rsa4096 excluded — swtpm limitation)
-          #   macOS:   es256 es384
+          #   Windows:        es256 es384 rsa2048 rsa3072 rsa4096
+          #   Linux (swtpm):  es256 es384 rsa2048 rsa3072 (rsa4096 excluded — swtpm limitation)
+          #   Linux (real hw): es256 es384 rsa2048 rsa3072 rsa4096
+          #   macOS:          es256 es384
           ALGOS="es256 es384"
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             ALGOS="$ALGOS rsa2048 rsa3072 rsa4096"
           elif [[ "$RUNNER_OS" == "Linux" ]]; then
-            # rsa4096 excluded: tpm2-pkcs11-tools crashes with swtpm for 4096-bit keys.
-            # Real TPM hardware supports rsa4096 — this is a CI simulator limitation.
-            ALGOS="$ALGOS rsa2048 rsa3072"
+            if [ "${{ matrix.self_hosted }}" = "true" ]; then
+              # Real TPM hardware supports all algorithms
+              ALGOS="$ALGOS rsa2048 rsa3072 rsa4096"
+            else
+              # rsa4096 excluded: tpm2-pkcs11-tools crashes with swtpm for 4096-bit keys.
+              ALGOS="$ALGOS rsa2048 rsa3072"
+            fi
           fi
 
           WIF_CMD="${{ inputs.wif_bunker_cmd || 'python -m wif_bunker' }}"
@@ -539,6 +553,12 @@ jobs:
             gcloud projects delete "$PROJECT_ID" --quiet 2>/dev/null || true
           fi
 
+      # ── Cleanup workspace (self-hosted runner is persistent) ──
+      - name: "Cleanup workspace"
+        if: always() && matrix.self_hosted
+        run: |
+          rm -rf .venv /tmp/adc_*.txt
+
       # ── Summary ──
       - name: Summary
         if: always()
@@ -549,7 +569,7 @@ jobs:
 
           | Property | Value |
           |----------|-------|
-          | **Runner** | \`${{ matrix.os }}\` |
+          | **Runner** | \`${{ matrix.runs_on || matrix.os }}\` |
           | **Architecture** | \`$(uname -m)\` |
           | **Project** | \`${{ steps.config.outputs.project_id }}\` |
           | **Soft Key** | \`${{ matrix.soft_key_flag || 'no (hardware/swtpm)' }}\` |
