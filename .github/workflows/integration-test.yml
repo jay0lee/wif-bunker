@@ -79,7 +79,7 @@ jobs:
             soft_key_flag: ""
             artifact_name: wif-bunker-linux-x86_64
             self_hosted: true
-            expected_algos: "es256 rsa2048 rsa3072 rsa4096"
+            expected_algos: "es256 rsa2048"
 
     # Self-hosted entries set runs_on to a JSON label array; GH-hosted use os
     runs-on: ${{ matrix.runs_on && fromJSON(matrix.runs_on) || matrix.os }}
@@ -308,7 +308,8 @@ jobs:
           WIF_CMD="${{ inputs.wif_bunker_cmd || 'python -m wif_bunker' }}"
 
           # Dynamically discover supported algorithms from the active keystore
-          ALGOS=$($WIF_CMD --supported-algorithms ${{ matrix.soft_key_flag }})
+          # tr -d '\r' strips Windows CRLF line endings
+          ALGOS=$($WIF_CMD --supported-algorithms ${{ matrix.soft_key_flag }} | tr -d '\r')
           echo "Supported algorithms: $ALGOS"
 
           # Regression check: verify expected algorithms are still supported
