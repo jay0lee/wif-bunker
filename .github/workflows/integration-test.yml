@@ -74,12 +74,19 @@ jobs:
           # - os: windows-11-arm
           #   name: Windows ARM64
           #   soft_key_flag: "--soft-key"
-          - name: Hardware TPM (NUC8)
+          #- name: Hardware TPM (NUC8)
+          #  runs_on: '["self-hosted", "linux", "x64", "tpm-hardware"]'
+          #  soft_key_flag: ""
+          #  artifact_name: wif-bunker-linux-x86_64
+          #  self_hosted: true
+          #  expected_algos: "es256 rsa2048"
+          - name: YubiKey (NUC8)
             runs_on: '["self-hosted", "linux", "x64", "tpm-hardware"]'
             soft_key_flag: ""
             artifact_name: wif-bunker-linux-x86_64
             self_hosted: true
-            expected_algos: "es256 rsa2048"
+            use_yubikey: true
+            expected_algos: "es256 es384 rsa2048"
 
     # Self-hosted entries set runs_on to a JSON label array; GH-hosted use os
     runs-on: ${{ matrix.runs_on && fromJSON(matrix.runs_on) || matrix.os }}
@@ -299,6 +306,59 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
+      # ── YubiKey: Discover serials, test error handling, pick random key ──
+      - name: "YubiKey: Discover and validate"
+        if: matrix.use_yubikey
+        id: yubikey
+        shell: bash
+        run: |
+          echo "=== Discovering YubiKey serials ==="
+          # Discover all connected YubiKey serials and firmware versions
+          KEYS=$(python -c "
+from ykman.device import list_all_devices
+for _, info in list_all_devices():
+    print(f'{info.serial} {info.version[0]}.{info.version[1]}.{info.version[2]}')
+")
+          echo "Connected YubiKeys:"
+          echo "$KEYS"
+
+          KEY_COUNT=$(echo "$KEYS" | wc -l | tr -d ' ')
+          if [ "$KEY_COUNT" -lt 2 ]; then
+            echo "FAIL: Expected at least 2 YubiKeys, found $KEY_COUNT"
+            exit 1
+          fi
+          echo "✓ Found $KEY_COUNT YubiKeys"
+
+          # Test 1: --use-yubikey without --yubikey-serial should error (multiple keys)
+          WIF_CMD="${{ inputs.wif_bunker_cmd || 'python -m wif_bunker' }}"
+          outdir=$(mktemp -d)
+          if $WIF_CMD --cert-only --use-yubikey --output-dir "$outdir" 2>&1; then
+            echo "FAIL: --use-yubikey without --yubikey-serial should have errored"
+            rm -rf "$outdir"
+            exit 1
+          fi
+          rm -rf "$outdir"
+          echo "✓ Correctly errored on ambiguous YubiKey (no --yubikey-serial)"
+
+          # Test 2: --yubikey-serial with invalid serial should error
+          outdir=$(mktemp -d)
+          if $WIF_CMD --cert-only --use-yubikey --yubikey-serial 99999999 --output-dir "$outdir" 2>&1; then
+            echo "FAIL: invalid serial should have errored"
+            rm -rf "$outdir"
+            exit 1
+          fi
+          rm -rf "$outdir"
+          echo "✓ Correctly errored on invalid serial"
+
+          # Pick a random key for the rest of the test
+          RANDOM_INDEX=$(( (RANDOM % KEY_COUNT) + 1 ))
+          SERIAL=$(echo "$KEYS" | sed -n "${RANDOM_INDEX}p" | cut -d' ' -f1)
+          FW=$(echo "$KEYS" | sed -n "${RANDOM_INDEX}p" | cut -d' ' -f2)
+          echo "Randomly selected YubiKey: serial=$SERIAL firmware=$FW (index $RANDOM_INDEX of $KEY_COUNT)"
+          echo "YUBIKEY_FLAGS=--use-yubikey --yubikey-serial $SERIAL" >> "$GITHUB_ENV"
+          echo "serial=$SERIAL" >> "$GITHUB_OUTPUT"
+          echo "firmware=$FW" >> "$GITHUB_OUTPUT"
+
       # ── Test --cert-only for all supported algorithms ──
       - name: "Test --cert-only (all algorithms)"
         shell: bash
@@ -309,8 +369,8 @@ jobs:
 
           # Dynamically discover supported algorithms from the active keystore
           # tr -d '\r' strips Windows CRLF line endings
-          ALGOS=$($WIF_CMD --supported-algorithms ${{ matrix.soft_key_flag }} | tr -d '\r')
-          echo "Supported algorithms: $ALGOS"
+          ALGOS=$($WIF_CMD --supported-algorithms ${{ matrix.soft_key_flag }} $YUBIKEY_FLAGS | tr -d '\r')
+          echo "Supported algorithms: $(echo $ALGOS | sed 's/ /, /g')"
 
           # Regression check: verify expected algorithms are still supported
           EXPECTED="${{ matrix.expected_algos }}"
@@ -340,7 +400,7 @@ jobs:
               --cert-only \
               --key-algorithm "$algo" \
               --output-dir "$outdir" \
-              ${{ matrix.soft_key_flag }}
+              ${{ matrix.soft_key_flag }} $YUBIKEY_FLAGS
 
             # Verify cert files were created
             test -f "$outdir/workload_cert.pem" || { echo "FAIL: no workload_cert.pem for $algo"; exit 1; }
@@ -376,7 +436,7 @@ jobs:
           $WIF_CMD \
             --cert-only \
             --output-dir "$certdir" \
-            ${{ matrix.soft_key_flag }}
+            ${{ matrix.soft_key_flag }} $YUBIKEY_FLAGS
 
           if [[ -n "$DIALOG_PID" ]]; then
             kill "$DIALOG_PID" 2>/dev/null || true
@@ -384,9 +444,18 @@ jobs:
           fi
 
           # Run attestation against the cert we just created
-          $WIF_CMD --attest \
-            --cert-file "$certdir/workload_cert.pem" \
-            --output-dir "$attestdir" || true
+          # On hardware TPM, --attest must succeed fully.
+          # On software/SE, it may warn about missing attestation support.
+          if [ "${{ matrix.self_hosted }}" = "true" ]; then
+            $WIF_CMD --attest \
+              --cert-file "$certdir/workload_cert.pem" \
+              --output-dir "$attestdir" \
+              $YUBIKEY_FLAGS
+          else
+            $WIF_CMD --attest \
+              --cert-file "$certdir/workload_cert.pem" \
+              --output-dir "$attestdir" || true
+          fi
 
           # Verify attestation report was created
           test -f "$attestdir/attestation_report.json" || { echo "FAIL: no attestation_report.json"; exit 1; }
@@ -394,6 +463,7 @@ jobs:
           echo "  ✓ Attestation report files created"
 
           # Verify JSON is valid and has expected structure
+          # On self-hosted (hardware TPM): demand ALL checks pass (6/6)
           python3 -c "
           import json, sys, os
           report_path = os.path.join(sys.argv[1], 'attestation_report.json')
@@ -403,7 +473,14 @@ jobs:
           assert 'checks' in r, 'Missing checks'
           assert 'checks_passed' in r, 'Missing checks_passed'
           assert r['checks_total'] > 0, 'No checks ran'
-          print(f'  Report valid: {r[\"platform\"]}, {r[\"checks_passed\"]}/{r[\"checks_total\"]} checks passed')
+          passed = r['checks_passed']
+          total = r['checks_total']
+          print(f'  Report valid: {r[\"platform\"]}, {passed}/{total} checks passed')
+          if '${{ matrix.self_hosted }}' == 'true':
+              assert passed == total, (
+                  f'Hardware TPM attestation regression: {passed}/{total} checks passed, expected {total}/{total}'
+              )
+              print(f'  ✓ All {total} attestation checks passed (hardware TPM)')
           " "$attestdir"
 
           rm -rf "$certdir" "$attestdir"
@@ -417,7 +494,7 @@ jobs:
           outdir=$(mktemp -d)
           echo '{}' > "$outdir/adc.json"
           WIF_CMD="${{ inputs.wif_bunker_cmd || 'python -m wif_bunker' }}"
-          if $WIF_CMD --cert-only --output-dir "$outdir" 2>&1; then
+          if $WIF_CMD --cert-only --output-dir "$outdir" ${{ matrix.soft_key_flag }} $YUBIKEY_FLAGS 2>&1; then
             echo "FAIL: --cert-only should have refused to overwrite"
             exit 1
           fi
@@ -440,7 +517,7 @@ jobs:
             --use-adc \
             --create-project="${{ steps.config.outputs.project_id }}" \
             --folder="${{ secrets.SANDBOX_FOLDER_ID }}" \
-            ${{ matrix.soft_key_flag }}
+            ${{ matrix.soft_key_flag }} $YUBIKEY_FLAGS
 
       # ── Step 3: WIF Bunker reuse run (detects existing resources) ──
       - name: "WIF Bunker: Reuse existing"
@@ -455,7 +532,7 @@ jobs:
             --use-project="${{ steps.config.outputs.project_id }}" \
             --use-pool=bunker-wif-pool \
             --use-service-account="bunker-wif-sa@${{ steps.config.outputs.project_id }}.iam.gserviceaccount.com" \
-            ${{ matrix.soft_key_flag }}
+            ${{ matrix.soft_key_flag }} $YUBIKEY_FLAGS
 
       # ── Step 3b: ADC integration test (with service account) ──
       - name: "ADC Test: With service account"
@@ -499,7 +576,7 @@ jobs:
             --use-project="${{ steps.config.outputs.project_id }}" \
             --use-pool=bunker-wif-pool \
             --no-service-account \
-            ${{ matrix.soft_key_flag }}
+            ${{ matrix.soft_key_flag }} $YUBIKEY_FLAGS
 
       # ── Step 4b: ADC integration test (no service account) ──
       - name: "ADC Test: No service account"
@@ -562,6 +639,23 @@ jobs:
         if: always() && matrix.self_hosted
         run: |
           rm -rf .venv /tmp/adc_*.txt
+          # Reset YubiKey PIV state if this was a YubiKey test
+          if [ -n "$YUBIKEY_FLAGS" ]; then
+            python3 -c "
+from ykman.device import list_all_devices
+from yubikit.core.smartcard import SmartCardConnection
+from yubikit.piv import PivSession
+serial = int('${{ steps.yubikey.outputs.serial }}' or '0')
+if serial:
+    for dev, info in list_all_devices():
+        if info.serial == serial:
+            with dev.open_connection(SmartCardConnection) as conn:
+                piv = PivSession(conn)
+                piv.reset()
+                print(f'YubiKey {serial} PIV state reset')
+            break
+" || true
+          fi
 
       # ── Summary ──
       - name: Summary
@@ -577,5 +671,6 @@ jobs:
           | **Architecture** | \`$(uname -m)\` |
           | **Project** | \`${{ steps.config.outputs.project_id }}\` |
           | **Soft Key** | \`${{ matrix.soft_key_flag || 'no (hardware/swtpm)' }}\` |
+          | **YubiKey** | \`${{ steps.yubikey.outputs.serial || 'n/a' }}\` |
 
           EOF

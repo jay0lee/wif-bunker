@@ -1,11 +1,8 @@
 """Minimal ADC test — proves Application Default Credentials work.
 
-Uses the '403 trick' to discover the federated principal identity:
-requesting a non-existent project returns a 403 whose error message
-contains the exact principal string.
+Authenticates via ADC, makes a real API call to the target project,
+and introspects the access token to discover the federated principal.
 """
-
-import re
 
 import google.auth
 import google.auth.transport.requests
@@ -22,40 +19,46 @@ print(f"Credential type: {cred_type.__module__}.{cred_type.__name__}")
 sa_email = getattr(creds, "service_account_email", None)
 if sa_email:
     print(f"Service account: {sa_email}")
+if project:
+    print(f"Project: {project}")
 
-# ── "Who am I?" via the 403 trick ──
-# Request a project that doesn't exist. GCP's IAM evaluation returns a
-# 403 whose error message leaks the exact principal string, e.g.:
-#   "Permission denied: Principal principal://iam.googleapis.com/projects/
-#    123/locations/global/workloadIdentityPools/pool/subject/..."
-print("\n--- Identity Check (403 trick) ---")
-resp = authed_session.get(
-    "https://cloudresourcemanager.googleapis.com/v1/projects/wif-bunker-identity-check-00000",
-)
-if resp.status_code == 403:
-    error_msg = resp.json().get("error", {}).get("message", "")
-    # Extract the principal:// URI from the error message
-    match = re.search(r"principal://\S+", error_msg)
-    if match:
-        principal = match.group(0).rstrip(".")
-        print(f"Authenticated as: {principal}")
-
-        # Parse out the useful parts
-        parts = re.match(
-            r"principal://iam\.googleapis\.com/projects/(?P<project_number>[^/]+)"
-            r"/locations/(?P<location>[^/]+)"
-            r"/workloadIdentityPools/(?P<pool>[^/]+)"
-            r"/subject/(?P<subject>.+)",
-            principal,
-        )
-        if parts:
-            print(f"  Project number:  {parts.group('project_number')}")
-            print(f"  WIF Pool:        {parts.group('pool')}")
-            print(f"  Subject:         {parts.group('subject')}")
+# ── Verify ADC works: call the target project ──
+if project:
+    print(f"\n--- API Verification ---")
+    resp = authed_session.get(
+        f"https://cloudresourcemanager.googleapis.com/v1/projects/{project}",
+    )
+    if resp.ok:
+        proj_info = resp.json()
+        print(f"Project name:   {proj_info.get('name')}")
+        print(f"Project number: {proj_info.get('projectNumber')}")
+        print(f"Lifecycle:      {proj_info.get('lifecycleState')}")
     else:
-        print(f"403 but could not parse principal from: {error_msg}")
-elif resp.status_code == 404:
-    print("Got 404 (not 403) — identity has broad project access, cannot extract principal.")
-    print("This typically means you're using a service account, not WIF.")
+        print(f"API call failed: {resp.status_code} {resp.text[:200]}")
+
+# ── Introspect the access token for identity info ──
+print("\n--- Identity ---")
+# Ensure we have a fresh token
+creds.refresh(google.auth.transport.requests.Request())
+token = creds.token
+
+# Use Google's tokeninfo endpoint to discover the principal
+token_resp = authed_session.get(
+    f"https://oauth2.googleapis.com/tokeninfo?access_token={token}",
+)
+if token_resp.ok:
+    info = token_resp.json()
+    # WIF tokens have 'sub' (subject) and may have 'email'
+    if info.get("email"):
+        print(f"Email:   {info['email']}")
+    if info.get("sub"):
+        print(f"Subject: {info['sub']}")
+    if info.get("azp"):
+        print(f"Azp:     {info['azp']}")
+    if info.get("scope"):
+        print(f"Scopes:  {info['scope']}")
+    exp = info.get("expires_in")
+    if exp:
+        print(f"Expires: {exp}s")
 else:
-    print(f"Unexpected status {resp.status_code}: {resp.text[:200]}")
+    print(f"Token introspection failed: {token_resp.status_code}")
