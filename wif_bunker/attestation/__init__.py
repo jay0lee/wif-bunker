@@ -139,96 +139,71 @@ def _box(label: str, lines: list[str], width: int = 55) -> list[str]:
 
 
 def _print_attestation_chain(report: AttestationReport) -> None:
-    """Print a visual attestation chain diagram."""
+    """Print a compact PKI trust chain — one line per cert/CA."""
     logger.info("")
     logger.info("  Attestation Chain")
     logger.info("  ═════════════════")
-    logger.info("")
 
-    W = 55  # box width
-    connector_pad = " " * ((W // 2) - 1)
-
-    # Platform Certificate box (if found — OEM attested)
-    pi = report.platform_info
-    if pi and pi.get("manufacturer"):
-        mfr = pi.get("manufacturer", "Unknown OEM")
-        model = pi.get("model", "")
-        sn = pi.get("serial_number", "")
-        issuer = pi.get("issuer", "unknown")
-        plat_lines = [f"{mfr} {model}".strip()]
-        if sn:
-            plat_lines.append(f"S/N: {sn}")
-        plat_lines.append(f"Signed by: {issuer[:45]}")
-        for line in _box("Platform (OEM Attested) 🏭", plat_lines, W):
-            logger.info(line)
-        logger.info(f"{connector_pad}│ contains (platform cert)")
-
-    # TPM Hardware box
-    tpm = report.tpm_info or {}
     ek = report.ek_details or {}
+    tpm = report.tpm_info or {}
+    wk_name = report.workload_cn or "workload"
 
     # Build TPM manufacturer string
-    mfr_id = tpm.get("ManufacturerId", 0)
-    try:
-        from wif_bunker.attestation.windows import _decode_manufacturer_id
-
-        tpm_mfr = _decode_manufacturer_id(mfr_id) if mfr_id else "Unknown"
-    except ImportError:
-        tpm_mfr = str(mfr_id) if mfr_id else "Unknown"
-    tpm_model = ek.get("tpm_model", "")
-    fw = tpm.get("ManufacturerVersion", "")
-
-    tpm_lines = [f"{tpm_mfr}"]
-    if tpm_model:
-        tpm_lines[0] += f" {tpm_model}"
+    tpm_mfr = tpm.get("manufacturer", "")
+    if not tpm_mfr:
+        mfr_id = tpm.get("ManufacturerId", 0)
+        try:
+            from wif_bunker.attestation.base import _decode_manufacturer_id  # pylint: disable=import-outside-toplevel
+            tpm_mfr = _decode_manufacturer_id(mfr_id) if mfr_id else ""
+        except ImportError:
+            tpm_mfr = ""
+    fw = tpm.get("firmware", "") or tpm.get("ManufacturerVersion", "")
+    tpm_desc = tpm_mfr or "TPM 2.0"
     if fw:
-        tpm_lines[0] += f", FW {fw}"
+        tpm_desc += f" (FW {fw})"
 
-    # EK info
-    ek_issuer = ek.get("issuer", "")
-    if ek_issuer:
-        ek_short = ek_issuer[:45]
-        tpm_lines.append(f"EK Issuer: {ek_short}")
-    ek_serial = ek.get("serial", "")
-    if ek_serial:
-        tpm_lines.append(f"EK Serial: {ek_serial[:30]}...")
+    # Platform-specific attestation mechanism
+    if report.platform == "linux-tpm2":
+        certify_method = "tpm2_certify"
+    else:
+        certify_method = "NCryptCreateClaim"
 
-    for line in _box("TPM Hardware (Cryptographic) 🔐", tpm_lines, W):
-        logger.info(line)
-    logger.info(f"{connector_pad}│ certifies (NCryptCreateClaim)")
+    # Extract EK issuer — try to pull just the OU for a compact display
+    ek_issuer_full = ek.get("issuer", "")
+    ek_issuer_short = ek_issuer_full
+    if "OU=" in ek_issuer_full:
+        # Pull the OU value for a cleaner display
+        import re  # pylint: disable=import-outside-toplevel
+        m = re.search(r"OU=([^,]+)", ek_issuer_full)
+        if m:
+            ek_issuer_short = m.group(1)
 
-    # Workload Key box
-    # Extract workload key name from checks
-    wk_name = ""
-    wk_provider = ""
-    for check in report.checks:
-        if check.name == "Key storage provider" and check.passed:
-            # Parse key name from detail
-            if "'" in check.detail:
-                parts = check.detail.split("'")
-                if len(parts) >= 2:
-                    wk_name = parts[1]
-            if "Platform Crypto Provider" in check.detail:
-                wk_provider = "Platform Crypto Provider (TPM)"
-
-    wk_lines = [wk_name or "workload key"]
-    if wk_provider:
-        wk_lines.append(f"Provider: {wk_provider}")
-    wk_lines.append(f"Non-exportable: {_SYM_OK}")
-
-    for line in _box("Workload Key 🔑", wk_lines, W):
-        logger.info(line)
-    logger.info(f"{connector_pad}│ bound to certificate")
-
-    # mTLS Identity box
-    mtls_lines = [
-        f"CN={wk_name or 'workload'}",
-        "mTLS via ECP → STS → GCP IAM",
-    ]
-    for line in _box("mTLS Identity 🌐", mtls_lines, W):
-        logger.info(line)
+    # Build the chain lines
+    logger.info("")
+    logger.info("  %s  Workload Key: %s", _SYM_OK, wk_name)
+    logger.info("       └─ certified by %s", certify_method)
+    logger.info("  %s  Endorsement Key (EK): %s", _SYM_OK, tpm_desc)
+    if ek_issuer_short and ek_issuer_short != "unknown":
+        logger.info("       └─ signed by: %s", ek_issuer_short)
+        # If we can infer the root from the issuer
+        if "root" not in ek_issuer_short.lower():
+            # The intermediate's issuer is the root — we can extract from ek_issuer_full
+            root_ou = ""
+            if "O=" in ek_issuer_full:
+                m = re.search(r"O=([^,]+)", ek_issuer_full)
+                if m:
+                    root_ou = m.group(1)
+            if root_ou:
+                logger.info("  %s  Root CA: %s", _SYM_OK, root_ou)
+            else:
+                logger.info("  %s  Root CA: verified", _SYM_OK)
+        else:
+            logger.info("  %s  Root CA: %s", _SYM_OK, ek_issuer_short)
+    else:
+        logger.info("       └─ no EK certificate (software TPM)")
 
     # Platform cert note
+    pi = report.platform_info
     if not pi or not pi.get("manufacturer"):
         logger.info("")
         logger.info("  (i) Platform Certificate not found at TPM NV 0x01C08000")

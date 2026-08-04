@@ -701,4 +701,5 @@ def _attest_linux(config: WorkloadConfig) -> AttestationReport:  # pylint: disab
         summary=summary,
         ek_details=ek_details,
         tpm_info=tpm_info,
+        workload_cn=config.workload_cn,
     )

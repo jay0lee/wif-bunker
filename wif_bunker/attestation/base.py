@@ -49,6 +49,7 @@ class AttestationReport:
     platform_info: dict | None = None  # OEM platform cert details (if found)
     ek_details: dict | None = None  # Parsed EK certificate details
     tpm_info: dict | None = None  # Raw Get-Tpm info
+    workload_cn: str = ""  # Workload certificate CN for chain display
 
     @property
     def checks_passed(self) -> int:
@@ -490,5 +491,17 @@ def parse_ek_details(ek_pem: str) -> dict:
         tcg_attrs = _parse_tcg_attributes(cert_obj)
         details.update(tcg_attrs)
     except Exception:  # pylint: disable=broad-except
-        details.setdefault("issuer", "unknown")
+        # Strict parser failed (e.g. Intel non-standard ASN.1).
+        # Fall back to pyOpenSSL for basic fields.
+        try:
+            from OpenSSL.crypto import FILETYPE_PEM, load_certificate  # pylint: disable=import-outside-toplevel
+
+            ossl_cert = load_certificate(FILETYPE_PEM, ek_pem.encode())
+            details["issuer"] = ", ".join(
+                f"{k.decode()}={v.decode()}"
+                for k, v in ossl_cert.get_issuer().get_components()
+            )
+            details["serial"] = format(ossl_cert.get_serial_number(), "X")
+        except Exception:  # pylint: disable=broad-except
+            details.setdefault("issuer", "unknown")
     return details
