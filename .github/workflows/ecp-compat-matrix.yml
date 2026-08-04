@@ -13,14 +13,13 @@ permissions:
   id-token: write
 
 jobs:
-  ecp-compat:
+  # ── Test GitHub release binary combos ──
+  github-release:
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, ubuntu-24.04, ubuntu-26.04]
-        # libecp.so version (the Go c-shared signer library)
         ecp_version: ["v0.3.14", "v0.3.19"]
-        # libtls_offload.so version (the C++ OpenSSL offload library)
         offload_version: ["v0.3.14", "v0.3.19"]
 
     runs-on: ${{ matrix.os }}
@@ -40,7 +39,6 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db
 
-      # ── Software TPM ──
       - name: "Setup Software TPM"
         run: |
           sudo apt-get update -qq
@@ -71,7 +69,6 @@ jobs:
           echo "TPM2TOOLS_TCTI=tabrmd:bus_type=session" >> "$GITHUB_ENV"
           echo "TPM2_PKCS11_TCTI=tabrmd:bus_type=session" >> "$GITHUB_ENV"
 
-      # ── Python ──
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: "3.x"
@@ -83,14 +80,11 @@ jobs:
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
           pip install .
 
-      # ── Download ECP binaries from specific versions ──
-      - name: "Download ECP binaries (custom matrix)"
+      - name: "Download ECP binaries (GitHub release)"
         run: |
           ECP_DIR="$HOME/.config/bunker-ecp"
           mkdir -p "$ECP_DIR"
 
-          echo "=== Downloading libecp.so from ${{ matrix.ecp_version }} ==="
-          # Asset naming differs between versions
           if [ "${{ matrix.ecp_version }}" = "v0.3.14" ]; then
             ECP_ASSET="ecp_705_with_proxy_linux_amd64.tar.gz"
           else
@@ -99,7 +93,6 @@ jobs:
           curl -sL "https://github.com/googleapis/enterprise-certificate-proxy/releases/download/${{ matrix.ecp_version }}/${ECP_ASSET}" \
             | tar xzf - -C "$ECP_DIR"
 
-          echo "=== Downloading libtls_offload.so from ${{ matrix.offload_version }} ==="
           if [ "${{ matrix.offload_version }}" = "v0.3.14" ]; then
             OFFLOAD_ASSET="ecp_705_with_proxy_linux_amd64_tls_offload.tar.gz"
           else
@@ -109,29 +102,30 @@ jobs:
             | tar xzf - -C "$ECP_DIR"
 
           chmod +x "$ECP_DIR"/*
+
+      - name: "Binary diagnostics"
+        run: |
+          ECP_DIR="$HOME/.config/bunker-ecp"
           echo "=== ECP binaries ==="
           ls -la "$ECP_DIR"
           echo ""
-          echo "libecp.so Go version:        $(strings "$ECP_DIR/libecp.so" | grep '^go1\.' | head -1)"
-          echo "libtls_offload.so GCC:       $(strings "$ECP_DIR/libtls_offload.so" | grep 'GCC:' | head -1)"
-          echo "libtls_offload.so size:      $(wc -c < "$ECP_DIR/libtls_offload.so")"
-
-      # ── Diagnostics ──
-      - name: "Environment diagnostics"
-        run: |
+          echo "libecp.so Go version:   $(strings "$ECP_DIR/libecp.so" | grep '^go1\.' | head -1)"
+          echo "libecp.so md5:          $(md5sum "$ECP_DIR/libecp.so" | cut -d' ' -f1)"
+          echo "libecp.so size:         $(wc -c < "$ECP_DIR/libecp.so") bytes"
+          echo ""
+          echo "libtls_offload.so GCC:  $(strings "$ECP_DIR/libtls_offload.so" | grep 'GCC:' | head -1)"
+          echo "libtls_offload.so md5:  $(md5sum "$ECP_DIR/libtls_offload.so" | cut -d' ' -f1)"
+          echo "libtls_offload.so size: $(wc -c < "$ECP_DIR/libtls_offload.so") bytes"
+          echo ""
           python -c "
           import ctypes, sys, ssl, sysconfig
           print(f'Python:             {sys.version}')
           print(f'OpenSSL:            {ssl.OPENSSL_VERSION}')
           print(f'Py_GIL_DISABLED:    {sysconfig.get_config_var(\"Py_GIL_DISABLED\")}')
-          print(f'sizeof(object):     {sys.getsizeof(object())}')
-          print(f'sizeof(c_void_p)*2: {ctypes.sizeof(ctypes.c_void_p)*2}')
           "
-          echo ""
           ldd --version 2>&1 | head -1 || true
           cat /etc/os-release | grep PRETTY_NAME
 
-      # ── Generate unique project ID ──
       - name: Set project ID
         id: config
         run: |
@@ -139,7 +133,6 @@ jobs:
           PROJECT_ID="${PROJECT_ID:0:30}"
           echo "project_id=$PROJECT_ID" >> "$GITHUB_OUTPUT"
 
-      # ── Run WIF Bunker (the real test) ──
       - name: "WIF Bunker: Fresh setup"
         run: |
           python -m wif_bunker \
@@ -147,7 +140,6 @@ jobs:
             --create-project="${{ steps.config.outputs.project_id }}" \
             --folder="${{ secrets.SANDBOX_FOLDER_ID }}"
 
-      # ── ADC Test ──
       - name: "ADC Test"
         run: |
           export GOOGLE_APPLICATION_CREDENTIALS="$PWD/adc.json"
@@ -156,29 +148,215 @@ jobs:
           unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE 2>/dev/null || true
           python minimal-adc.py
 
-      # ── Cleanup ──
       - name: "Cleanup test project"
         if: always()
-        run: |
-          PROJECT_ID="${{ steps.config.outputs.project_id }}"
-          if [ -n "$PROJECT_ID" ]; then
-            gcloud projects delete "$PROJECT_ID" --quiet 2>/dev/null || true
-          fi
+        run: gcloud projects delete "${{ steps.config.outputs.project_id }}" --quiet 2>/dev/null || true
 
-      # ── Summary ──
       - name: Summary
         if: always()
         run: |
+          ECP_DIR="$HOME/.config/bunker-ecp"
           cat >> "$GITHUB_STEP_SUMMARY" <<EOF
           ## ${{ matrix.os }} | ecp=${{ matrix.ecp_version }} offload=${{ matrix.offload_version }}
 
           | Property | Value |
           |----------|-------|
           | **OS** | \`${{ matrix.os }}\` |
-          | **libecp.so** | \`${{ matrix.ecp_version }}\` ($(strings $HOME/.config/bunker-ecp/libecp.so | grep '^go1\.' | head -1)) |
-          | **libtls_offload.so** | \`${{ matrix.offload_version }}\` ($(wc -c < $HOME/.config/bunker-ecp/libtls_offload.so) bytes) |
+          | **libecp.so** | \`${{ matrix.ecp_version }}\` / \`$(strings $ECP_DIR/libecp.so | grep '^go1\.' | head -1)\` / \`$(md5sum $ECP_DIR/libecp.so | cut -d' ' -f1)\` |
+          | **libtls_offload.so** | \`${{ matrix.offload_version }}\` / \`$(wc -c < $ECP_DIR/libtls_offload.so) bytes\` / \`$(md5sum $ECP_DIR/libtls_offload.so | cut -d' ' -f1)\` |
           | **Python** | \`$(python --version)\` |
           | **glibc** | \`$(ldd --version 2>&1 | head -1)\` |
-          | **Result** | ✅ or ❌ (see job status) |
+
+          EOF
+
+  # ── Test gcloud-installed ECP binaries ──
+  gcloud-ecp:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-26.04]
+
+    runs-on: ${{ matrix.os }}
+    name: "${{ matrix.os }} | gcloud ECP"
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PYTHONFAULTHANDLER: "1"
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      # Install latest gcloud from scratch (not the GHA-bundled one)
+      - name: "Install latest gcloud SDK"
+        run: |
+          # Remove any pre-installed gcloud
+          sudo rm -rf /usr/lib/google-cloud-sdk /snap/google-cloud-cli 2>/dev/null || true
+          hash -r
+
+          # Install latest from Google
+          curl -sL https://sdk.cloud.google.com | bash -s -- --disable-prompts --install-dir="$HOME"
+          echo "$HOME/google-cloud-sdk/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/google-cloud-sdk/bin:$PATH"
+
+          # Authenticate
+          gcloud auth login --cred-file="${{ steps.auth.outputs.credentials_file_path }}" --quiet
+          gcloud config set project "${{ steps.auth.outputs.project_id }}" --quiet 2>/dev/null || true
+
+          echo "=== gcloud version ==="
+          gcloud version
+
+      - name: "Install ECP component via gcloud"
+        run: |
+          export PATH="$HOME/google-cloud-sdk/bin:$PATH"
+          gcloud components install enterprise-certificate-proxy --quiet
+
+          echo "=== gcloud components list (ECP) ==="
+          gcloud components list 2>/dev/null | grep -i "enterprise\|ecp" || true
+
+      - name: "Locate and fingerprint gcloud ECP binaries"
+        run: |
+          export PATH="$HOME/google-cloud-sdk/bin:$PATH"
+          GCLOUD_SDK="$HOME/google-cloud-sdk"
+
+          echo "=== Searching for ECP binaries in gcloud SDK ==="
+          find "$GCLOUD_SDK" -name "libecp*" -o -name "libtls_offload*" -o -name "ecp" -type f 2>/dev/null | sort
+
+          # Find the binaries
+          LIBECP=$(find "$GCLOUD_SDK" -name "libecp.so" | head -1)
+          OFFLOAD=$(find "$GCLOUD_SDK" -name "libtls_offload.so" | head -1)
+          ECP_BIN=$(find "$GCLOUD_SDK" -name "ecp" -type f ! -name "*.py" ! -name "*.json" | head -1)
+
+          echo ""
+          if [ -n "$LIBECP" ]; then
+            echo "libecp.so path:     $LIBECP"
+            echo "libecp.so size:     $(wc -c < "$LIBECP") bytes"
+            echo "libecp.so md5:      $(md5sum "$LIBECP" | cut -d' ' -f1)"
+            echo "libecp.so Go ver:   $(strings "$LIBECP" | grep '^go1\.' | head -1)"
+          else
+            echo "WARNING: libecp.so not found in gcloud SDK"
+          fi
+
+          echo ""
+          if [ -n "$OFFLOAD" ]; then
+            echo "libtls_offload.so path:  $OFFLOAD"
+            echo "libtls_offload.so size:  $(wc -c < "$OFFLOAD") bytes"
+            echo "libtls_offload.so md5:   $(md5sum "$OFFLOAD" | cut -d' ' -f1)"
+            echo "libtls_offload.so GCC:   $(strings "$OFFLOAD" | grep 'GCC:' | head -1)"
+          else
+            echo "WARNING: libtls_offload.so not found in gcloud SDK"
+          fi
+
+          # Copy to bunker-ecp dir for wif-bunker to find
+          ECP_DIR="$HOME/.config/bunker-ecp"
+          mkdir -p "$ECP_DIR"
+          [ -n "$LIBECP" ] && cp "$LIBECP" "$ECP_DIR/"
+          [ -n "$OFFLOAD" ] && cp "$OFFLOAD" "$ECP_DIR/"
+          [ -n "$ECP_BIN" ] && cp "$ECP_BIN" "$ECP_DIR/"
+          chmod +x "$ECP_DIR"/* 2>/dev/null || true
+
+          echo ""
+          echo "=== Installed to bunker-ecp ==="
+          ls -la "$ECP_DIR"
+
+      - name: "Setup Software TPM"
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            swtpm swtpm-tools \
+            tpm2-tools tpm2-abrmd libtss2-tcti-tabrmd0 dbus \
+            libtpm2-pkcs11-1 libtpm2-pkcs11-tools python3-tpm2-pkcs11-tools \
+            gnutls-bin opensc
+
+          SWTPM_DIR=$(mktemp -d)
+          swtpm socket \
+            --tpmstate dir="$SWTPM_DIR" \
+            --tpm2 \
+            --ctrl type=tcp,port=2322 \
+            --server type=tcp,port=2321 \
+            --flags not-need-init,startup-clear &
+          sleep 2
+
+          DBUS_SESSION_BUS_ADDRESS=$(dbus-daemon --session --fork --print-address --address="unix:tmpdir=/tmp")
+          echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
+          export DBUS_SESSION_BUS_ADDRESS
+          tpm2-abrmd \
+            --tcti="swtpm:host=127.0.0.1,port=2321" \
+            --session \
+            --allow-root &
+          sleep 1
+
+          echo "TPM2TOOLS_TCTI=tabrmd:bus_type=session" >> "$GITHUB_ENV"
+          echo "TPM2_PKCS11_TCTI=tabrmd:bus_type=session" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.x"
+
+      - name: Install dependencies
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          pip install .
+
+      - name: "Environment diagnostics"
+        run: |
+          python -c "
+          import ctypes, sys, ssl, sysconfig
+          print(f'Python:             {sys.version}')
+          print(f'OpenSSL:            {ssl.OPENSSL_VERSION}')
+          print(f'Py_GIL_DISABLED:    {sysconfig.get_config_var(\"Py_GIL_DISABLED\")}')
+          "
+          ldd --version 2>&1 | head -1 || true
+          cat /etc/os-release | grep PRETTY_NAME
+
+      - name: Set project ID
+        id: config
+        run: |
+          PROJECT_ID="wif-ci-${{ github.run_id }}-${{ strategy.job-index }}"
+          PROJECT_ID="${PROJECT_ID:0:30}"
+          echo "project_id=$PROJECT_ID" >> "$GITHUB_OUTPUT"
+
+      - name: "WIF Bunker: Fresh setup"
+        run: |
+          python -m wif_bunker \
+            --use-adc \
+            --create-project="${{ steps.config.outputs.project_id }}" \
+            --folder="${{ secrets.SANDBOX_FOLDER_ID }}"
+
+      - name: "ADC Test"
+        run: |
+          export GOOGLE_APPLICATION_CREDENTIALS="$PWD/adc.json"
+          export GOOGLE_API_USE_CLIENT_CERTIFICATE=true
+          export GOOGLE_API_CERTIFICATE_CONFIG="$PWD/certificate_config.json"
+          unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE 2>/dev/null || true
+          python minimal-adc.py
+
+      - name: "Cleanup test project"
+        if: always()
+        run: |
+          export PATH="$HOME/google-cloud-sdk/bin:$PATH"
+          gcloud projects delete "${{ steps.config.outputs.project_id }}" --quiet 2>/dev/null || true
+
+      - name: Summary
+        if: always()
+        run: |
+          ECP_DIR="$HOME/.config/bunker-ecp"
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ## ${{ matrix.os }} | gcloud ECP
+
+          | Property | Value |
+          |----------|-------|
+          | **OS** | \`${{ matrix.os }}\` |
+          | **gcloud** | \`$(gcloud version 2>/dev/null | head -1 || echo 'N/A')\` |
+          | **libecp.so** | \`$(strings $ECP_DIR/libecp.so 2>/dev/null | grep '^go1\.' | head -1)\` / \`$(md5sum $ECP_DIR/libecp.so 2>/dev/null | cut -d' ' -f1)\` |
+          | **libtls_offload.so** | \`$(wc -c < $ECP_DIR/libtls_offload.so 2>/dev/null) bytes\` / \`$(md5sum $ECP_DIR/libtls_offload.so 2>/dev/null | cut -d' ' -f1)\` |
+          | **Python** | \`$(python --version)\` |
+          | **glibc** | \`$(ldd --version 2>&1 | head -1)\` |
 
           EOF
