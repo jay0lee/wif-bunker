@@ -52,7 +52,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-26.04
+          - os: ubuntu-22.04
             platform_name: linux
             arch: x86_64
           - os: macos-15

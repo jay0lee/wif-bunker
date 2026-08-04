@@ -89,13 +89,17 @@ jobs:
       - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
       # ── Setup: Linux Software TPM ──
+      # NOTE: tpm2-abrmd is only needed here because swtpm exposes a TCP socket,
+      # not /dev/tpmrm0.  The PKCS#11 layer (tpm2_ptool) requires a resource
+      # manager — on real hardware the kernel provides /dev/tpmrm0, but for
+      # swtpm in CI we need the userspace abrmd bridge.
       - name: "Linux: Setup Software TPM (swtpm)"
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             swtpm swtpm-tools \
-            tpm2-tools \
+            tpm2-tools tpm2-abrmd libtss2-tcti-tabrmd0 dbus \
             libtpm2-pkcs11-1 libtpm2-pkcs11-tools python3-tpm2-pkcs11-tools \
             gnutls-bin opensc
 
@@ -108,9 +112,18 @@ jobs:
             --flags not-need-init,startup-clear &
           sleep 2
 
-          # Use direct swtpm TCTI — no abrmd daemon needed
-          echo "TPM2TOOLS_TCTI=swtpm:host=127.0.0.1,port=2321" >> "$GITHUB_ENV"
-          echo "TPM2_PKCS11_TCTI=swtpm:host=127.0.0.1,port=2321" >> "$GITHUB_ENV"
+          DBUS_SESSION_BUS_ADDRESS=$(dbus-daemon --session --fork --print-address --address="unix:tmpdir=/tmp")
+          echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
+
+          export DBUS_SESSION_BUS_ADDRESS
+          tpm2-abrmd \
+            --tcti="swtpm:host=127.0.0.1,port=2321" \
+            --session \
+            --allow-root &
+          sleep 1
+
+          echo "TPM2TOOLS_TCTI=tabrmd:bus_type=session" >> "$GITHUB_ENV"
+          echo "TPM2_PKCS11_TCTI=tabrmd:bus_type=session" >> "$GITHUB_ENV"
 
 
       # ── Setup: Python ──
