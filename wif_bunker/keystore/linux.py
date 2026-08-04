@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from wif_bunker.cert import _create_ca_and_sign
@@ -14,10 +16,61 @@ from wif_bunker.utils import _require_command, write_secure_file
 logger = logging.getLogger(__name__)
 
 
+def _resolve_tpm2_ptool() -> list[str]:
+    """Resolve a working tpm2_ptool command.
+
+    On Ubuntu 26.04, the system wrapper at /usr/bin/tpm2_ptool is broken:
+    the easy_install entry-point hardcodes a version that doesn't match the
+    installed Python package.  We detect this by running ``tpm2_ptool --help``
+    and, if it fails with an importlib/entry_point error, fall back to
+    invoking the module directly via ``python3 -m tpm2_pkcs11.tpm2_ptool``.
+    """
+    ptool_path = shutil.which("tpm2_ptool")
+    if ptool_path:
+        try:
+            probe = subprocess.run(
+                ["tpm2_ptool", "--help"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if probe.returncode == 0:
+                return ["tpm2_ptool"]
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        # Binary exists but is broken — check stderr for entry_point crash
+        logger.debug(
+            "tpm2_ptool wrapper is broken (likely Ubuntu packaging bug), "
+            "falling back to python3 -m tpm2_pkcs11.tpm2_ptool"
+        )
+
+    # Fall back to invoking the Python module directly
+    python = sys.executable or shutil.which("python3") or "python3"
+    try:
+        probe = subprocess.run(
+            [python, "-m", "tpm2_pkcs11.tpm2_ptool", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if probe.returncode == 0:
+            return [python, "-m", "tpm2_pkcs11.tpm2_ptool"]
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+    raise RuntimeError(
+        "tpm2_ptool is not working.\n"
+        "\n"
+        "  The system wrapper may be broken (Ubuntu packaging bug).\n"
+        "  Install: sudo apt install libtpm2-pkcs11-1 "
+        "libtpm2-pkcs11-tools python3-tpm2-pkcs11-tools"
+    )
+
+
 def _check_tpm_linux() -> None:
     """Pre-validate TPM availability on Linux.
 
-    Checks for hardware TPM device, tpm2-abrmd service, or software TPM.
+    Checks for hardware TPM device (/dev/tpmrm0) or software TPM.
     Raises RuntimeError with actionable guidance if no TPM is accessible.
     """
     # 1. Hardware TPM device node
@@ -25,19 +78,7 @@ def _check_tpm_linux() -> None:
     if tpm_device.exists():
         return  # Hardware TPM available
 
-    # 2. Check if tpm2-abrmd service is running (systemd)
-    try:
-        abrmd = subprocess.run(
-            ["systemctl", "is-active", "--quiet", "tpm2-abrmd"],
-            capture_output=True,
-            timeout=5,
-        )
-        if abrmd.returncode == 0:
-            return  # tpm2-abrmd is running and managing a TPM
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass  # systemctl not available or timed out
-
-    # 3. Check for software TPM (swtpm) via TCTI env or port probe
+    # 2. Check for software TPM (swtpm) via TCTI env or port probe
     if os.environ.get("TPM2TOOLS_TCTI"):
         return  # User has explicitly configured a TCTI (e.g. swtpm)
     try:
@@ -56,8 +97,9 @@ def _check_tpm_linux() -> None:
         "  wif_bunker requires a TPM 2.0 for hardware-backed keys.\n"
         "\n"
         "  Options:\n"
-        "    1. Hardware TPM — ensure the tpm2-abrmd service is running:\n"
-        "         sudo systemctl start tpm2-abrmd\n"
+        "    1. Hardware TPM — check that /dev/tpmrm0 exists:\n"
+        "         ls -la /dev/tpmrm0\n"
+        "       If missing, ensure the TPM is enabled in BIOS/UEFI.\n"
         "\n"
         "    2. Software TPM (development/testing) — install and start swtpm:\n"
         "         sudo apt install swtpm swtpm-tools\n"
@@ -71,7 +113,7 @@ def _check_tpm_linux() -> None:
 def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
     """Generates a TPM 2.0-backed certificate via PKCS#11 toolchain (Ubuntu 24+)."""
     # Pre-validate required commands.
-    _require_command("tpm2_ptool", package="tpm2-pkcs11-tools", install_hint="sudo apt install tpm2-pkcs11-tools")
+    ptool_cmd = _resolve_tpm2_ptool()
     _require_command("p11tool", package="gnutls-bin", install_hint="sudo apt install gnutls-bin")
     _require_command("pkcs11-tool", package="opensc", install_hint="sudo apt install opensc")
     # Also need certtool from gnutls-bin for CSR generation.
@@ -87,7 +129,7 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
     try:
         # 1. Initialize TPM PKCS#11 token and generate hardware-backed key
         init_result = subprocess.run(
-            ["tpm2_ptool", "init"],
+            [*ptool_cmd, "init"],
             check=True,
             capture_output=True,
             text=True,
@@ -96,14 +138,14 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
 
         # Remove existing token if present (reuse flow).
         subprocess.run(
-            ["tpm2_ptool", "rmtoken", "--label=bunker-wif"],
+            [*ptool_cmd, "rmtoken", "--label=bunker-wif"],
             capture_output=True,
             text=True,
         )  # Ignore errors — token may not exist yet.
 
         token_result = subprocess.run(
             [
-                "tpm2_ptool",
+                *ptool_cmd,
                 "addtoken",
                 "--pid=1",
                 f"--sopin={config.linux_tpm_pin}",
@@ -118,7 +160,7 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
 
         key_result = subprocess.run(
             [
-                "tpm2_ptool",
+                *ptool_cmd,
                 "addkey",
                 f"--algorithm={config.key_algo_config['linux_tpm2']}",
                 "--label=bunker-wif",
@@ -202,7 +244,7 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
 
         subprocess.run(
             [
-                "tpm2_ptool",
+                *ptool_cmd,
                 "addcert",
                 "--label=bunker-wif",
                 f"--key-id={key_id}",
@@ -227,20 +269,20 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
                 "The TPM tools are installed but cannot connect to a TPM device.\n"
                 "\n"
                 "  Options:\n"
-                "    1. Start the TPM resource manager:\n"
-                "         sudo systemctl start tpm2-abrmd\n"
+                "    1. Verify the kernel resource manager exists:\n"
+                "         ls -la /dev/tpmrm0\n"
                 "\n"
                 "    2. For development, start a software TPM:\n"
                 "         swtpm socket --tpmstate dir=/tmp/swtpm --tpm2 "
                 "--server type=tcp,port=2321 --ctrl type=tcp,port=2322 &\n"
                 "         export TPM2TOOLS_TCTI='swtpm:host=127.0.0.1,port=2321'"
             ) from exc
-        if "timed out" in stderr and "Tabrmd" in stderr:
+        if "timed out" in stderr:
             raise RuntimeError(
-                f"tpm2-abrmd service timed out (command: {cmd_name}).\n"
-                "The TPM resource manager service is installed but not responding.\n"
+                f"TPM resource manager timed out (command: {cmd_name}).\n"
+                "The kernel TPM resource manager is not responding.\n"
                 "\n"
-                "  Try: sudo systemctl restart tpm2-abrmd\n"
+                "  Verify: ls -la /dev/tpmrm0\n"
                 "\n"
                 "  If using a software TPM, set the TCTI environment variable:\n"
                 "    export TPM2TOOLS_TCTI='swtpm:host=127.0.0.1,port=2321'"
@@ -258,6 +300,7 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
             f"exit code: {exc.returncode}).\n"
             f"  stderr: {stderr[:500]}\n"
             "\n"
-            "  Ensure tpm2-pkcs11-tools and gnutls-bin are installed:\n"
-            "    sudo apt install tpm2-pkcs11-tools gnutls-bin opensc"
+            "  Ensure libtpm2-pkcs11-tools and gnutls-bin are installed:\n"
+            "    sudo apt install libtpm2-pkcs11-1 libtpm2-pkcs11-tools "
+            "python3-tpm2-pkcs11-tools gnutls-bin opensc"
         ) from exc

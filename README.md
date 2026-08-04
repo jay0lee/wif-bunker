@@ -33,11 +33,12 @@ This single command:
 **Linux prerequisites:** TPM 2.0 hardware (or [swtpm](https://github.com/stefanberger/swtpm) for development) and the TPM PKCS#11 toolchain:
 
 ```bash
-sudo apt install tpm2-tools libtpm2-pkcs11-tools gnutls-bin opensc
+sudo apt install tpm2-tools libtpm2-pkcs11-1 libtpm2-pkcs11-tools python3-tpm2-pkcs11-tools gnutls-bin opensc
 ```
 
-> **Note:** Modern kernels (4.11+) include a built-in TPM resource manager at `/dev/tpmrm0`.
-> The userspace `tpm2-abrmd` daemon is no longer needed.
+> **Note:** These package names are the same on Ubuntu 22.04, 24.04, and 26.04.
+> Modern kernels (4.11+) include a built-in TPM resource manager at `/dev/tpmrm0` —
+> the userspace `tpm2-abrmd` daemon is no longer needed.
 
 **macOS prerequisites:** macOS 15 (Sequoia) or later with Apple Silicon (Secure Enclave).
 
@@ -190,7 +191,7 @@ WIF Bunker bridges your OS hardware security module to Google Cloud's [Workload 
 
 - **Key generation:** `tpm2_ptool addkey` (tpm2-pkcs11)
 - **Key storage:** TPM 2.0 PKCS#11 store (`~/.tpm2_pkcs11`)
-- **Tools required:** `tpm2-tools`, `libtpm2-pkcs11-tools`, `gnutls-bin`, `opensc`
+- **Tools required:** `tpm2-tools`, `libtpm2-pkcs11-tools`, `python3-tpm2-pkcs11-tools`, `gnutls-bin`, `opensc`
 - **Supported algorithms:** ECDSA P-256, ECDSA P-384, RSA 2048/3072/4096
 - **Development:** Supports [swtpm](https://github.com/stefanberger/swtpm) (software TPM) for testing without hardware
 

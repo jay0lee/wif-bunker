@@ -142,9 +142,8 @@ class TestMacOSKeystoreFlow:
 
 class TestLinuxKeystoreFlow:
     @patch("socket.socket")
-    @patch("wif_bunker.keystore.linux.subprocess.run")
-    def test_secret_tool_lookup_fallback(self, mock_run, mock_socket):
-        # We test that _check_tpm_linux falls back to the socket if systemctl fails
+    def test_secret_tool_lookup_fallback(self, mock_socket):
+        # We test that _check_tpm_linux falls back to the socket if /dev/tpmrm0 is missing
         import os
 
         from wif_bunker.keystore.linux import _check_tpm_linux
@@ -154,31 +153,25 @@ class TestLinuxKeystoreFlow:
             patch("wif_bunker.keystore.linux.Path.exists", return_value=False),
             patch.dict(os.environ, clear=True),
         ):
-            # Systemctl fails with FileNotFoundError (e.g. simulating command not found)
-            mock_run.side_effect = FileNotFoundError()
-
-            # Socket connects successfully
+            # Socket connects successfully (swtpm fallback)
             mock_sock_instance = MagicMock()
             mock_socket.return_value.__enter__.return_value = mock_sock_instance
 
             # Should not raise an exception
             _check_tpm_linux()
 
-            # Verify systemctl was attempted
-            mock_run.assert_called_with(
-                ["systemctl", "is-active", "--quiet", "tpm2-abrmd"], capture_output=True, timeout=5
-            )
             # Verify socket fallback was attempted
             mock_sock_instance.connect.assert_called_with(("127.0.0.1", 2321))
 
     @patch("wif_bunker.keystore.linux.Path.home")
+    @patch("wif_bunker.keystore.linux._resolve_tpm2_ptool", return_value=["tpm2_ptool"])
     @patch("wif_bunker.keystore.linux._require_command")
     @patch("wif_bunker.keystore.linux._check_tpm_linux")
     @patch("wif_bunker.keystore.linux.subprocess.run")
     @patch("wif_bunker.keystore.linux.write_secure_file")
     @patch("wif_bunker.keystore.linux._create_ca_and_sign")
     def test_tpm2_ptool_addkey_extracts_id(
-        self, mock_ca, mock_write, mock_run, mock_check, mock_require, mock_home, config, tmp_path
+        self, mock_ca, mock_write, mock_run, mock_check, mock_require, mock_resolve, mock_home, config, tmp_path
     ):
         mock_home.return_value = tmp_path
         import os
@@ -188,7 +181,7 @@ class TestLinuxKeystoreFlow:
 
         def side_effect(*args, **kwargs):
             cmd = args[0]
-            if cmd[0] == "tpm2_ptool" and cmd[1] == "addkey":
+            if "addkey" in cmd:
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="some output\nCKA_ID '0xABCD'\n")
             if cmd[0] == "certtool":
                 Path("bunker-workload-selfsigned.pem").write_text("fake pem")
@@ -212,19 +205,20 @@ class TestLinuxKeystoreFlow:
 
         # Verify addcert was called with the extracted key-id
         addcert_call = [
-            c for c in mock_run.call_args_list if c.args[0][0] == "tpm2_ptool" and c.args[0][1] == "addcert"
+            c for c in mock_run.call_args_list if "addcert" in c.args[0]
         ]
         assert len(addcert_call) > 0
         assert "--key-id=0xABCD" in addcert_call[0].args[0]
 
     @patch("wif_bunker.keystore.linux.Path.home")
+    @patch("wif_bunker.keystore.linux._resolve_tpm2_ptool", return_value=["tpm2_ptool"])
     @patch("wif_bunker.keystore.linux._require_command")
     @patch("wif_bunker.keystore.linux._check_tpm_linux")
     @patch("wif_bunker.keystore.linux.subprocess.run")
     @patch("wif_bunker.keystore.linux.write_secure_file")
     @patch("wif_bunker.keystore.linux._create_ca_and_sign")
     def test_tpm2_ptool_addkey_no_id_raises(
-        self, mock_ca, mock_write, mock_run, mock_check, mock_require, mock_home, config, tmp_path
+        self, mock_ca, mock_write, mock_run, mock_check, mock_require, mock_resolve, mock_home, config, tmp_path
     ):
         mock_home.return_value = tmp_path
         import os
@@ -234,7 +228,7 @@ class TestLinuxKeystoreFlow:
 
         def side_effect(*args, **kwargs):
             cmd = args[0]
-            if cmd[0] == "tpm2_ptool" and cmd[1] == "addkey":
+            if "addkey" in cmd:
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="no id here\n")
             if cmd[0] == "certtool":
                 Path("bunker-workload-selfsigned.pem").write_text("fake pem")
