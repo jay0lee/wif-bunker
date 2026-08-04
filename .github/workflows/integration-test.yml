@@ -301,17 +301,17 @@ jobs:
         run: |
           echo "=== Testing --cert-only for all supported algorithms ==="
           # Algorithms supported per platform:
-          #   Windows:        es256 es384 rsa2048 rsa3072 rsa4096
-          #   Linux (swtpm):  es256 es384 rsa2048 rsa3072 (rsa4096 excluded — swtpm limitation)
-          #   Linux (real hw): es256 es384 rsa2048 rsa3072 rsa4096
-          #   macOS:          es256 es384
+          #   Windows:          es256 es384 rsa2048 rsa3072 rsa4096
+          #   Linux (swtpm):    es256 es384 rsa2048 rsa3072 (rsa4096 excluded — swtpm limitation)
+          #   Linux (Intel PTT): es256 rsa2048 rsa3072 rsa4096 (es384 excluded — P-384 curve not supported)
+          #   macOS:            es256 es384
           ALGOS="es256 es384"
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             ALGOS="$ALGOS rsa2048 rsa3072 rsa4096"
           elif [[ "$RUNNER_OS" == "Linux" ]]; then
             if [ "${{ matrix.self_hosted }}" = "true" ]; then
-              # Real TPM hardware supports all algorithms
-              ALGOS="$ALGOS rsa2048 rsa3072 rsa4096"
+              # Intel PTT firmware TPM: P-384 curve not supported, skip es384
+              ALGOS="es256 rsa2048 rsa3072 rsa4096"
             else
               # rsa4096 excluded: tpm2-pkcs11-tools crashes with swtpm for 4096-bit keys.
               ALGOS="$ALGOS rsa2048 rsa3072"

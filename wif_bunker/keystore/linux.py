@@ -130,6 +130,57 @@ def _check_tpm_linux() -> None:
     )
 
 
+def _check_tpm_algorithm(algo: str) -> None:
+    """Verify the TPM supports the requested algorithm before key creation.
+
+    Uses ``tpm2_testparms`` to probe the TPM for algorithm support.
+    Raises RuntimeError with a clear message if the algorithm/curve is
+    not supported by the hardware.
+    """
+    # Map tpm2_ptool algorithm names to tpm2_testparms parameter strings
+    testparms_map = {
+        "ecc256": "ecc256:ecdsa",
+        "ecc384": "ecc384:ecdsa",
+        "rsa2048": "rsa2048",
+        "rsa3072": "rsa3072",
+        "rsa4096": "rsa4096",
+    }
+    testparms_arg = testparms_map.get(algo)
+    if not testparms_arg:
+        return  # Unknown algo — let tpm2_ptool handle it
+
+    tpm2_testparms = shutil.which("tpm2_testparms")
+    if not tpm2_testparms:
+        return  # Can't check — proceed and let tpm2_ptool fail naturally
+
+    result = subprocess.run(
+        ["tpm2_testparms", testparms_arg],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        # Build a helpful error message
+        curve_name = {"ecc256": "P-256", "ecc384": "P-384"}.get(algo, algo)
+        supported_info = ""
+        if algo.startswith("ecc"):
+            # Query supported ECC curves for a better message
+            cap_result = subprocess.run(
+                ["tpm2_getcap", "ecc-curves"],
+                capture_output=True,
+                text=True,
+            )
+            if cap_result.returncode == 0 and cap_result.stdout.strip():
+                supported_info = (
+                    f"\n  Supported ECC curves: {cap_result.stdout.strip()}"
+                )
+        raise RuntimeError(
+            f"This TPM does not support {curve_name} ({algo}).{supported_info}\n"
+            f"\n"
+            f"  Many firmware TPMs (Intel PTT, AMD fTPM) only support P-256.\n"
+            f"  Try a different algorithm: --key-algorithm es256"
+        )
+
+
 def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
     """Generates a TPM 2.0-backed certificate via PKCS#11 toolchain (Ubuntu 24+)."""
     # Pre-validate all required commands upfront.
@@ -142,6 +193,10 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
 
     # Check TPM availability.
     _check_tpm_linux()
+
+    # Verify the requested algorithm is supported by this TPM.
+    tpm_algo = config.key_algo_config["linux_tpm2"]
+    _check_tpm_algorithm(tpm_algo)
 
     tpm_store = Path.home() / ".tpm2_pkcs11"
     os.environ["TPM2_PKCS11_STORE"] = str(tpm_store)
