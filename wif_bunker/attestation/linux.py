@@ -15,7 +15,6 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-
 from wif_bunker.attestation.base import (
     AttestationArtifact,
     AttestationCheck,
@@ -59,7 +58,12 @@ def _extract_ek_certificate(work_dir: Path) -> tuple[AttestationCheck, str | Non
             # cryptography lib's Rust parser rejects non-standard ASN.1
             # encoding common in TPM manufacturer EK certs (e.g. Intel's
             # explicit critical=FALSE in extensions).
-            from OpenSSL.crypto import FILETYPE_ASN1, FILETYPE_PEM, dump_certificate, load_certificate  # pylint: disable=import-outside-toplevel
+            from OpenSSL.crypto import (  # pylint: disable=import-outside-toplevel
+                FILETYPE_ASN1,
+                FILETYPE_PEM,
+                dump_certificate,
+                load_certificate,
+            )
 
             der_data = (work_dir / "ek_cert.der").read_bytes()
             try:
@@ -100,7 +104,12 @@ def _extract_ek_certificate(work_dir: Path) -> tuple[AttestationCheck, str | Non
             work_dir,
         )
         if result.returncode == 0:
-            from OpenSSL.crypto import FILETYPE_ASN1, FILETYPE_PEM, dump_certificate, load_certificate  # pylint: disable=import-outside-toplevel
+            from OpenSSL.crypto import (  # pylint: disable=import-outside-toplevel
+                FILETYPE_ASN1,
+                FILETYPE_PEM,
+                dump_certificate,
+                load_certificate,
+            )
 
             raw = (work_dir / "ek_cert_fetched.pem").read_bytes().lstrip()
 

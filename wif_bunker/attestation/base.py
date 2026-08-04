@@ -118,8 +118,8 @@ def _verify_ek_chain_pyopenssl(ek_pem: str, roots_dir: Path, intermediates_dir: 
 
     import OpenSSL.crypto
     from OpenSSL.crypto import (
-        FILETYPE_PEM,
         FILETYPE_ASN1,
+        FILETYPE_PEM,
         X509Store,
         X509StoreContext,
         X509StoreContextError,
@@ -143,7 +143,7 @@ def _verify_ek_chain_pyopenssl(ek_pem: str, roots_dir: Path, intermediates_dir: 
     dirs_to_check = [roots_dir]
     if manually_managed_dir:
         dirs_to_check.append(manually_managed_dir)
-        
+
     for d in dirs_to_check:
         if d.exists():
             for pem_file in sorted(d.glob("*.pem")):
@@ -166,7 +166,7 @@ def _verify_ek_chain_pyopenssl(ek_pem: str, roots_dir: Path, intermediates_dir: 
     dirs_to_check_int = [intermediates_dir]
     if manually_managed_dir:
         dirs_to_check_int.append(manually_managed_dir)
-        
+
     for d in dirs_to_check_int:
         if d.exists():
             for pem_file in sorted(d.glob("*.pem")):
@@ -198,14 +198,14 @@ def _verify_ek_chain_pyopenssl(ek_pem: str, roots_dir: Path, intermediates_dir: 
                         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
                         with urllib.request.urlopen(req, timeout=10) as response:
                             cert_data = response.read()
-                        
+
                         try:
                             fetched_cert = load_certificate(FILETYPE_PEM, cert_data)
                         except Exception:
                             fetched_cert = load_certificate(FILETYPE_ASN1, cert_data)
-                        
+
                         intermediates.append(fetched_cert)
-                        
+
                         # Recursively verify the fetched certificate as the new target to continue chasing if needed
                         # Wait, X509StoreContext verifies the current_cert using the chain.
                         # We just retry the original ek_cert verification with the new intermediate added to the chain.
@@ -213,9 +213,9 @@ def _verify_ek_chain_pyopenssl(ek_pem: str, roots_dir: Path, intermediates_dir: 
                     except Exception as fetch_err:
                         logger.debug(f"AIA fetch failed: {fetch_err}")
             return False, str(e)
-            
+
     success, err_msg = _verify_with_aia_chasing(ek_cert)
-    
+
     if not success:
         return AttestationCheck(
             name="EK certificate chain verified",
@@ -275,7 +275,7 @@ def verify_ek_chain(ek_pem: str) -> AttestationCheck:
         roots = _load_certs(roots_dir)
         if manually_managed_dir.exists():
             roots.extend(_load_certs(manually_managed_dir))
-            
+
         intermediates = []
         if intermediates_dir.exists():
             intermediates.extend(_load_certs(intermediates_dir))
