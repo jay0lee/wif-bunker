@@ -143,7 +143,7 @@ jobs:
             echo "Installing cryptography wheel: $WHEEL_URL"
             pip install "$WHEEL_URL"
           fi
-          pip install ".[yubikey]"
+          pip install .
 
       # ── Generate unique project ID for this job ──
       - name: Set project ID

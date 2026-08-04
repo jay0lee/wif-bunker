@@ -15,7 +15,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.x'
-      - run: pip install ruff pylint ".[yubikey]"
+      - run: pip install ruff pylint .
       - name: Ruff lint
         run: ruff check .
       - name: Ruff format check
@@ -31,7 +31,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.x'
-      - run: pip install pytest pytest-cov ".[yubikey]"
+      - run: pip install pytest pytest-cov .
       - name: Run tests
         run: pytest --cov --cov-report=term-missing
 
@@ -59,6 +59,10 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.x'
+
+      - name: Install system dependencies (Linux)
+        if: matrix.platform_name == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev
 
       - name: Install dependencies
         run: pip install pyinstaller ".[yubikey]"
