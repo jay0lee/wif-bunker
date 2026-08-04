@@ -341,6 +341,10 @@ jobs:
           echo "serial=$SERIAL" >> "$GITHUB_OUTPUT"
           echo "firmware=$FW" >> "$GITHUB_OUTPUT"
 
+          # Reset PIV applet to factory defaults before testing
+          # (clears any leftover management key, PIN, PUK from previous runs)
+          python3 -c "import sys; from ykman.device import list_all_devices; from yubikit.core.smartcard import SmartCardConnection; from yubikit.piv import PivSession; serial=int(sys.argv[1]); [PivSession(dev.open_connection(SmartCardConnection)).reset() or print('YubiKey', serial, 'PIV reset to factory defaults') for dev, info in list_all_devices() if info.serial == serial]" "$SERIAL"
+
       # ── Test --cert-only for all supported algorithms ──
       - name: "Test --cert-only (all algorithms)"
         shell: bash
