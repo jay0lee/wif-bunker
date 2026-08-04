@@ -44,20 +44,6 @@ jobs:
             soft_key_flag: ""
             artifact_name: wif-bunker-linux-x86_64
             expected_algos: "es256 es384 rsa2048 rsa3072"
-          # Ubuntu 26.04 disabled: ECP's libtls_offload.so (closed-source,
-          # statically linked BoringSSL, built on Ubuntu 20.04) segfaults on
-          # glibc 2.41.  Upstream v0.3.19 offload doesn't crash but fails to
-          # present the client cert.  Re-enable when Google ships a working
-          # libtls_offload.so for 26.04.
-          # - os: ubuntu-26.04
-          #   name: Linux x64 (26.04)
-          #   soft_key_flag: ""
-          #   artifact_name: wif-bunker-linux-x86_64
-          # Linux ARM64 disabled: ECP doesn't publish linux/arm64 binaries.
-          # Re-enable when googleapis/enterprise-certificate-proxy adds ARM64.
-          # - os: ubuntu-24.04-arm
-          #   name: Linux ARM64
-          #   soft_key_flag: ""
           - os: macos-15
             name: macOS ARM64 (Apple Silicon)
             soft_key_flag: ""
@@ -68,18 +54,14 @@ jobs:
             soft_key_flag: "--soft-key"
             artifact_name: wif-bunker-windows-x86_64
             expected_algos: "es256 es384 rsa2048 rsa3072 rsa4096"
-          # Windows ARM64 disabled: ECP (enterprise-certificate-proxy) doesn't
-          # publish ARM64 binaries, and ARM64 Python can't load x86_64 DLLs.
-          # Re-enable when googleapis/enterprise-certificate-proxy adds ARM64.
-          # - os: windows-11-arm
-          #   name: Windows ARM64
-          #   soft_key_flag: "--soft-key"
-          #- name: Hardware TPM (NUC8)
-          #  runs_on: '["self-hosted", "linux", "x64", "tpm-hardware"]'
-          #  soft_key_flag: ""
-          #  artifact_name: wif-bunker-linux-x86_64
-          #  self_hosted: true
-          #  expected_algos: "es256 rsa2048"
+          # Hardware TPM (NUC8) temporarily disabled while YubiKey testing
+          # is being brought up — NUC can only run one self-hosted job at a time.
+          # - name: Hardware TPM (NUC8)
+          #   runs_on: '["self-hosted", "linux", "x64", "tpm-hardware"]'
+          #   soft_key_flag: ""
+          #   artifact_name: wif-bunker-linux-x86_64
+          #   self_hosted: true
+          #   expected_algos: "es256 rsa2048"
           - name: YubiKey (NUC8)
             runs_on: '["self-hosted", "linux", "x64", "tpm-hardware"]'
             soft_key_flag: ""
@@ -314,11 +296,7 @@ jobs:
         run: |
           echo "=== Discovering YubiKey serials ==="
           # Discover all connected YubiKey serials and firmware versions
-          KEYS=$(python -c "
-from ykman.device import list_all_devices
-for _, info in list_all_devices():
-    print(f'{info.serial} {info.version[0]}.{info.version[1]}.{info.version[2]}')
-")
+          KEYS=$(python3 -c "from ykman.device import list_all_devices; [print(i.serial, '%d.%d.%d' % i.version) for _, i in list_all_devices()]")
           echo "Connected YubiKeys:"
           echo "$KEYS"
 
@@ -641,20 +619,8 @@ for _, info in list_all_devices():
           rm -rf .venv /tmp/adc_*.txt
           # Reset YubiKey PIV state if this was a YubiKey test
           if [ -n "$YUBIKEY_FLAGS" ]; then
-            python3 -c "
-from ykman.device import list_all_devices
-from yubikit.core.smartcard import SmartCardConnection
-from yubikit.piv import PivSession
-serial = int('${{ steps.yubikey.outputs.serial }}' or '0')
-if serial:
-    for dev, info in list_all_devices():
-        if info.serial == serial:
-            with dev.open_connection(SmartCardConnection) as conn:
-                piv = PivSession(conn)
-                piv.reset()
-                print(f'YubiKey {serial} PIV state reset')
-            break
-" || true
+            SERIAL="${{ steps.yubikey.outputs.serial }}"
+            python3 -c "import sys; from ykman.device import list_all_devices; from yubikit.core.smartcard import SmartCardConnection; from yubikit.piv import PivSession; serial=int(sys.argv[1]); [PivSession(dev.open_connection(SmartCardConnection)).reset() or print('YubiKey', serial, 'PIV reset') for dev, info in list_all_devices() if info.serial == serial]" "$SERIAL" || true
           fi
 
       # ── Summary ──
