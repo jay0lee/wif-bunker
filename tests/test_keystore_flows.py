@@ -204,9 +204,7 @@ class TestLinuxKeystoreFlow:
             _generate_cert_linux(config)
 
         # Verify addcert was called with the extracted key-id
-        addcert_call = [
-            c for c in mock_run.call_args_list if "addcert" in c.args[0]
-        ]
+        addcert_call = [c for c in mock_run.call_args_list if "addcert" in c.args[0]]
         assert len(addcert_call) > 0
         assert "--key-id=0xABCD" in addcert_call[0].args[0]
 
