@@ -39,8 +39,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - os: ubuntu-22.04
+            name: Linux x64 (22.04)
+            soft_key_flag: ""
+            artifact_name: wif-bunker-linux-x86_64
           - os: ubuntu-24.04
-            name: Linux x64
+            name: Linux x64 (24.04)
+            soft_key_flag: ""
+            artifact_name: wif-bunker-linux-x86_64
+          - os: ubuntu-26.04
+            name: Linux x64 (26.04)
             soft_key_flag: ""
             artifact_name: wif-bunker-linux-x86_64
           # Linux ARM64 disabled: ECP doesn't publish linux/arm64 binaries.
@@ -87,8 +95,8 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             swtpm swtpm-tools \
-            tpm2-tools tpm2-abrmd libtss2-tcti-tabrmd0 dbus \
-            libtpm2-pkcs11-1 libtpm2-pkcs11-tools \
+            tpm2-tools \
+            libtpm2-pkcs11-1 libtpm2-pkcs11-tools python3-tpm2-pkcs11-tools \
             gnutls-bin opensc
 
           SWTPM_DIR=$(mktemp -d)
@@ -100,18 +108,9 @@ jobs:
             --flags not-need-init,startup-clear &
           sleep 2
 
-          DBUS_SESSION_BUS_ADDRESS=$(dbus-daemon --session --fork --print-address --address="unix:tmpdir=/tmp")
-          echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
-
-          export DBUS_SESSION_BUS_ADDRESS
-          tpm2-abrmd \
-            --tcti="swtpm:host=127.0.0.1,port=2321" \
-            --session \
-            --allow-root &
-          sleep 1
-
-          echo "TPM2TOOLS_TCTI=tabrmd:bus_type=session" >> "$GITHUB_ENV"
-          echo "TPM2_PKCS11_TCTI=tabrmd:bus_type=session" >> "$GITHUB_ENV"
+          # Use direct swtpm TCTI — no abrmd daemon needed
+          echo "TPM2TOOLS_TCTI=swtpm:host=127.0.0.1,port=2321" >> "$GITHUB_ENV"
+          echo "TPM2_PKCS11_TCTI=swtpm:host=127.0.0.1,port=2321" >> "$GITHUB_ENV"
 
 
       # ── Setup: Python ──
