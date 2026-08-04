@@ -43,10 +43,15 @@ jobs:
             name: Linux x64 (24.04)
             soft_key_flag: ""
             artifact_name: wif-bunker-linux-x86_64
-          - os: ubuntu-26.04
-            name: Linux x64 (26.04)
-            soft_key_flag: ""
-            artifact_name: wif-bunker-linux-x86_64
+          # Ubuntu 26.04 disabled: ECP's libtls_offload.so (closed-source,
+          # statically linked BoringSSL, built on Ubuntu 20.04) segfaults on
+          # glibc 2.41.  Upstream v0.3.19 offload doesn't crash but fails to
+          # present the client cert.  Re-enable when Google ships a working
+          # libtls_offload.so for 26.04.
+          # - os: ubuntu-26.04
+          #   name: Linux x64 (26.04)
+          #   soft_key_flag: ""
+          #   artifact_name: wif-bunker-linux-x86_64
           # Linux ARM64 disabled: ECP doesn't publish linux/arm64 binaries.
           # Re-enable when googleapis/enterprise-certificate-proxy adds ARM64.
           # - os: ubuntu-24.04-arm
@@ -404,23 +409,8 @@ jobs:
       # ── Step 2: WIF Bunker fresh run (creates project, SA, pool, provider) ──
       - name: "WIF Bunker: Fresh setup"
         shell: bash
-        env:
-          PYTHONFAULTHANDLER: "1"
         run: |
           echo "=== Running WIF Bunker (fresh creation) ==="
-          # Diagnostics: help debug 26.04 segfault
-          python -c "
-          import ctypes, sys, ssl, sysconfig
-          print(f'Python:  {sys.version}')
-          print(f'ssl:     {ssl.OPENSSL_VERSION}')
-          print(f'Py_DEBUG:       {sysconfig.get_config_var(\"Py_DEBUG\")}')
-          print(f'Py_GIL_DISABLED:{sysconfig.get_config_var(\"Py_GIL_DISABLED\")}')
-          print(f'sizeof(object): {sys.getsizeof(object())}')
-          print(f'sizeof(c_void_p)*2: {ctypes.sizeof(ctypes.c_void_p)*2}')
-          ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-          ptr = ctypes.c_void_p.from_address(id(ctx) + ctypes.sizeof(ctypes.c_void_p)*2)
-          print(f'SSL_CTX* via ctypes offset: {ptr.value:#x}' if ptr.value else 'SSL_CTX*: NULL')
-          "
           # On Windows, launch dialog auto-accept in background (clicks
           # Security Warning dialogs for CA root store operations).
           if [[ "$RUNNER_OS" == "Windows" ]]; then
