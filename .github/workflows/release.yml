@@ -82,9 +82,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
-          pip install pyinstaller
-          pip install --only-deps ".[yubikey]"
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller
+          python -m pip install --only-deps ".[yubikey]"
 
       - name: Run PyInstaller
         run: pyinstaller wif-bunker.spec
