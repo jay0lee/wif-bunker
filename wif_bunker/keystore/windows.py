@@ -30,6 +30,31 @@ _PS_CERT_PREAMBLE = (
 logger = logging.getLogger(__name__)
 
 
+def get_supported_algorithms_windows(soft_key: bool = False) -> list[str]:
+    """Probe the CNG key storage provider for supported algorithms.
+
+    Creates (and immediately deletes) a transient key for each algorithm
+    to test whether the provider supports it.
+
+    Args:
+        soft_key: If True, probe the Software KSP instead of the TPM.
+
+    Returns:
+        List of supported wif-bunker algorithm names.
+    """
+    from wif_bunker.config import _KEY_ALGORITHMS  # pylint: disable=import-outside-toplevel
+
+    supported = []
+    for algo_name, algo_info in _KEY_ALGORITHMS.items():
+        if "win32" not in algo_info["platforms"]:
+            continue
+        ncrypt_algo = algo_info["ncrypt_algo"]
+        ncrypt_key_length = algo_info.get("ncrypt_key_length")
+        if ncrypt.test_algorithm(ncrypt_algo, ncrypt_key_length, soft_key=soft_key):
+            supported.append(algo_name)
+    return supported
+
+
 def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
     """Generates a TPM 2.0-backed certificate via NCrypt + PowerShell.
 

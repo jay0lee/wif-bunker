@@ -16,6 +16,15 @@ from wif_bunker.utils import require_commands
 logger = logging.getLogger(__name__)
 
 
+def get_supported_algorithms_macos() -> list[str]:
+    """Return algorithms supported by the macOS Secure Enclave.
+
+    Apple Secure Enclave always supports P-256 and P-384.
+    RSA is not supported by the Secure Enclave.
+    """
+    return ["es256", "es384"]
+
+
 def _macos_login_keychain() -> str:
     """Returns the path to the macOS login keychain."""
     return str(Path.home() / "Library/Keychains/login.keychain-db")

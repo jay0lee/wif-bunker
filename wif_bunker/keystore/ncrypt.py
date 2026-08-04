@@ -95,6 +95,76 @@ def _load_ctypes():
 # Public API
 # ---------------------------------------------------------------------------
 
+def test_algorithm(
+    algorithm: str,
+    key_length: int | None = None,
+    soft_key: bool = False,
+) -> bool:
+    """Test whether the KSP supports the given algorithm without creating a persistent key.
+
+    Calls ``NCryptCreatePersistedKey`` with a throwaway name, then immediately
+    frees the handle WITHOUT calling ``NCryptFinalizeKey``.  No key is persisted.
+
+    Returns True if the algorithm is supported, False otherwise.
+    """
+    ctypes, wintypes, ncrypt_dll = _load_ctypes()
+
+    provider_name = MS_SOFTWARE_KSP if soft_key else MS_PLATFORM_CRYPTO_PROVIDER
+    provider_handle = wintypes.HANDLE()
+    key_handle = wintypes.HANDLE()
+
+    try:
+        status = ncrypt_dll.NCryptOpenStorageProvider(
+            ctypes.byref(provider_handle),
+            provider_name,
+            0,
+        )
+        if status != 0:
+            return False
+
+        # Use a probe-only name that won't collide with real keys
+        status = ncrypt_dll.NCryptCreatePersistedKey(
+            provider_handle,
+            ctypes.byref(key_handle),
+            algorithm,
+            "bunker-algo-probe-tmp",
+            0,  # dwLegacyKeySpec
+            _NCRYPT_OVERWRITE_KEY_FLAG,
+        )
+        if status != 0:
+            return False
+
+        # Set key length for RSA (ECC length is implicit in algorithm)
+        if key_length is not None:
+            length_dword = wintypes.DWORD(key_length)
+            status = ncrypt_dll.NCryptSetProperty(
+                key_handle,
+                "Length",
+                ctypes.byref(length_dword),
+                ctypes.sizeof(length_dword),
+                0,
+            )
+            if status != 0:
+                return False
+
+        # Try to finalize — this is where TPM hardware rejects unsupported params
+        status = ncrypt_dll.NCryptFinalizeKey(key_handle, 0)
+        if status != 0:
+            return False
+
+        # Clean up: delete the probe key we just created
+        ncrypt_dll.NCryptDeleteKey(key_handle, 0)
+        key_handle = wintypes.HANDLE()  # prevent double-free
+        return True
+
+    except Exception:
+        return False
+    finally:
+        if key_handle.value:
+            ncrypt_dll.NCryptFreeObject(key_handle)
+        if provider_handle.value:
+            ncrypt_dll.NCryptFreeObject(provider_handle)
+
 
 def create_tpm_key(
     key_name: str,

@@ -1,4 +1,4 @@
-"""Alternate CLI modes: --cert-only, --status, and --attest."""  # pylint: disable=duplicate-code
+"""Alternate CLI modes: --cert-only, --status, --attest, and --supported-algorithms."""  # pylint: disable=duplicate-code
 
 from __future__ import annotations
 
@@ -203,3 +203,54 @@ def _run_status() -> None:
     except Exception as exc:
         logger.error("ADC:       %s %s", SYM_CROSS, exc)
         logger.error("Re-run with --debug for detailed ECP and TLS diagnostics.")
+
+
+def _run_supported_algorithms(
+    use_yubikey: bool = False,
+    yubikey_serial: int | None = None,
+    soft_key: bool = False,
+    verbose: bool = False,
+) -> None:
+    """Probe the active keystore for supported algorithms and print them."""
+    from wif_bunker.config import _KEY_ALGORITHMS  # pylint: disable=import-outside-toplevel
+
+    # Determine keystore and probe
+    if use_yubikey:
+        keystore_name = "YubiKey"
+        from wif_bunker.keystore.yubikey import (
+            get_supported_algorithms_yubikey,  # pylint: disable=import-outside-toplevel
+        )
+        supported = get_supported_algorithms_yubikey(serial=yubikey_serial)
+        all_algos = [k for k, v in _KEY_ALGORITHMS.items() if "yubikey" in v["platforms"]]
+    elif sys.platform == "darwin":
+        keystore_name = "macOS Secure Enclave"
+        from wif_bunker.keystore.macos import get_supported_algorithms_macos  # pylint: disable=import-outside-toplevel
+        supported = get_supported_algorithms_macos()
+        all_algos = [k for k, v in _KEY_ALGORITHMS.items() if "darwin" in v["platforms"]]
+    elif sys.platform == "win32":
+        keystore_name = "Windows CNG (Software KSP)" if soft_key else "Windows CNG (Platform TPM)"
+        from wif_bunker.keystore.windows import (
+            get_supported_algorithms_windows,  # pylint: disable=import-outside-toplevel
+        )
+        supported = get_supported_algorithms_windows(soft_key=soft_key)
+        all_algos = [k for k, v in _KEY_ALGORITHMS.items() if "win32" in v["platforms"]]
+    elif sys.platform.startswith("linux"):
+        keystore_name = "Linux TPM"
+        from wif_bunker.keystore.linux import get_supported_algorithms_linux  # pylint: disable=import-outside-toplevel
+        supported = get_supported_algorithms_linux()
+        all_algos = [k for k, v in _KEY_ALGORITHMS.items() if "linux" in v["platforms"]]
+    else:
+        raise RuntimeError(f"Unsupported platform: {sys.platform}")
+
+    if verbose:
+        print(f"Keystore: {keystore_name}")
+        for algo in all_algos:
+            desc = _KEY_ALGORITHMS[algo]["desc"]
+            if algo in supported:
+                print(f"  {SYM_CHECK} {algo:<8}  {desc}")
+            else:
+                print(f"  {SYM_CROSS} {algo:<8}  {desc}")
+    else:
+        for algo in supported:
+            print(algo)
+

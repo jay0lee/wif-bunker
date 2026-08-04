@@ -19,6 +19,61 @@ from wif_bunker.config import CertificateBundle, WorkloadConfig
 logger = logging.getLogger(__name__)
 
 
+def get_supported_algorithms_yubikey(serial: int | None = None) -> list[str]:
+    """Probe a connected YubiKey for supported algorithms.
+
+    Detects the YubiKey's firmware version and returns the list of
+    wif-bunker algorithm names it supports.
+
+    Args:
+        serial: YubiKey serial number.  Required if multiple YubiKeys
+            are connected.
+
+    Returns:
+        List of supported algorithm names.
+
+    Raises:
+        RuntimeError: if no YubiKey is found or multiple without serial.
+    """
+    from ykman.device import list_all_devices  # pylint: disable=import-outside-toplevel
+
+    devices = list(list_all_devices())
+    if not devices:
+        raise RuntimeError(
+            "No YubiKeys found. On Linux, ensure 'pcscd' service is running."
+        )
+
+    target_info = None
+    if len(devices) > 1 and serial is None:
+        serials = [str(info.serial) for _, info in devices]
+        raise RuntimeError(
+            f"Multiple YubiKeys found: {', '.join(serials)}. "
+            "Specify one with --yubikey-serial."
+        )
+
+    if serial is not None:
+        for _, info in devices:
+            if info.serial == serial:
+                target_info = info
+                break
+        if not target_info:
+            raise RuntimeError(f"YubiKey with serial {serial} not found.")
+    else:
+        _, target_info = devices[0]
+
+    if target_info.version < (4, 3, 0):
+        raise RuntimeError(
+            f"YubiKey firmware {target_info.version} too old. "
+            "Requires >= 4.3.0 for attestation."
+        )
+
+    supported = ["es256", "es384", "rsa2048"]
+    if target_info.version >= (5, 7, 0):
+        supported.append("rsa4096")
+
+    return supported
+
+
 def _yubikey_config_path(serial: int) -> Path:
     """Returns the path to the YubiKey credential configuration file."""
     if sys.platform == "win32":

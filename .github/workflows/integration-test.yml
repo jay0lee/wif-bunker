@@ -43,6 +43,7 @@ jobs:
             name: Linux x64 (24.04)
             soft_key_flag: ""
             artifact_name: wif-bunker-linux-x86_64
+            expected_algos: "es256 es384 rsa2048 rsa3072"
           # Ubuntu 26.04 disabled: ECP's libtls_offload.so (closed-source,
           # statically linked BoringSSL, built on Ubuntu 20.04) segfaults on
           # glibc 2.41.  Upstream v0.3.19 offload doesn't crash but fails to
@@ -61,10 +62,12 @@ jobs:
             name: macOS ARM64 (Apple Silicon)
             soft_key_flag: ""
             artifact_name: wif-bunker-macos-arm64
+            expected_algos: "es256 es384"
           - os: windows-2025
             name: Windows x64
             soft_key_flag: "--soft-key"
             artifact_name: wif-bunker-windows-x86_64
+            expected_algos: "es256 es384 rsa2048 rsa3072 rsa4096"
           # Windows ARM64 disabled: ECP (enterprise-certificate-proxy) doesn't
           # publish ARM64 binaries, and ARM64 Python can't load x86_64 DLLs.
           # Re-enable when googleapis/enterprise-certificate-proxy adds ARM64.
@@ -76,6 +79,7 @@ jobs:
             soft_key_flag: ""
             artifact_name: wif-bunker-linux-x86_64
             self_hosted: true
+            expected_algos: "es256 rsa2048 rsa3072 rsa4096"
 
     # Self-hosted entries set runs_on to a JSON label array; GH-hosted use os
     runs-on: ${{ matrix.runs_on && fromJSON(matrix.runs_on) || matrix.os }}
@@ -300,25 +304,24 @@ jobs:
         shell: bash
         run: |
           echo "=== Testing --cert-only for all supported algorithms ==="
-          # Algorithms supported per platform:
-          #   Windows:          es256 es384 rsa2048 rsa3072 rsa4096
-          #   Linux (swtpm):    es256 es384 rsa2048 rsa3072 (rsa4096 excluded — swtpm limitation)
-          #   Linux (Intel PTT): es256 rsa2048 rsa3072 rsa4096 (es384 excluded — P-384 curve not supported)
-          #   macOS:            es256 es384
-          ALGOS="es256 es384"
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            ALGOS="$ALGOS rsa2048 rsa3072 rsa4096"
-          elif [[ "$RUNNER_OS" == "Linux" ]]; then
-            if [ "${{ matrix.self_hosted }}" = "true" ]; then
-              # Intel PTT firmware TPM: P-384 curve not supported, skip es384
-              ALGOS="es256 rsa2048 rsa3072 rsa4096"
-            else
-              # rsa4096 excluded: tpm2-pkcs11-tools crashes with swtpm for 4096-bit keys.
-              ALGOS="$ALGOS rsa2048 rsa3072"
-            fi
-          fi
 
           WIF_CMD="${{ inputs.wif_bunker_cmd || 'python -m wif_bunker' }}"
+
+          # Dynamically discover supported algorithms from the active keystore
+          ALGOS=$($WIF_CMD --supported-algorithms ${{ matrix.soft_key_flag }})
+          echo "Supported algorithms: $ALGOS"
+
+          # Regression check: verify expected algorithms are still supported
+          EXPECTED="${{ matrix.expected_algos }}"
+          if [ -n "$EXPECTED" ]; then
+            for expected_algo in $EXPECTED; do
+              if ! echo "$ALGOS" | grep -q "^${expected_algo}$"; then
+                echo "REGRESSION: $expected_algo should be supported on this platform but was not detected"
+                exit 1
+              fi
+            done
+            echo "All expected algorithms confirmed: $EXPECTED"
+          fi
 
           for algo in $ALGOS; do
             echo "--- Testing --cert-only --key-algorithm $algo ---"

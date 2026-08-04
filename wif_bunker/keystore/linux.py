@@ -138,13 +138,7 @@ def _check_tpm_algorithm(algo: str) -> None:
     not supported by the hardware.
     """
     # Map tpm2_ptool algorithm names to tpm2_testparms parameter strings
-    testparms_map = {
-        "ecc256": "ecc256:ecdsa",
-        "ecc384": "ecc384:ecdsa",
-        "rsa2048": "rsa2048",
-        "rsa3072": "rsa3072",
-        "rsa4096": "rsa4096",
-    }
+    testparms_map = _TPM2_TESTPARMS_MAP
     testparms_arg = testparms_map.get(algo)
     if not testparms_arg:
         return  # Unknown algo — let tpm2_ptool handle it
@@ -179,6 +173,53 @@ def _check_tpm_algorithm(algo: str) -> None:
             f"  Many firmware TPMs (Intel PTT, AMD fTPM) only support P-256.\n"
             f"  Try a different algorithm: --key-algorithm es256"
         )
+
+
+# Shared mapping between _check_tpm_algorithm and get_supported_algorithms_linux
+_TPM2_TESTPARMS_MAP = {
+    "ecc256": "ecc256:ecdsa",
+    "ecc384": "ecc384:ecdsa",
+    "rsa2048": "rsa2048",
+    "rsa3072": "rsa3072",
+    "rsa4096": "rsa4096",
+}
+
+
+def get_supported_algorithms_linux() -> list[str]:
+    """Probe the TPM for all supported algorithms.
+
+    Returns a list of wif-bunker algorithm names (e.g. ``["es256", "rsa2048"]``)
+    that the TPM hardware supports.
+
+    Requires ``tpm2_testparms`` to be installed.
+    """
+    from wif_bunker.config import _KEY_ALGORITHMS  # pylint: disable=import-outside-toplevel
+
+    _check_tpm_linux()
+
+    tpm2_testparms = shutil.which("tpm2_testparms")
+    if not tpm2_testparms:
+        raise RuntimeError(
+            "tpm2_testparms not found.\n"
+            "  Install tpm2-tools: sudo apt install tpm2-tools"
+        )
+
+    supported = []
+    for algo_name, algo_info in _KEY_ALGORITHMS.items():
+        if "linux" not in algo_info["platforms"]:
+            continue
+        tpm2_algo = algo_info["linux_tpm2"]
+        testparms_arg = _TPM2_TESTPARMS_MAP.get(tpm2_algo)
+        if not testparms_arg:
+            continue
+        result = subprocess.run(
+            ["tpm2_testparms", testparms_arg],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            supported.append(algo_name)
+    return supported
 
 
 def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:

@@ -32,7 +32,7 @@ from wif_bunker.config import (
 )
 from wif_bunker.gcp_client import GCPClient
 from wif_bunker.keystore import generate_os_keystore_cert
-from wif_bunker.modes import _run_attest, _run_cert_only, _run_status
+from wif_bunker.modes import _run_attest, _run_cert_only, _run_status, _run_supported_algorithms
 from wif_bunker.utils import (
     SYM_FAIL,
     SYM_OK,
@@ -152,6 +152,15 @@ def _main_impl() -> None:
         "--attest",
         action="store_true",
         help="Generate hardware attestation artifacts proving keys reside in hardware.",
+    )
+    mode_group.add_argument(
+        "--supported-algorithms",
+        action="store_true",
+        help=(
+            "Query the active keystore (TPM, Secure Enclave, YubiKey, or soft key) "
+            "for supported key algorithms and print one per line. "
+            "Use with --debug for a verbose table."
+        ),
     )
     parser.add_argument(
         "--output-dir",
@@ -371,9 +380,18 @@ def _main_impl() -> None:
     if args.cert_file and not args.attest:
         parser.error("--cert-file can only be used with --attest")
 
-    # --- Mode dispatch: --status, --attest, or --cert-only exit early ---
+    # --- Mode dispatch: --status, --attest, --supported-algorithms, or --cert-only exit early ---
     if args.status:
         _run_status()
+        return
+
+    if args.supported_algorithms:
+        _run_supported_algorithms(
+            use_yubikey=config.use_yubikey,
+            yubikey_serial=config.yubikey_serial,
+            soft_key=config.soft_key,
+            verbose=args.debug,
+        )
         return
 
     if args.attest:
