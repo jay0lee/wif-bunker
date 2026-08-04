@@ -318,7 +318,7 @@ jobs:
       - name: Set project ID
         id: config
         run: |
-          PROJECT_ID="wif-ci-${{ github.run_id }}-${{ strategy.job-index }}"
+          PROJECT_ID="wif-ci-${{ github.run_id }}-g${{ strategy.job-index }}"
           PROJECT_ID="${PROJECT_ID:0:30}"
           echo "project_id=$PROJECT_ID" >> "$GITHUB_OUTPUT"
 
