@@ -15,8 +15,6 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from cryptography import x509
-from cryptography.hazmat.primitives import serialization
 
 from wif_bunker.attestation.base import (
     AttestationArtifact,
@@ -57,38 +55,23 @@ def _extract_ek_certificate(work_dir: Path) -> tuple[AttestationCheck, str | Non
             work_dir,
         )
         if result.returncode == 0:
-            # Convert DER to PEM — use openssl as fallback if the
-            # cryptography lib rejects non-standard ASN.1 encoding.
+            # Convert DER to PEM — use pyOpenSSL as primary since the
+            # cryptography lib's Rust parser rejects non-standard ASN.1
+            # encoding common in TPM manufacturer EK certs (e.g. Intel's
+            # explicit critical=FALSE in extensions).
+            from OpenSSL.crypto import FILETYPE_ASN1, FILETYPE_PEM, dump_certificate, load_certificate  # pylint: disable=import-outside-toplevel
+
             der_data = (work_dir / "ek_cert.der").read_bytes()
-            ek_pem = None
-            issuer = ""
             try:
-                cert = x509.load_der_x509_certificate(der_data)
-                pem_data = cert.public_bytes(serialization.Encoding.PEM)
+                ossl_cert = load_certificate(FILETYPE_ASN1, der_data)
+                pem_data = dump_certificate(FILETYPE_PEM, ossl_cert)
                 ek_pem = pem_data.decode("utf-8")
-                ek_details = parse_ek_details(ek_pem)
-                issuer = ek_details.get("issuer", cert.issuer.rfc4514_string())
-            except Exception:
-                # Fallback: openssl is more lenient about DER encoding
-                conv = subprocess.run(
-                    ["openssl", "x509", "-inform", "DER", "-outform", "PEM"],
-                    input=der_data,
-                    capture_output=True,
+                issuer = ", ".join(
+                    f"{k.decode()}={v.decode()}"
+                    for k, v in ossl_cert.get_issuer().get_components()
                 )
-                if conv.returncode == 0:
-                    ek_pem = conv.stdout.decode("utf-8")
-                    issuer_result = subprocess.run(
-                        ["openssl", "x509", "-noout", "-issuer"],
-                        input=ek_pem.encode(),
-                        capture_output=True,
-                        text=True,
-                    )
-                    if issuer_result.returncode == 0:
-                        issuer = issuer_result.stdout.strip().removeprefix("issuer=").strip()
 
-            if ek_pem:
                 ek_pem_path.write_text(ek_pem, encoding="utf-8")
-
                 detail = f"{algo_name} EK certificate from NVRAM index {nv_index}. Issuer: {issuer}"
 
                 return (
@@ -99,6 +82,8 @@ def _extract_ek_certificate(work_dir: Path) -> tuple[AttestationCheck, str | Non
                     ),
                     ek_pem,
                 )
+            except Exception:
+                pass
 
     # No EK cert in NVRAM — try tpm2_getekcertificate to fetch from manufacturer.
     # Requires the EK public key in native TPM2B_PUBLIC format.
@@ -115,45 +100,25 @@ def _extract_ek_certificate(work_dir: Path) -> tuple[AttestationCheck, str | Non
             work_dir,
         )
         if result.returncode == 0:
+            from OpenSSL.crypto import FILETYPE_ASN1, FILETYPE_PEM, dump_certificate, load_certificate  # pylint: disable=import-outside-toplevel
+
             raw = (work_dir / "ek_cert_fetched.pem").read_bytes().lstrip()
 
-            # Normalize to PEM string
-            if raw.startswith(b"-----BEGIN"):
-                ek_pem = raw.decode("utf-8")
-            else:
-                # DER → PEM via openssl (more lenient than cryptography lib)
-                conv = subprocess.run(
-                    ["openssl", "x509", "-inform", "DER", "-outform", "PEM"],
-                    input=raw,
-                    capture_output=True,
-                )
-                if conv.returncode == 0:
-                    ek_pem = conv.stdout.decode("utf-8")
+            try:
+                # tpm2_getekcertificate may return PEM or DER
+                if raw.startswith(b"-----BEGIN"):
+                    ossl_cert = load_certificate(FILETYPE_PEM, raw)
                 else:
-                    ek_pem = None
+                    ossl_cert = load_certificate(FILETYPE_ASN1, raw)
 
-            if ek_pem:
+                pem_data = dump_certificate(FILETYPE_PEM, ossl_cert)
+                ek_pem = pem_data.decode("utf-8")
+                issuer = ", ".join(
+                    f"{k.decode()}={v.decode()}"
+                    for k, v in ossl_cert.get_issuer().get_components()
+                )
+
                 ek_pem_path.write_text(ek_pem, encoding="utf-8")
-
-                # Try parsing details with cryptography lib first, fall back
-                # to openssl if the cert has non-standard ASN.1 encoding
-                # (e.g. Intel EK certs with explicit critical=FALSE).
-                issuer = ""
-                try:
-                    cert = x509.load_pem_x509_certificate(ek_pem.encode())
-                    ek_details = parse_ek_details(ek_pem)
-                    issuer = ek_details.get("issuer", cert.issuer.rfc4514_string())
-                except Exception:
-                    # Fall back to openssl for the issuer string
-                    issuer_result = subprocess.run(
-                        ["openssl", "x509", "-noout", "-issuer"],
-                        input=ek_pem.encode(),
-                        capture_output=True,
-                        text=True,
-                    )
-                    if issuer_result.returncode == 0:
-                        issuer = issuer_result.stdout.strip().removeprefix("issuer=").strip()
-
                 detail = f"EK certificate retrieved from manufacturer provisioning service. Issuer: {issuer}"
 
                 return (
@@ -164,6 +129,8 @@ def _extract_ek_certificate(work_dir: Path) -> tuple[AttestationCheck, str | Non
                     ),
                     ek_pem,
                 )
+            except Exception as exc:
+                logger.debug("Failed to parse EK cert from getekcertificate: %s", exc)
         else:
             logger.debug(
                 "tpm2_getekcertificate failed (rc=%d): %s",
