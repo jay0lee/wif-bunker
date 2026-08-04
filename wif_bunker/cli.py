@@ -70,6 +70,63 @@ def _preflight_check_write_access(directory: Path) -> None:
         raise SystemExit(1) from None
 
 
+# --- YubiKey ykcs11 library search paths ---
+_YKCS11_SEARCH_PATHS: dict[str, list[str]] = {
+    "linux": [
+        "/usr/lib/x86_64-linux-gnu/libykcs11.so",
+        "/usr/lib/aarch64-linux-gnu/libykcs11.so",
+        "/usr/local/lib/libykcs11.so",
+        "/usr/lib/libykcs11.so",
+    ],
+    "darwin": [
+        "/opt/homebrew/lib/libykcs11.dylib",
+        "/usr/local/lib/libykcs11.dylib",
+    ],
+    "win32": [
+        r"C:\Program Files\Yubico\Yubico PIV Tool\bin\libykcs11.dll",
+        r"C:\Program Files (x86)\Yubico\Yubico PIV Tool\bin\libykcs11.dll",
+    ],
+}
+
+
+def _find_ykcs11_library() -> str:
+    """Locate the ykcs11 PKCS#11 shared library for ECP mTLS."""
+    # Allow explicit override via environment variable
+    env_path = os.environ.get("YKCS11_MODULE")
+    if env_path:
+        if Path(env_path).exists():
+            logger.info("    Using ykcs11 library from YKCS11_MODULE: %s", env_path)
+            return env_path
+        raise FileNotFoundError(f"YKCS11_MODULE set to '{env_path}' but file does not exist.")
+
+    for platform_prefix, candidates in _YKCS11_SEARCH_PATHS.items():
+        if sys.platform.startswith(platform_prefix):
+            for candidate in candidates:
+                if Path(candidate).exists():
+                    logger.info("    Found ykcs11 library: %s", candidate)
+                    return candidate
+    install_hint = {
+        "linux": "sudo apt install yubico-piv-tool",
+        "darwin": "brew install yubico-piv-tool",
+        "win32": "Download from https://developers.yubico.com/yubico-piv-tool/",
+    }
+    hint = next((v for k, v in install_hint.items() if sys.platform.startswith(k)), "Install yubico-piv-tool")
+    raise FileNotFoundError(
+        f"Could not find libykcs11 (YubiKey PKCS#11 module).\n"
+        f"Install it: {hint}\n"
+        f"Or specify the path with the YKCS11_MODULE environment variable."
+    )
+
+
+def _yubikey_config_dir() -> Path:
+    """Return the platform-specific directory for YubiKey config files."""
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return base / "wif-bunker"
+
+
 def _main_impl() -> None:
     """Parse arguments and run the WIF Bunker setup or status workflow."""
     parser = argparse.ArgumentParser(
@@ -209,6 +266,42 @@ def _main_impl() -> None:
         ),
     )
 
+    # --- YubiKey options ---
+    yubikey_group = parser.add_argument_group("YubiKey options")
+    yubikey_group.add_argument(
+        "--use-yubikey",
+        action="store_true",
+        help=(
+            "Use a YubiKey PIV device instead of the platform TPM or Secure Enclave. "
+            "Works on Linux, macOS, and Windows. Requires pcscd on Linux."
+        ),
+    )
+    yubikey_group.add_argument(
+        "--yubikey-serial",
+        type=int,
+        metavar="SERIAL",
+        help="YubiKey serial number (required if multiple YubiKeys are connected).",
+    )
+    yubikey_group.add_argument(
+        "--yubikey-slot",
+        default="9a",
+        choices=["9a", "9c", "9d", "9e"],
+        help=(
+            "PIV slot for the workload key. 9a=Authentication (default), 9c=Signature, 9d=Key Management, 9e=Card Auth."
+        ),
+    )
+    yubikey_group.add_argument(
+        "--yubikey-touch-policy",
+        default="never",
+        choices=["never", "cached", "always"],
+        help=(
+            "Touch policy for the YubiKey key (default: never). "
+            "'never' is required for headless/CI servers. "
+            "'cached' requires touch once every 15 seconds. "
+            "'always' requires touch for every operation."
+        ),
+    )
+
     args = parser.parse_args()
 
     if args.use_adc and args.client_secrets_file:
@@ -235,21 +328,38 @@ def _main_impl() -> None:
         if sys.platform != "win32":
             parser.error("--soft-key is only supported on Windows.")
         config.soft_key = True
+    if args.use_yubikey:
+        if args.soft_key:
+            parser.error("--use-yubikey and --soft-key are mutually exclusive.")
+        config.use_yubikey = True
+        if args.yubikey_serial:
+            config.yubikey_serial = args.yubikey_serial
+        config.yubikey_slot = args.yubikey_slot
+        config.yubikey_touch_policy = args.yubikey_touch_policy
+    if args.yubikey_serial and not args.use_yubikey:
+        parser.error("--yubikey-serial requires --use-yubikey.")
     if args.cert_lifetime < 1 or args.cert_lifetime > _WIF_MAX_CERT_LIFETIME_DAYS:
         parser.error(f"--cert-lifetime must be between 1 and {_WIF_MAX_CERT_LIFETIME_DAYS} days.")
     config.cert_lifetime_days = args.cert_lifetime
 
     if args.key_algorithm:
         algo_info = _KEY_ALGORITHMS[args.key_algorithm]
-        # Validate algorithm is supported on this platform.
-        platform_ok = any(sys.platform.startswith(p) for p in algo_info["platforms"])
+        # Validate algorithm is supported on this platform (or YubiKey).
+        if config.use_yubikey:
+            platform_ok = "yubikey" in algo_info["platforms"]
+        else:
+            platform_ok = any(sys.platform.startswith(p) for p in algo_info["platforms"])
         if not platform_ok:
-            supported = [
-                k for k, v in _KEY_ALGORITHMS.items() if any(sys.platform.startswith(p) for p in v["platforms"])
-            ]
+            if config.use_yubikey:
+                supported = [k for k, v in _KEY_ALGORITHMS.items() if "yubikey" in v["platforms"]]
+            else:
+                supported = [
+                    k for k, v in _KEY_ALGORITHMS.items() if any(sys.platform.startswith(p) for p in v["platforms"])
+                ]
             parser.error(
                 f"Algorithm '{args.key_algorithm}' is not supported on "
-                f"{sys.platform}. Supported: {', '.join(supported)}"
+                f"{'YubiKey' if config.use_yubikey else sys.platform}. "
+                f"Supported: {', '.join(supported)}"
             )
         config.key_algorithm = args.key_algorithm
 
@@ -525,8 +635,28 @@ def _main_impl() -> None:
         # to find the C-shared libraries that perform hardware-backed signing.
         # The "cert_configs" section tells ECP which keystore + issuer to use
         # when locating the client certificate for the mTLS handshake.
-        if sys.platform == "win32":
+        if config.use_yubikey:
+            # YubiKey uses libykcs11 for PKCS#11 on all platforms.
+            ykcs11_module = _find_ykcs11_library()
+            # Load PIN from stored YubiKey config.
+            yk_config_path = _yubikey_config_dir() / f"yubikey_{config.yubikey_serial or 'default'}.json"
+            yk_pin = ""
+            if yk_config_path.exists():
+                try:
+                    yk_cfg = json.loads(yk_config_path.read_text())
+                    yk_pin = yk_cfg.get("pin", "")
+                except Exception:
+                    pass
             cert_configs: dict = {
+                "pkcs11": {
+                    "module": ykcs11_module,
+                    "slot": "0",
+                    "label": config.workload_cn,
+                    "user_pin": yk_pin,
+                },
+            }
+        elif sys.platform == "win32":
+            cert_configs = {
                 "windows_store": {
                     "store": "MY",
                     "provider": "current_user",

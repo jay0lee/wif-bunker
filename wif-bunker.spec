@@ -21,6 +21,10 @@ hiddenimports = [
     'cryptography.hazmat.backends.openssl',
     'cryptography.hazmat.backends.openssl.backend',
     'cryptography.hazmat.bindings.openssl.binding',
+    # YubiKey PIV support (lazy imports — PyInstaller traces
+    # ykman/yubikit/smartcard transitively from these entry points)
+    'wif_bunker.keystore.yubikey',
+    'wif_bunker.attestation.yubikey',
 ]
 
 # ── Package metadata ──
@@ -39,6 +43,7 @@ for pkg in ('google-auth', 'requests', 'cryptography', 'certifi', 'urllib3', 'ch
 datas += [
     ('wif_bunker/attestation/roots/roots/*.pem', 'wif_bunker/attestation/roots/roots'),
     ('wif_bunker/attestation/roots/intermediates/*.pem', 'wif_bunker/attestation/roots/intermediates'),
+    ('wif_bunker/attestation/roots/yubico/*.pem', 'wif_bunker/attestation/roots/yubico'),
 ]
 
 # ── Excludes ──

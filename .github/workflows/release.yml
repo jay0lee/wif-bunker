@@ -77,7 +77,7 @@ jobs:
           cat version_info.txt
 
       - name: Install dependencies
-        run: pip install pyinstaller .
+        run: pip install pyinstaller ".[yubikey]"
 
       - name: Run PyInstaller
         run: pyinstaller wif-bunker.spec

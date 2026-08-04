@@ -191,6 +191,7 @@ class TestAttestationDispatcher:
         mock_report = AttestationReport(platform="macos-se", supported=False, hardware_type="Secure Enclave")
         mock_attest.return_value = mock_report
         config = MagicMock()
+        config.use_yubikey = False
 
         result = generate_attestation(config)
         assert result.platform == "macos-se"

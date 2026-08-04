@@ -16,9 +16,15 @@ dev = [
     "pytest",
     "pytest-cov",
 ]
+yubikey = [
+    "yubikey-manager>=5.0",
+]
 
 [tool.setuptools]
-packages = ["wif_bunker", "wif_bunker.keystore"]
+packages = ["wif_bunker", "wif_bunker.keystore", "wif_bunker.attestation"]
+
+[tool.setuptools.package-data]
+"wif_bunker.attestation" = ["roots/**/*.pem"]
 
 [project.scripts]
 wif-bunker = "wif_bunker:main"

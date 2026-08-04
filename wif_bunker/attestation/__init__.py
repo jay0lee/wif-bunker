@@ -25,6 +25,11 @@ _SYM_WARN = SYM_WARN
 
 def generate_attestation(config: WorkloadConfig) -> AttestationReport:
     """Dispatch to the platform-specific attestation implementation."""
+    if config.use_yubikey:
+        from wif_bunker.attestation.yubikey import attest_yubikey  # pylint: disable=import-outside-toplevel
+
+        return attest_yubikey(config)
+
     platform = sys.platform
     generators = {
         "linux": "_attest_linux",

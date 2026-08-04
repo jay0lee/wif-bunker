@@ -20,7 +20,7 @@ _DEFAULT_CERT_LIFETIME_DAYS = 90
 _KEY_ALGORITHMS: dict[str, dict] = {
     "es256": {
         "desc": "ECDSA P-256 (default, fastest)",
-        "platforms": {"darwin", "win32", "linux"},
+        "platforms": {"darwin", "win32", "linux", "yubikey"},
         "macos_sc_auth": "p-256-ne",  # sc_auth -k flag
         "windows_certreq": "ECDSA_P256",  # certreq INF KeyAlgorithm (legacy)
         "ncrypt_algo": "ECDSA_P256",  # NCryptCreatePersistedKey algorithm
@@ -30,7 +30,7 @@ _KEY_ALGORITHMS: dict[str, dict] = {
     },
     "es384": {
         "desc": "ECDSA P-384",
-        "platforms": {"darwin", "win32", "linux"},
+        "platforms": {"darwin", "win32", "linux", "yubikey"},
         "macos_sc_auth": "p-384-ne",
         "windows_certreq": "ECDSA_P384",
         "ncrypt_algo": "ECDSA_P384",
@@ -40,7 +40,7 @@ _KEY_ALGORITHMS: dict[str, dict] = {
     },
     "rsa2048": {
         "desc": "RSA 2048-bit",
-        "platforms": {"win32", "linux"},
+        "platforms": {"win32", "linux", "yubikey"},
         "windows_certreq": "RSA",
         "windows_key_length": 2048,
         "ncrypt_algo": "RSA",
@@ -59,8 +59,8 @@ _KEY_ALGORITHMS: dict[str, dict] = {
         "linux_tpm2": "rsa3072",
     },
     "rsa4096": {
-        "desc": "RSA 4096-bit (slowest)",
-        "platforms": {"win32", "linux"},
+        "desc": "RSA 4096-bit (slowest, YubiKey firmware 5.7+)",
+        "platforms": {"win32", "linux", "yubikey"},
         "windows_certreq": "RSA",
         "windows_key_length": 4096,
         "ncrypt_algo": "RSA",
@@ -87,6 +87,10 @@ class WorkloadConfig:
     key_algorithm: str = "es256"
     cert_lifetime_days: int = _DEFAULT_CERT_LIFETIME_DAYS
     soft_key: bool = False  # Use software keys (CI testing, no TPM required)
+    use_yubikey: bool = False  # Use YubiKey PIV instead of platform TPM/SE
+    yubikey_serial: int | None = None  # Specific YubiKey serial (if multiple)
+    yubikey_slot: str = "9a"  # PIV slot: 9a, 9c, 9d, 9e
+    yubikey_touch_policy: str = "never"  # never, cached, always
     suffix: str = field(default_factory=lambda: str(int(time.time())))
     project_id: str = field(init=False)
     workload_cn: str = field(init=False)

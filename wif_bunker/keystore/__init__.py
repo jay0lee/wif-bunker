@@ -24,12 +24,18 @@ def generate_os_keystore_cert(config: WorkloadConfig) -> CertificateBundle:
     """Dispatches to the platform-specific hardware keystore generator.
 
     Each generator:
-      1. Creates a hardware-backed key (SE/TPM)
+      1. Creates a hardware-backed key (SE/TPM/YubiKey)
       2. Generates an ephemeral CA (software, in-memory)
       3. Signs a workload cert with the CA (same public key as the HW key)
       4. Installs the CA-signed cert back into the OS keystore
       5. Returns the CA cert PEM (trust anchor) + CA CN (for ECP config)
     """
+    if config.use_yubikey:
+        from wif_bunker.keystore.yubikey import generate_cert_yubikey
+
+        logger.info("Instructing YubiKey to generate non-exportable hardware-backed certificate...")
+        return generate_cert_yubikey(config)
+
     logger.info("Instructing OS to generate non-exportable hardware-backed certificate...")
     for platform_prefix, generator in _KEYSTORE_GENERATORS.items():
         if sys.platform.startswith(platform_prefix):
