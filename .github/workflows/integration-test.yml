@@ -39,10 +39,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-22.04
-            name: Linux x64 (22.04)
-            soft_key_flag: ""
-            artifact_name: wif-bunker-linux-x86_64
           - os: ubuntu-24.04
             name: Linux x64 (24.04)
             soft_key_flag: ""

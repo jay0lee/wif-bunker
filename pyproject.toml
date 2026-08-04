@@ -5,8 +5,9 @@ description = "Hardware-backed Workload Identity Federation for Google Cloud"
 requires-python = ">=3.10"
 dependencies = [
     "requests>=2.31",
-    "cryptography>=42.0",
-    "pyOpenSSL>=23.0",
+    "cffi>=2.0.0",
+    "cryptography>=44.0",
+    "pyOpenSSL>=24.0",
     "google-auth @ https://github.com/jay0lee/google-cloud-python/releases/download/google-auth-v2.56.2-bunker4/google_auth-2.56.2+bunker4-py3-none-any.whl",
 ]
 
