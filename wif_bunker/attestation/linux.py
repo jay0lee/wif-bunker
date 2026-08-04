@@ -124,8 +124,16 @@ def _extract_ek_certificate(work_dir: Path) -> tuple[AttestationCheck, str | Non
                     ),
                     ek_pem,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to parse EK cert from getekcertificate: %s", exc)
+        else:
+            logger.debug(
+                "tpm2_getekcertificate failed (rc=%d): %s",
+                result.returncode,
+                result.stderr.strip()[:200],
+            )
+    else:
+        logger.debug("ek_pub_native.tpm2 not created — tpm2_createek may have failed")
 
     return (
         AttestationCheck(
@@ -303,7 +311,17 @@ def _credential_activation(work_dir: Path) -> AttestationCheck:
             detail=f"tpm2_makecredential failed: {result.stderr.strip()[:200]}",
         )
 
-    # Activate credential (proves AK is on same TPM as EK)
+    # Activate credential (proves AK is on same TPM as EK).
+    # The EK's default auth policy requires a policy session tied to the
+    # endorsement hierarchy (TPM_RH_ENDORSEMENT = 0x4000000B).
+    _run_tpm2(
+        ["tpm2_startauthsession", "--policy-session", "-S", "session.ctx"],
+        work_dir,
+    )
+    _run_tpm2(
+        ["tpm2_policysecret", "-S", "session.ctx", "-c", "0x4000000B"],
+        work_dir,
+    )
     result = _run_tpm2(
         [
             "tpm2_activatecredential",
@@ -315,6 +333,8 @@ def _credential_activation(work_dir: Path) -> AttestationCheck:
             "credential.secret",
             "-o",
             "decrypted_challenge.txt",
+            "-P",
+            "session:session.ctx",
         ],
         work_dir,
     )
