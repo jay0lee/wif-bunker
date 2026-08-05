@@ -255,37 +255,19 @@ def create_tpm_key(
         if status != 0:
             raise RuntimeError(f"NCryptSetProperty('Export Policy') failed: 0x{status & 0xFFFFFFFF:08X}")
 
-        # 5. Set PCP_KEY_USAGE_POLICY for TPM keys so NCryptCreateClaim can
-        #    attest them.  Without this, NCryptCreateClaim returns
-        #    PCP_E_KEY_NOT_LOADED (0x8029040F) on many TPMs (Dell/Nuvoton).
-        #
-        #    NCRYPT_PCP_SIGNATURE_KEY (0x1) marks this as a signing key
-        #    eligible for attestation.  Unlike NCRYPT_PCP_IDENTITY_KEY (0x8),
-        #    it does NOT restrict the key to TPM-internal operations — the
-        #    key can still sign arbitrary data (TLS handshakes via ECP).
-        #
-        #    Attestation itself is performed by a separate Attestation Key
-        #    (AK) created in attestation/windows.py with IDENTITY_KEY policy.
-        #    Skip for software KSP keys (soft_key) which don't support PCP.
-        _NCRYPT_PCP_SIGNATURE_KEY = 0x00000001
-        if provider_name == MS_PLATFORM_CRYPTO_PROVIDER:
-            usage_policy = wintypes.DWORD(_NCRYPT_PCP_SIGNATURE_KEY)
-            status = ncrypt.NCryptSetProperty(
-                key_handle,
-                "PCP_KEY_USAGE_POLICY",
-                ctypes.byref(usage_policy),
-                ctypes.sizeof(usage_policy),
-                0,
-            )
-            if status != 0:
-                logger.warning(
-                    "NCryptSetProperty('PCP_KEY_USAGE_POLICY') failed: 0x%08X (attestation may not work)",
-                    status & 0xFFFFFFFF,
-                )
-
-        # 6. Finalize (persist) the key.
+        # 5. Finalize (persist) the key.
         #    After this call, the key is stored in the TPM / software KSP
         #    and survives reboots.
+        #
+        #    NOTE: We intentionally do NOT set PCP_KEY_USAGE_POLICY here.
+        #    Setting any PCP usage policy (even NCRYPT_PCP_SIGNATURE_KEY 0x1)
+        #    changes the TPM key creation template to a restricted key,
+        #    which prevents NCryptCreateClaim from attesting it (returns
+        #    PCP_E_KEY_NOT_LOADED 0x8029040F).  An unrestricted key (no
+        #    policy set) can both sign arbitrary data (TLS) AND be attested.
+        #
+        #    Attestation is handled by a separate Attestation Key (AK)
+        #    created in attestation/windows.py, which IS an identity key.
         status = ncrypt.NCryptFinalizeKey(key_handle, 0)
         if status != 0:
             raise RuntimeError(f"NCryptFinalizeKey failed: 0x{status & 0xFFFFFFFF:08X}")

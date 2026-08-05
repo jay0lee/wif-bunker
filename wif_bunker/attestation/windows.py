@@ -537,6 +537,38 @@ def _ncrypt_create_claim(config: WorkloadConfig, key_info: dict | None = None) -
         else:
             logger.info("    Subject key PCP_KEY_USAGE_POLICY: not set (0x%08X)", _prop_status & 0xFFFFFFFF)
 
+        # Debug: read back AK's PCP_KEY_USAGE_POLICY
+        _ak_usage_buf = wintypes.DWORD(0)
+        _ak_usage_size = wintypes.DWORD(ctypes.sizeof(_ak_usage_buf))
+        _ak_prop_status = ncrypt.NCryptGetProperty(
+            ak_handle,
+            "PCP_KEY_USAGE_POLICY",
+            ctypes.byref(_ak_usage_buf),
+            ctypes.sizeof(_ak_usage_buf),
+            ctypes.byref(_ak_usage_size),
+            0,
+        )
+        if _ak_prop_status == 0:
+            logger.info("    AK PCP_KEY_USAGE_POLICY = 0x%08X", _ak_usage_buf.value)
+        else:
+            logger.info("    AK PCP_KEY_USAGE_POLICY: not set (0x%08X)", _ak_prop_status & 0xFFFFFFFF)
+
+        # Debug: read subject key algorithm
+        _algo_buf = ctypes.create_unicode_buffer(64)
+        _algo_size = wintypes.DWORD(ctypes.sizeof(_algo_buf))
+        _algo_status = ncrypt.NCryptGetProperty(
+            key_handle,
+            "Algorithm Name",
+            ctypes.byref(_algo_buf),
+            ctypes.sizeof(_algo_buf),
+            ctypes.byref(_algo_size),
+            0,
+        )
+        if _algo_status == 0:
+            logger.info("    Subject key algorithm: %s", _algo_buf.value)
+        else:
+            logger.info("    Subject key algorithm: unknown (0x%08X)", _algo_status & 0xFFFFFFFF)
+
         logger.info("    key_handle=%s, ak_handle=%s", key_handle.value, ak_handle)
 
         claim_size = wintypes.DWORD(0)
