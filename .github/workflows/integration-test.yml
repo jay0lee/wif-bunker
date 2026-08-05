@@ -57,13 +57,13 @@ jobs:
           - name: Hardware TPM (NUC8)
             runs_on: '["self-hosted", "linux", "x64", "tpm-hardware"]'
             soft_key_flag: ""
-            artifact_name: wif-bunker-linux-x86_64-tpm
+            artifact_name: wif-bunker-linux-x86_64
             self_hosted: true
             expected_algos: "es256 rsa2048"
           - name: YubiKey (NUC8)
             runs_on: '["self-hosted", "linux", "x64", "tpm-hardware"]'
             soft_key_flag: ""
-            artifact_name: wif-bunker-linux-x86_64-yubikey
+            artifact_name: wif-bunker-linux-x86_64
             self_hosted: true
             use_yubikey: true
             expected_algos: "es256 es384 rsa2048"
