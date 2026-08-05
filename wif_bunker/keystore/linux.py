@@ -408,6 +408,21 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
                 "\n"
                 "  For development/testing, use a software TPM (swtpm)."
             ) from exc
+        if "insufficient space" in stderr or "0x14b" in stderr.lower():
+            raise RuntimeError(
+                f"TPM NV storage is full (command: {cmd_name}).\n"
+                "  Previous runs left persistent handles that were not evicted.\n"
+                "\n"
+                "  To fix, evict stale handles:\n"
+                "    # List persistent handles:\n"
+                "    tpm2_getcap handles-persistent\n"
+                "    # Evict each one (use caution — only evict handles you own):\n"
+                "    tpm2_evictcontrol -c 0x81000001\n"
+                "\n"
+                "  Or if using tpm2_pkcs11, remove the token properly:\n"
+                "    export TPM2_PKCS11_STORE=~/.tpm2_pkcs11\n"
+                "    tpm2_ptool rmtoken --label=bunker-wif"
+            ) from exc
         # Fallback: include the raw error with the failing command.
         raise RuntimeError(
             f"Linux TPM operation failed (command: {cmd_name}, "

@@ -114,16 +114,36 @@ def print_attestation_summary(report: AttestationReport) -> None:
     logger.info("")
     all_passed = report.checks and all(c.passed for c in report.checks)
     if all_passed:
-        logger.info("  🎉🎆 %s 🎆🎉", report.summary)
+        logger.info("  %s PASSED: All %d checks succeeded.", _SYM_OK, len(report.checks))
+        logger.info("")
+        # Wrap summary to fit within 70-char terminal width
+        _log_wrapped(report.summary, indent=4, width=66)
     else:
-        logger.info("  %s", report.summary)
+        passed = sum(1 for c in report.checks if c.passed)
+        logger.info("  %s %d/%d checks passed.", _SYM_FAIL, passed, len(report.checks))
+        logger.info("")
+        _log_wrapped(report.summary, indent=4, width=66)
 
+    logger.info("")
     logger.info("=" * 70)
 
     # Visual attestation chain when all checks pass
     all_passed = report.checks and all(c.passed for c in report.checks)
     if all_passed:
         _print_attestation_chain(report)
+
+
+def _wrap_text(text: str, indent: int = 4, width: int = 66) -> list[str]:
+    """Wrap text to fit within a terminal width, with indentation."""
+    import textwrap  # pylint: disable=import-outside-toplevel
+
+    return textwrap.wrap(text, width=width, initial_indent=" " * indent, subsequent_indent=" " * indent)
+
+
+def _log_wrapped(text: str, indent: int = 4, width: int = 66) -> None:
+    """Log text wrapped to fit within a terminal width."""
+    for line in _wrap_text(text, indent=indent, width=width):
+        logger.info("%s", line)
 
 
 def _box(label: str, lines: list[str], width: int = 55) -> list[str]:
@@ -257,9 +277,14 @@ def _format_text_report(report: AttestationReport) -> str:
 
     all_passed = report.checks and all(c.passed for c in report.checks)
     if all_passed:
-        lines.append(f"  🎉🎆 {report.summary} 🎆🎉")
+        lines.append(f"  {_SYM_OK} PASSED: All {len(report.checks)} checks succeeded.")
+        lines.append("")
+        lines.extend(_wrap_text(report.summary, indent=4, width=66))
     else:
-        lines.append(f"  {report.summary}")
+        passed = sum(1 for c in report.checks if c.passed)
+        lines.append(f"  {_SYM_FAIL} {passed}/{len(report.checks)} checks passed.")
+        lines.append("")
+        lines.extend(_wrap_text(report.summary, indent=4, width=66))
     lines.append("")
 
     if report.artifacts:
