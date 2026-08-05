@@ -310,10 +310,16 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
     os.environ["TPM2_PKCS11_STORE"] = str(tpm_store)
 
     try:
-        # 1. Clean slate: remove any previous PKCS#11 token + TPM handles.
-        #    rmtoken removes the logical token from SQLite but does NOT
-        #    evict the TPM primary object from NV storage.  We must do
-        #    both to avoid orphaned handles that cause addprimary to fail.
+        # 1. Clean up any previous token + its TPM persistent handles.
+        #    rmtoken removes the logical token from the SQLite store;
+        #    _evict_bunker_persistent_handles evicts the TPM primary.
+        #
+        #    IMPORTANT: We do NOT wipe the store directory (shutil.rmtree).
+        #    The SQLite DB schema is created by the system libtpm2_pkcs11.so
+        #    package.  If we delete it and let tpm2_ptool (Python) recreate
+        #    it, the new DB may have a different schema version, causing
+        #    "no such table: schema" → CKR_OPERATION_NOT_INITIALIZED when
+        #    the C library tries to read it.
         if tpm_store.exists():
             subprocess.run(
                 [*ptool_cmd, "rmtoken", "--label=bunker-wif"],
@@ -323,13 +329,8 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
 
         _evict_bunker_persistent_handles(tpm_store, ptool_cmd, logger)
 
-        # Wipe the store directory so init creates a fresh SQLite DB.
-        # This avoids stale DB entries referencing evicted handles.
-        if tpm_store.exists():
-            shutil.rmtree(tpm_store)
+        # 2. Initialize PKCS#11 store (idempotent — preserves existing DB)
         tpm_store.mkdir(parents=True, exist_ok=True)
-
-        # 2. Initialize fresh TPM PKCS#11 store and generate key
         init_result = subprocess.run(
             [*ptool_cmd, "init"],
             check=True,

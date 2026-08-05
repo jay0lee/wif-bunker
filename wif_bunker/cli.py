@@ -156,11 +156,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--soft-key",
         action="store_true",
-        help=(
-            "Windows only. Use Microsoft Software Key Storage Provider instead of "
-            "the TPM-backed Platform Crypto Provider. For CI testing on systems "
-            "without a TPM. NOT for production use."
-        ),
+        help=argparse.SUPPRESS,  # CI-only flag, not for end users
     )
     parser.add_argument(
         "--cert-lifetime",
