@@ -40,7 +40,12 @@ def _get_slot(slot_str: str):
 
 
 def _verify_yubico_chain(attest_cert: cx509.Certificate, f9_cert: cx509.Certificate) -> AttestationCheck:
-    """Verify that the attestation cert chains to the Yubico Root CA."""
+    """Verify that the attestation cert chains to the Yubico Root CA.
+
+    Supports both legacy 2-level chains (Root → F9 → attest) and newer
+    multi-level chains (Root → Intermediate B1 → PIV B1 → F9 → attest)
+    introduced in firmware 5.7.4+.
+    """
     # Find roots dir
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         roots_dir = Path(sys._MEIPASS) / "wif_bunker" / "attestation" / "roots" / "yubico"
@@ -54,112 +59,172 @@ def _verify_yubico_chain(attest_cert: cx509.Certificate, f9_cert: cx509.Certific
             detail="No Yubico root CA certificates bundled. Chain verification skipped.",
         )
 
-    roots = []
+    all_certs = []
     for pem_file in sorted(roots_dir.glob("*.pem")):
         try:
-            roots.append(cx509.load_pem_x509_certificate(pem_file.read_bytes()))
+            all_certs.append(cx509.load_pem_x509_certificate(pem_file.read_bytes()))
         except Exception:
             pass
 
-    if not roots:
+    if not all_certs:
         return AttestationCheck(
             name="Attestation chain verified",
             passed=False,
             detail="Could not load Yubico root certificates.",
         )
 
-    # First verify F9 issued the attest_cert
-    try:
-        issuer_pub = f9_cert.public_key()
-        if isinstance(issuer_pub, rsa.RSAPublicKey):
-            issuer_pub.verify(
-                attest_cert.signature,
-                attest_cert.tbs_certificate_bytes,
-                padding.PKCS1v15(),
-                attest_cert.signature_hash_algorithm,
-            )
-        elif isinstance(issuer_pub, ec.EllipticCurvePublicKey):
-            issuer_pub.verify(
-                attest_cert.signature,
-                attest_cert.tbs_certificate_bytes,
-                ec.ECDSA(attest_cert.signature_hash_algorithm),
-            )
-        else:
+    def _verify_signature(issuer_cert: cx509.Certificate, subject_cert: cx509.Certificate) -> bool:
+        """Verify subject_cert was signed by issuer_cert."""
+        pub = issuer_cert.public_key()
+        try:
+            if isinstance(pub, rsa.RSAPublicKey):
+                pub.verify(
+                    subject_cert.signature,
+                    subject_cert.tbs_certificate_bytes,
+                    padding.PKCS1v15(),
+                    subject_cert.signature_hash_algorithm,
+                )
+            elif isinstance(pub, ec.EllipticCurvePublicKey):
+                pub.verify(
+                    subject_cert.signature,
+                    subject_cert.tbs_certificate_bytes,
+                    ec.ECDSA(subject_cert.signature_hash_algorithm),
+                )
+            else:
+                return False
+        except Exception:
+            return False
+        return True
+
+    def _find_issuer(cert: cx509.Certificate) -> cx509.Certificate | None:
+        """Find the bundled cert whose subject matches cert's issuer."""
+        try:
+            issuer_bytes = cert.issuer.public_bytes()
+        except Exception:
+            return None
+        for c in all_certs:
+            try:
+                if c.subject.public_bytes() == issuer_bytes:
+                    return c
+            except Exception:
+                pass
+        return None
+
+    # Step 1: Verify F9 signed the attest cert
+    if not _verify_signature(f9_cert, attest_cert):
+        return AttestationCheck(
+            name="Attestation chain verified",
+            passed=False,
+            detail="Workload key attestation certificate not signed by F9 key.",
+        )
+
+    # Step 2: Walk up from F9's issuer through intermediates to a root
+    current = f9_cert
+    max_depth = 5  # Prevent infinite loops
+    for _ in range(max_depth):
+        issuer_cert = _find_issuer(current)
+        if issuer_cert is None:
+            try:
+                issuer_str = current.issuer.rfc4514_string()
+            except Exception:
+                issuer_str = "(unparseable issuer)"
             return AttestationCheck(
                 name="Attestation chain verified",
                 passed=False,
-                detail=f"Unsupported F9 key type: {type(issuer_pub).__name__}",
+                detail=f"Could not find Yubico CA '{issuer_str}'.",
             )
-    except Exception as e:
-        return AttestationCheck(
-            name="Attestation chain verified",
-            passed=False,
-            detail=f"Workload key attestation certificate not signed by F9 key: {e}",
-        )
 
-    # Now verify Root CA issued F9 cert
-    try:
-        f9_issuer_bytes = f9_cert.issuer.public_bytes()
-    except Exception:
-        return AttestationCheck(
-            name="Attestation chain verified",
-            passed=False,
-            detail="Could not read F9 certificate issuer field.",
-        )
-
-    issuer_cert = None
-    for root in roots:
-        try:
-            if root.subject.public_bytes() == f9_issuer_bytes:
-                issuer_cert = root
-                break
-        except Exception:
-            pass
-
-    if not issuer_cert:
-        try:
-            issuer_str = f9_cert.issuer.rfc4514_string()
-        except Exception:
-            issuer_str = "(unparseable issuer)"
-        return AttestationCheck(
-            name="Attestation chain verified",
-            passed=False,
-            detail=f"Could not find Yubico root CA '{issuer_str}'.",
-        )
-
-    try:
-        root_pub = issuer_cert.public_key()
-        if isinstance(root_pub, rsa.RSAPublicKey):
-            root_pub.verify(
-                f9_cert.signature,
-                f9_cert.tbs_certificate_bytes,
-                padding.PKCS1v15(),
-                f9_cert.signature_hash_algorithm,
-            )
-        elif isinstance(root_pub, ec.EllipticCurvePublicKey):
-            root_pub.verify(
-                f9_cert.signature,
-                f9_cert.tbs_certificate_bytes,
-                ec.ECDSA(f9_cert.signature_hash_algorithm),
-            )
-        else:
+        if not _verify_signature(issuer_cert, current):
             return AttestationCheck(
                 name="Attestation chain verified",
                 passed=False,
-                detail=f"Unsupported root key type: {type(root_pub).__name__}",
+                detail=f"Certificate not signed by issuer: {current.subject.rfc4514_string()}",
             )
-    except Exception as e:
-        return AttestationCheck(
-            name="Attestation chain verified",
-            passed=False,
-            detail=f"F9 certificate not signed by Yubico root CA: {e}",
-        )
+
+        # Check if we've reached a self-signed root
+        if issuer_cert.subject.public_bytes() == issuer_cert.issuer.public_bytes():
+            return AttestationCheck(
+                name="Attestation chain verified",
+                passed=True,
+                detail="Attestation chain verified successfully against Yubico Root CA.",
+            )
+
+        current = issuer_cert
 
     return AttestationCheck(
         name="Attestation chain verified",
-        passed=True,
-        detail="Attestation chain verified successfully against Yubico Root CA.",
+        passed=False,
+        detail="Chain too deep — could not reach a Yubico root CA.",
     )
+
+
+def _parse_attested_properties(attest_cert: cx509.Certificate) -> str:
+    """Extract cryptographically-proven device properties from a Yubico attestation cert.
+
+    Parses Yubico's private OID arc (1.3.6.1.4.1.41482.3.*) to extract:
+    - Firmware version (.3.3): 3 raw bytes
+    - Serial number (.3.7): DER-encoded INTEGER
+    - Form factor (.3.9): 1 raw byte
+    - PIN + Touch policy (.3.8): 2 raw bytes
+
+    Returns a pipe-separated string of properties, or empty string if none found.
+    """
+    yubico_arc = "1.3.6.1.4.1.41482.3"
+    pin_policy_map = {1: "Never", 2: "Once", 3: "Always"}
+    touch_policy_map = {1: "Never", 2: "Always", 3: "Cached"}
+    form_factor_map = {
+        0x01: "USB-A Keychain",
+        0x02: "USB-A Nano",
+        0x03: "USB-C Keychain",
+        0x04: "USB-C Nano",
+        0x05: "USB-C/Lightning",
+        0x81: "USB-A Keychain (FIPS)",
+        0x82: "USB-A Nano (FIPS)",
+        0x83: "USB-C Keychain (FIPS)",
+        0x84: "USB-C Nano (FIPS)",
+        0x85: "USB-C/Lightning (FIPS)",
+    }
+
+    def _get_ext_bytes(oid_suffix: str) -> bytes | None:
+        try:
+            ext = attest_cert.extensions.get_extension_for_oid(cx509.ObjectIdentifier(f"{yubico_arc}.{oid_suffix}"))
+            val = ext.value.value
+            return val if isinstance(val, bytes) else None
+        except cx509.ExtensionNotFound:
+            return None
+
+    proven_props: list[str] = []
+
+    # Firmware version (.3.3): 3 bytes — major, minor, patch
+    fw = _get_ext_bytes("3")
+    if fw and len(fw) >= 3:
+        proven_props.append(f"Firmware: {fw[0]}.{fw[1]}.{fw[2]}")
+
+    # Serial number (.3.7): DER-encoded INTEGER (tag=0x02, length, value)
+    sn = _get_ext_bytes("7")
+    if sn:
+        if len(sn) >= 3 and sn[0] == 0x02:
+            sn_int = int.from_bytes(sn[2 : 2 + sn[1]], "big")
+        else:
+            sn_int = int.from_bytes(sn, "big")
+        proven_props.append(f"Serial: {sn_int}")
+
+    # Form factor (.3.9): 1 byte
+    ff = _get_ext_bytes("9")
+    if ff and len(ff) >= 1:
+        proven_props.append(f"Form factor: {form_factor_map.get(ff[0], f'Unknown (0x{ff[0]:02x})')}")
+
+    # PIN + Touch policy (.3.8): 2 raw bytes
+    pol = _get_ext_bytes("8")
+    if pol and len(pol) >= 2:
+        pin_str = pin_policy_map.get(pol[0], f"Unknown ({pol[0]})")
+        touch_str = touch_policy_map.get(pol[1], f"Unknown ({pol[1]})")
+        proven_props.append(f"PIN policy: {pin_str}, Touch policy: {touch_str}")
+    elif pol and len(pol) == 1:
+        pin_str = pin_policy_map.get(pol[0], f"Unknown ({pol[0]})")
+        proven_props.append(f"PIN policy: {pin_str}")
+
+    return " | ".join(proven_props)
 
 
 def attest_yubikey(config: WorkloadConfig) -> AttestationReport:
@@ -397,49 +462,23 @@ def attest_yubikey(config: WorkloadConfig) -> AttestationReport:
             )
         )
 
-    # Check 5: PIN policy
-    # OID 1.3.6.1.4.1.41482.3.7
-    pin_policy_oid = cx509.ObjectIdentifier("1.3.6.1.4.1.41482.3.7")
-    try:
-        ext = attest_cert.extensions.get_extension_for_oid(pin_policy_oid)
-        val = ext.value.value
-        if isinstance(val, bytes):
-            # Parse DER integer: 02 01 XX
-            if len(val) >= 3 and val[0] == 0x02 and val[1] == 0x01:
-                policy_val = val[2]
-                policy_map = {1: "Never", 2: "Once", 3: "Always"}
-                policy_str = policy_map.get(policy_val, f"Unknown ({policy_val})")
-            else:
-                policy_str = f"Unknown encoding ({val.hex()})"
-        else:
-            policy_str = str(val)
+    proven_detail = _parse_attested_properties(attest_cert)
 
-        checks.append(AttestationCheck(name="PIN policy", passed=True, detail=f"Policy: {policy_str}"))
-    except cx509.ExtensionNotFound:
+    if proven_detail:
         checks.append(
-            AttestationCheck(name="PIN policy", passed=True, detail="Unknown (firmware may not include policy info)")
+            AttestationCheck(
+                name="Attested device properties",
+                passed=True,
+                detail=proven_detail,
+            )
         )
-
-    # Check 6: Touch policy
-    # OID 1.3.6.1.4.1.41482.3.8
-    touch_policy_oid = cx509.ObjectIdentifier("1.3.6.1.4.1.41482.3.8")
-    try:
-        ext = attest_cert.extensions.get_extension_for_oid(touch_policy_oid)
-        val = ext.value.value
-        if isinstance(val, bytes):
-            if len(val) >= 3 and val[0] == 0x02 and val[1] == 0x01:
-                policy_val = val[2]
-                policy_map = {1: "Never", 2: "Always", 3: "Cached"}
-                policy_str = policy_map.get(policy_val, f"Unknown ({policy_val})")
-            else:
-                policy_str = f"Unknown encoding ({val.hex()})"
-        else:
-            policy_str = str(val)
-
-        checks.append(AttestationCheck(name="Touch policy", passed=True, detail=f"Policy: {policy_str}"))
-    except cx509.ExtensionNotFound:
+    else:
         checks.append(
-            AttestationCheck(name="Touch policy", passed=True, detail="Unknown (firmware may not include policy info)")
+            AttestationCheck(
+                name="Attested device properties",
+                passed=True,
+                detail="No device properties found in attestation certificate (older firmware may omit these)",
+            )
         )
 
     # Check verdicts

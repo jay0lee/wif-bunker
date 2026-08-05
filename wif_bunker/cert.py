@@ -440,9 +440,28 @@ def run_ecp_diagnostics(config_path: Path | str, log: logging.Logger) -> None:
 def ecp_get_cert_pem(ecp_client_lib: Path | str, cert_config_path: Path | str) -> bytes:
     """Call ECP's GetCertPemForPython and return raw PEM bytes.
 
+    On Linux, runs in a **subprocess** to avoid PKCS#11 session conflicts.
+    Loading libecp_client.so via ctypes starts a Go runtime that calls
+    C_Initialize() on libtpm2_pkcs11.so and never releases it (Go
+    shared libraries cannot unload).  If we did this in-process, the
+    subsequent mTLS handshake in step 7 would load libtls_offload.so
+    (another Go shared library) and its C_Login() would fail with
+    CKR_OPERATION_NOT_INITIALIZED because the first Go runtime still
+    owns the PKCS#11 session.
+
+    On macOS/Windows the PKCS#11 conflict doesn't apply (Keychain /
+    CNG are used instead), so we keep the faster in-process path.
+
     Raises:
         RuntimeError: If ECP returns cert_len <= 0.
     """
+    if sys.platform == "linux":
+        return _ecp_get_cert_subprocess(ecp_client_lib, cert_config_path)
+    return _ecp_get_cert_inprocess(ecp_client_lib, cert_config_path)
+
+
+def _ecp_get_cert_inprocess(ecp_client_lib: Path | str, cert_config_path: Path | str) -> bytes:
+    """In-process ctypes call to ECP."""
     lib = ctypes.CDLL(str(ecp_client_lib))
     lib.GetCertPemForPython.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
     lib.GetCertPemForPython.restype = ctypes.c_int
@@ -452,6 +471,52 @@ def ecp_get_cert_pem(ecp_client_lib: Path | str, cert_config_path: Path | str) -
     buf = ctypes.create_string_buffer(cert_len + 1)
     lib.GetCertPemForPython(str(cert_config_path).encode(), buf, cert_len + 1)
     return buf.value
+
+
+def _ecp_get_cert_subprocess(ecp_client_lib: Path | str, cert_config_path: Path | str) -> bytes:
+    """Subprocess-isolated ctypes call to ECP (Linux/PKCS#11 only).
+
+    Finds a system Python interpreter (even inside PyInstaller frozen
+    binaries where sys.executable is the frozen binary, not python3).
+    """
+    python = _find_system_python()
+    script = (
+        "import ctypes, sys;"
+        f"lib = ctypes.CDLL({str(ecp_client_lib)!r});"
+        "lib.GetCertPemForPython.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int];"
+        "lib.GetCertPemForPython.restype = ctypes.c_int;"
+        f"n = lib.GetCertPemForPython({str(cert_config_path)!r}.encode(), None, 0);"
+        "sys.exit(1) if n <= 0 else None;"
+        "buf = ctypes.create_string_buffer(n + 1);"
+        f"lib.GetCertPemForPython({str(cert_config_path)!r}.encode(), buf, n + 1);"
+        "sys.stdout.buffer.write(buf.value)"
+    )
+    result = subprocess.run(
+        [python, "-c", script],
+        capture_output=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"ECP returned error (rc={result.returncode}): {detail}")
+    return result.stdout
+
+
+def _find_system_python() -> str:
+    """Find a usable Python 3 interpreter, even inside a frozen binary."""
+    import shutil  # pylint: disable=import-outside-toplevel
+
+    # If we're not frozen, sys.executable is fine
+    if not getattr(sys, "frozen", False):
+        return sys.executable
+
+    # Inside a PyInstaller binary — find the system python3
+    for name in ("python3", "python"):
+        found = shutil.which(name)
+        if found:
+            return found
+
+    raise RuntimeError("Cannot find system python3 for subprocess ECP isolation. Ensure python3 is on PATH.")
 
 
 def verify_ecp_cert_retrieval(

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import datetime
 import json
+from pathlib import Path
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -294,7 +296,7 @@ class TestYubiKeyAttestation:
 
         report = attest_yubikey(config)
 
-        assert len(report.checks) == 6
+        assert len(report.checks) == 5
         assert all(c.passed for c in report.checks)
         assert "Cryptographically proven" in report.summary
 
@@ -322,7 +324,8 @@ class TestYubiKeyAttestation:
     @patch("yubikit.core.smartcard.SmartCardConnection", create=True)
     @patch("yubikit.piv.PivSession", create=True)
     @patch("wif_bunker.attestation.yubikey._verify_yubico_chain")
-    def test_pin_policy_parsed(self, mock_verify, mock_piv_class, mock_conn, mock_list, config):
+    def test_attested_properties_parsed(self, mock_verify, mock_piv_class, mock_conn, mock_list, config):
+        """All Yubico attestation cert extensions are extracted into one check."""
         from wif_bunker.attestation.yubikey import attest_yubikey
 
         dev, info = MagicMock(), MagicMock(serial=1234, version=(5, 4, 3))
@@ -331,36 +334,25 @@ class TestYubiKeyAttestation:
         piv_inst = mock_piv_class.return_value
 
         mock_attest_cert = generate_test_cert(
-            "attest", extensions=[("1.3.6.1.4.1.41482.3.7", bytes([0x02, 0x01, 0x02]))]
+            "attest",
+            extensions=[
+                ("1.3.6.1.4.1.41482.3.3", bytes([5, 4, 3])),  # Firmware 5.4.3
+                ("1.3.6.1.4.1.41482.3.7", bytes([0x02, 0x02, 0x04, 0xD2])),  # Serial 1234 (DER INTEGER)
+                ("1.3.6.1.4.1.41482.3.9", bytes([0x03])),  # USB-C Keychain
+                ("1.3.6.1.4.1.41482.3.8", bytes([0x02, 0x01])),  # PIN=Once, Touch=Never
+            ],
         )
         piv_inst.attest_key.return_value = mock_attest_cert
         piv_inst.get_certificate.return_value = generate_test_cert("f9")
 
         report = attest_yubikey(config)
-        pin_check = next(c for c in report.checks if c.name == "PIN policy")
-        assert "Once" in pin_check.detail
-
-    @patch("ykman.device.list_all_devices", create=True)
-    @patch("yubikit.core.smartcard.SmartCardConnection", create=True)
-    @patch("yubikit.piv.PivSession", create=True)
-    @patch("wif_bunker.attestation.yubikey._verify_yubico_chain")
-    def test_touch_policy_parsed(self, mock_verify, mock_piv_class, mock_conn, mock_list, config):
-        from wif_bunker.attestation.yubikey import attest_yubikey
-
-        dev, info = MagicMock(), MagicMock(serial=1234, version=(5, 4, 3))
-        mock_list.return_value = [(dev, info)]
-
-        piv_inst = mock_piv_class.return_value
-
-        mock_attest_cert = generate_test_cert(
-            "attest", extensions=[("1.3.6.1.4.1.41482.3.8", bytes([0x02, 0x01, 0x01]))]
-        )
-        piv_inst.attest_key.return_value = mock_attest_cert
-        piv_inst.get_certificate.return_value = generate_test_cert("f9")
-
-        report = attest_yubikey(config)
-        touch_check = next(c for c in report.checks if c.name == "Touch policy")
-        assert "Never" in touch_check.detail
+        props_check = next(c for c in report.checks if c.name == "Attested device properties")
+        assert props_check.passed
+        assert "Firmware: 5.4.3" in props_check.detail
+        assert "Serial: 1234" in props_check.detail
+        assert "USB-C Keychain" in props_check.detail
+        assert "PIN policy: Once" in props_check.detail
+        assert "Touch policy: Never" in props_check.detail
 
 
 class TestYubiKeyCLI:
@@ -384,3 +376,80 @@ class TestYubiKeyCLI:
             _main_impl()
         captured = capsys.readouterr()
         assert "exclusive" in captured.err
+
+
+class TestRealYubiKeyCerts:
+    """Tests using real YubiKey attestation certificates from production devices.
+
+    These certs were extracted from 4 different YubiKeys:
+      - 20602167: YubiKey 5 NFC, firmware 5.4.3, USB-A Keychain
+      - 15770189: YubiKey 5C, firmware 5.2.7, USB-C Keychain
+      - 35270891: YubiKey 5C, firmware 5.7.4, USB-C Keychain
+      - 15614260: YubiKey 5Ci, firmware 5.2.7, USB-C/Lightning
+    """
+
+    FIXTURES = Path(__file__).parent / "fixtures" / "yubikey"
+
+    # Expected properties extracted from each real attestation cert
+    DEVICES: ClassVar[list[dict]] = [
+        {
+            "serial": 20602167,
+            "firmware": "5.4.3",
+            "form_factor": "USB-A Keychain",
+            "pin_policy": "Once",
+            "touch_policy": "Never",
+        },
+        {
+            "serial": 15770189,
+            "firmware": "5.2.7",
+            "form_factor": "USB-C Keychain",
+            "pin_policy": "Once",
+            "touch_policy": "Never",
+        },
+        {
+            "serial": 35270891,
+            "firmware": "5.7.4",
+            "form_factor": "USB-C Keychain",
+            "pin_policy": "Never",
+            "touch_policy": "Never",
+        },
+        {
+            "serial": 15614260,
+            "firmware": "5.2.7",
+            "form_factor": "USB-C/Lightning",
+            "pin_policy": "Once",
+            "touch_policy": "Never",
+        },
+    ]
+
+    @pytest.fixture(params=[d["serial"] for d in DEVICES], ids=[str(d["serial"]) for d in DEVICES])
+    def device(self, request):
+        serial = request.param
+        props = next(d for d in self.DEVICES if d["serial"] == serial)
+        attest_pem = (self.FIXTURES / f"yk_{serial}_attest.pem").read_bytes()
+        f9_pem = (self.FIXTURES / f"yk_{serial}_f9.pem").read_bytes()
+        return {**props, "attest_pem": attest_pem, "f9_pem": f9_pem}
+
+    def test_attested_properties_from_real_cert(self, device):
+        """Parse real attestation cert extensions and verify all proven properties."""
+        from wif_bunker.attestation.yubikey import _parse_attested_properties
+
+        cert = cx509.load_pem_x509_certificate(device["attest_pem"])
+        props = _parse_attested_properties(cert)
+
+        assert f"Firmware: {device['firmware']}" in props
+        assert f"Serial: {device['serial']}" in props
+        assert device["form_factor"] in props
+        assert f"PIN policy: {device['pin_policy']}" in props
+        assert f"Touch policy: {device['touch_policy']}" in props
+
+    def test_chain_verification_against_bundled_roots(self, device):
+        """Verify real attestation cert chains to Yubico's bundled root CA."""
+        from wif_bunker.attestation.yubikey import _verify_yubico_chain
+
+        attest_cert = cx509.load_pem_x509_certificate(device["attest_pem"])
+        f9_cert = cx509.load_pem_x509_certificate(device["f9_pem"])
+
+        result = _verify_yubico_chain(attest_cert, f9_cert)
+        assert result.passed, f"Chain verification failed for S/N {device['serial']}: {result.detail}"
+        assert "Yubico Root CA" in result.detail
