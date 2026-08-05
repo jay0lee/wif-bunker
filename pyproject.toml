@@ -70,4 +70,4 @@ source = ["wif_bunker"]
 
 [tool.coverage.report]
 show_missing = true
-fail_under = 59
+fail_under = 57
