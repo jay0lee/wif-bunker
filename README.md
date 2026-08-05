@@ -2,7 +2,7 @@
 
 **Hardware-backed Workload Identity Federation for Google Cloud**
 
-WIF Bunker makes authenticating to Google Cloud as simple as downloading a service account key — but without the security risk. Instead of exportable JSON keys sitting on disk, your credentials are locked inside your machine's hardware security module (TPM, Secure Enclave, or YubiKey) and can never be extracted.
+WIF Bunker makes authenticating to Google Cloud as simple as downloading a service account key — but without the security risk. Instead of exportable JSON keys sitting on disk, your credentials are locked inside your machine's Trusted Platform Module (TPM), Secure Enclave, or YubiKey and can never be extracted.
 
 One command. No key files. No secrets to rotate.
 
@@ -33,8 +33,8 @@ This single command:
 |---|---|---|
 | **Linux** | TPM 2.0 | ES256, ES384, RSA 2048/3072/4096 |
 | **macOS** | Secure Enclave (Apple Silicon) | ES256, ES384 |
-| **Windows** | TPM 2.0 (CNG) | ES256, ES384, RSA 2048/3072/4096 |
-| **Cross-platform** | YubiKey 5 (PIV) | ES256, ES384, RSA 2048 (4096 on fw 5.7+) |
+| **Windows** | TPM 2.0 | ES256, ES384, RSA 2048/3072/4096 |
+| **Cross-platform** | YubiKey 5 ([PIV](https://csrc.nist.gov/pubs/fips/201-3/final)) | ES256, ES384, RSA 2048 (4096 on fw 5.7+) |
 
 ## Installation
 
@@ -195,20 +195,20 @@ wif-bunker --attest --cert-file /tmp/certs/workload_cert.pem --output-dir /tmp/a
 
 ### What attestation proves
 
-| Check | TPM 2.0 | YubiKey | Windows CNG |
+| Check | Linux (TPM) | Windows (TPM) | YubiKey |
 |---|---|---|---|
 | Key generated in hardware | ✓ | ✓ | ✓ |
 | Key is non-exportable | ✓ | ✓ | ✓ |
 | Manufacturer chain of trust | ✓ | ✓ | ✓ |
-| Device model/serial | ✓ | ✓ | — |
-| Firmware version | — | ✓ | — |
-| PIN/touch policy | — | ✓ | — |
+| Device model/serial | ✓ | — | ✓ |
+| Firmware version | — | — | ✓ |
+| PIN/touch policy | — | — | ✓ |
 
 > **Note:** macOS Secure Enclave does not expose attestation APIs. Apple's security model relies on the Secure Enclave's hardware design rather than certificate-based attestation.
 
 ### Attestation output
 
-The `--attest` flag writes attestation artifacts (PEM certificates, TPM quotes) to the output directory and prints a verification report:
+The `--attest` flag writes attestation artifacts (certificates, TPM quotes) to the output directory and prints a verification report:
 
 ```
 === Hardware Key Attestation ===
@@ -235,7 +235,7 @@ WIF Bunker bridges your OS hardware security module to Google Cloud's [Workload 
 │                                ┌──────────▼───────────┐ │
 │                                │  Hardware Keystore    │ │
 │                                │  TPM / Secure Enclave │ │
-│                                │  YubiKey / CNG        │ │
+│                                │  / YubiKey            │ │
 │                                └──────────┬───────────┘ │
 └───────────────────────────────────────────┼─────────────┘
                                             │ mTLS
@@ -264,14 +264,13 @@ WIF Bunker bridges your OS hardware security module to Google Cloud's [Workload 
 ### Platform Details
 
 <details>
-<summary><strong>Windows — TPM 2.0 via CNG</strong></summary>
+<summary><strong>Windows — TPM 2.0</strong></summary>
 
 - **Key generation:** `certreq -new` with `Microsoft Platform Crypto Provider`
-- **Key storage:** Windows CNG keystore (non-exportable, TPM-bound)
+- **Key storage:** Windows certificate store (non-exportable, TPM-bound)
 - **Certificate store:** `CurrentUser\My`
 - **Supported algorithms:** ECDSA P-256, ECDSA P-384, RSA 2048/3072/4096
-- **Attestation:** Full CNG/TPM attestation with AIK quotes
-- **CI testing:** `--soft-key` uses `Microsoft Software Key Storage Provider` (no TPM required)
+- **Attestation:** Full TPM attestation with Attestation Identity Key (AIK) quotes
 
 </details>
 
@@ -293,8 +292,8 @@ WIF Bunker bridges your OS hardware security module to Google Cloud's [Workload 
 - **Key generation:** `tpm2_ptool addkey` (tpm2-pkcs11)
 - **Key storage:** TPM 2.0 PKCS#11 store (`~/.tpm2_pkcs11`)
 - **Tools required:** `tpm2-tools`, `libtpm2-pkcs11-tools`, `python3-tpm2-pkcs11-tools`, `gnutls-bin`, `opensc`
+- **Attestation:** Full TPM 2.0 attestation — Endorsement Key (EK) certificate chain, key certification, manufacturer provenance
 - **Supported algorithms:** ECDSA P-256, ECDSA P-384, RSA 2048/3072/4096
-- **Attestation:** Full TPM 2.0 attestation (EK certificate chain, key certification, manufacturer provenance)
 - **Development:** Supports [swtpm](https://github.com/stefanberger/swtpm) (software TPM) for testing without hardware
 
 </details>
@@ -306,7 +305,7 @@ WIF Bunker bridges your OS hardware security module to Google Cloud's [Workload 
 - **Key storage:** YubiKey PIV applet (hardware-bound, survives resets)
 - **Supported algorithms:** ECDSA P-256, ECDSA P-384, RSA 2048, RSA 4096 (firmware 5.7+)
 - **Attestation:** PIV key attestation with chain verification against bundled Yubico Root CAs. Reports device model, serial number, firmware version, form factor, PIN/touch policy.
-- **Firmware requirement:** 5.0 or later
+- **Firmware requirement:** 5.0 or later for PIV attestation
 - **PIV slots:** 9a (Authentication, default), 9c (Signature), 9d (Key Management), 9e (Card Auth)
 - **Touch policy:** `never` (default), `cached` (15s), `always`
 - **Works on:** Linux (requires `pcscd`), macOS, Windows
@@ -366,7 +365,6 @@ wif-bunker [OPTIONS]
 | `--cert-lifetime DAYS` | Certificate validity in days (1-390, default: 90) |
 | `--output-dir DIR` | Output directory for `--cert-only` or `--attest` artifacts |
 | `--cert-file PATH` | Path to workload certificate PEM (used with `--attest`) |
-| `--soft-key` | Windows only — use software keys instead of TPM (for CI testing) |
 | `--debug` | Enable verbose debug logging |
 | `--version` | Show version |
 
@@ -468,7 +466,7 @@ WIF Bunker currently requires **forked versions** of two Google libraries becaus
 
 ### google-auth (Python)
 
-The upstream [`google-auth`](https://github.com/googleapis/google-auth-library-python) library assumes that both a certificate *and* a private key file are present on disk when configuring mTLS. With hardware-backed keys, the private key lives inside the TPM or Secure Enclave and is never available as a file — only the [Enterprise Certificate Proxy (ECP)](https://cloud.google.com/endpoint-verification/docs/ecp-overview) can perform signing operations. WIF Bunker uses a [forked google-auth](https://github.com/jay0lee/google-cloud-python) that tolerates a missing `key_path` in the certificate configuration and delegates all TLS signing to ECP.
+The upstream [`google-auth`](https://github.com/googleapis/google-auth-library-python) library assumes that both a certificate *and* a private key file are present on disk when configuring mutual TLS (mTLS). With hardware-backed keys, the private key lives inside the TPM or Secure Enclave and is never available as a file — only the [Enterprise Certificate Proxy (ECP)](https://cloud.google.com/endpoint-verification/docs/ecp-overview) can perform signing operations. WIF Bunker uses a [forked google-auth](https://github.com/jay0lee/google-cloud-python) that tolerates a missing `key_path` in the certificate configuration and delegates all TLS signing to ECP.
 
 **Upstream issue:** [googleapis/google-cloud-python#17967](https://github.com/googleapis/google-cloud-python/issues/17967)
 
