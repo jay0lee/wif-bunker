@@ -16,7 +16,7 @@ import requests
 from google.auth.exceptions import TransportError
 from google.auth.transport.requests import Request as GoogleAuthRequest
 
-from wif_bunker.config import LRO_TIMEOUT_SECONDS, MAX_BACKOFF_SECONDS
+from wif_bunker.config import API_RETRY_ATTEMPTS, LRO_TIMEOUT_SECONDS, MAX_BACKOFF_SECONDS
 
 logger = logging.getLogger(__name__)
 
@@ -293,7 +293,7 @@ class GCPClient:
         method: str,
         url: str,
         json_payload: dict | None = None,
-        max_attempts: int = 8,
+        max_attempts: int = API_RETRY_ATTEMPTS,
     ) -> dict | None:
         """api_call with retry on transient errors.
 
@@ -348,7 +348,7 @@ class GCPClient:
             time.sleep(2)
         raise TimeoutError(f"LRO {op_name} did not complete within {timeout}s")
 
-    def wait_for_wif_resource(self, url: str, max_attempts: int = 12) -> dict:
+    def wait_for_wif_resource(self, url: str, max_attempts: int = API_RETRY_ATTEMPTS) -> dict:
         """Polls a WIF resource until it reaches ACTIVE state."""
         for attempt in range(max_attempts):
             data = self.api_call("GET", url)

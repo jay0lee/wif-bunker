@@ -28,6 +28,7 @@ from wif_bunker.config import (
     _DEFAULT_CERT_LIFETIME_DAYS,
     _KEY_ALGORITHMS,
     _WIF_MAX_CERT_LIFETIME_DAYS,
+    API_RETRY_ATTEMPTS,
     WorkloadConfig,
 )
 from wif_bunker.gcp_client import GCPClient
@@ -500,7 +501,7 @@ def _main_impl() -> None:
             time.sleep(15)
 
             @with_retries(
-                max_attempts=10,
+                max_attempts=API_RETRY_ATTEMPTS,
                 retryable_exceptions=(RefreshError, OAuthError, TypeError),
                 retry_msg="Waiting for STS propagation",
             )
