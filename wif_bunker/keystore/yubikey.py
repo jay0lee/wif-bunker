@@ -41,17 +41,12 @@ def get_supported_algorithms_yubikey(serial: int | None = None) -> list[str]:
 
     devices = list(list_all_devices())
     if not devices:
-        raise RuntimeError(
-            "No YubiKeys found. On Linux, ensure 'pcscd' service is running."
-        )
+        raise RuntimeError("No YubiKeys found. On Linux, ensure 'pcscd' service is running.")
 
     target_info = None
     if len(devices) > 1 and serial is None:
         serials = [str(info.serial) for _, info in devices]
-        raise RuntimeError(
-            f"Multiple YubiKeys found: {', '.join(serials)}. "
-            "Specify one with --yubikey-serial."
-        )
+        raise RuntimeError(f"Multiple YubiKeys found: {', '.join(serials)}. Specify one with --yubikey-serial.")
 
     if serial is not None:
         for _, info in devices:
@@ -64,10 +59,7 @@ def get_supported_algorithms_yubikey(serial: int | None = None) -> list[str]:
         _, target_info = devices[0]
 
     if target_info.version < (4, 3, 0):
-        raise RuntimeError(
-            f"YubiKey firmware {target_info.version} too old. "
-            "Requires >= 4.3.0 for attestation."
-        )
+        raise RuntimeError(f"YubiKey firmware {target_info.version} too old. Requires >= 4.3.0 for attestation.")
 
     supported = ["es256", "es384", "rsa2048"]
     if target_info.version >= (5, 7, 0):
@@ -316,12 +308,11 @@ def build_ecp_pkcs11_config(serial: int | None, workload_cn: str) -> dict:
     try:
         _slot_result = subprocess.run(
             ["pkcs11-tool", "--module", yk_module, "--list-slots"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
-        _target_label = (
-            workload_cn if _is_opensc
-            else f"YubiKey PIV #{serial}"
-        )
+        _target_label = workload_cn if _is_opensc else f"YubiKey PIV #{serial}"
         _last_hex = None
         for _line in _slot_result.stdout.splitlines():
             _sm = re.search(r"Slot\s+\d+\s+\(0x([0-9a-fA-F]+)\)", _line)

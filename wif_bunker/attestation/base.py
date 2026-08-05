@@ -91,7 +91,9 @@ def _load_certs(directory: Path) -> list[x509.Certificate]:
     return certs
 
 
-def _verify_ek_chain_pyopenssl(ek_pem: str, roots_dir: Path, intermediates_dir: Path, manually_managed_dir: Path | None = None) -> AttestationCheck:
+def _verify_ek_chain_pyopenssl(
+    ek_pem: str, roots_dir: Path, intermediates_dir: Path, manually_managed_dir: Path | None = None
+) -> AttestationCheck:
     """Verify EK cert chain using pyOpenSSL when cryptography's strict parser fails.
 
     **Why this exists:**
@@ -184,18 +186,19 @@ def _verify_ek_chain_pyopenssl(ek_pem: str, roots_dir: Path, intermediates_dir: 
         except X509StoreContextError as e:
             if "unable to get local issuer certificate" in str(e) and depth < 3:
                 # Try AIA chasing
-                cert_pem = OpenSSL.crypto.dump_certificate(FILETYPE_PEM, current_cert).decode('utf-8')
+                cert_pem = OpenSSL.crypto.dump_certificate(FILETYPE_PEM, current_cert).decode("utf-8")
                 result = subprocess.run(
                     ["openssl", "x509", "-noout", "-text"],
                     input=cert_pem,
-                    capture_output=True, text=True,
+                    capture_output=True,
+                    text=True,
                 )
                 m = re.search(r"CA Issuers - URI:(https?://[^\s]+)", result.stdout)
                 if m:
                     url = m.group(1)
                     logger.debug(f"AIA chasing: fetching intermediate from {url}")
                     try:
-                        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
                         with urllib.request.urlopen(req, timeout=10) as response:
                             cert_data = response.read()
 
@@ -498,8 +501,7 @@ def parse_ek_details(ek_pem: str) -> dict:
 
             ossl_cert = load_certificate(FILETYPE_PEM, ek_pem.encode())
             details["issuer"] = ", ".join(
-                f"{k.decode()}={v.decode()}"
-                for k, v in ossl_cert.get_issuer().get_components()
+                f"{k.decode()}={v.decode()}" for k, v in ossl_cert.get_issuer().get_components()
             )
             details["serial"] = format(ossl_cert.get_serial_number(), "X")
         except Exception:  # pylint: disable=broad-except

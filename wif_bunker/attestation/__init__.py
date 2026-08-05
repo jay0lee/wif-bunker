@@ -166,6 +166,7 @@ def _print_attestation_chain(report: AttestationReport) -> None:
                 from wif_bunker.attestation.base import (
                     _decode_manufacturer_id,  # pylint: disable=import-outside-toplevel
                 )
+
                 tpm_mfr = _decode_manufacturer_id(mfr_id) if mfr_id else ""
             except ImportError:
                 tpm_mfr = ""
@@ -185,6 +186,7 @@ def _print_attestation_chain(report: AttestationReport) -> None:
     ek_issuer_short = ek_issuer_full
     if "OU=" in ek_issuer_full:
         import re  # pylint: disable=import-outside-toplevel
+
         m = re.search(r"OU=([^,]+)", ek_issuer_full)
         if m:
             ek_issuer_short = m.group(1)
@@ -199,6 +201,7 @@ def _print_attestation_chain(report: AttestationReport) -> None:
         # If we can infer the root from the issuer
         if "root" not in ek_issuer_short.lower():
             import re  # pylint: disable=import-outside-toplevel
+
             root_ou = ""
             if "O=" in ek_issuer_full:
                 m = re.search(r"O=([^,]+)", ek_issuer_full)
@@ -224,7 +227,6 @@ def _print_attestation_chain(report: AttestationReport) -> None:
             logger.info("     (OEM binding unavailable — common on business PCs)")
 
     logger.info("")
-
 
 
 def _format_text_report(report: AttestationReport) -> str:

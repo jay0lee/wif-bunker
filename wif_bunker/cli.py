@@ -360,10 +360,15 @@ def _main_impl() -> None:
 
             # --- Step 2: Enable APIs ---
             logger.info("=== 2) Configuring APIs ===")
-            client.enable_apis(project_number, [
-                "iam.googleapis.com", "sts.googleapis.com",
-                "iamcredentials.googleapis.com", "cloudresourcemanager.googleapis.com",
-            ])
+            client.enable_apis(
+                project_number,
+                [
+                    "iam.googleapis.com",
+                    "sts.googleapis.com",
+                    "iamcredentials.googleapis.com",
+                    "cloudresourcemanager.googleapis.com",
+                ],
+            )
 
         # --- Step 3: Generate Hardware-Backed Certificate ---
         logger.info("=== 3) Generating Hardware-Backed Certificate ===")

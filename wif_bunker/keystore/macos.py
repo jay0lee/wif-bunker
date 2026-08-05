@@ -41,10 +41,12 @@ def _generate_cert_macos(config: WorkloadConfig) -> CertificateBundle:
       5. Ephemeral CA signs the CSR  → CA-signed workload cert + import-ctk-certificate
     """
     # Pre-validate required commands.
-    require_commands([
-        ("security", "", "Built-in macOS command — should always be at /usr/bin/security"),
-        ("sc_auth", "", "Built-in macOS command — requires macOS 10.15+. Check /usr/bin/sc_auth"),
-    ])
+    require_commands(
+        [
+            ("security", "", "Built-in macOS command — should always be at /usr/bin/security"),
+            ("sc_auth", "", "Built-in macOS command — requires macOS 10.15+. Check /usr/bin/sc_auth"),
+        ]
+    )
 
     mac_ver_str = platform.mac_ver()[0]
     if mac_ver_str:

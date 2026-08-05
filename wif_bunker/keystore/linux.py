@@ -164,9 +164,7 @@ def _check_tpm_algorithm(algo: str) -> None:
                 text=True,
             )
             if cap_result.returncode == 0 and cap_result.stdout.strip():
-                supported_info = (
-                    f"\n  Supported ECC curves: {cap_result.stdout.strip()}"
-                )
+                supported_info = f"\n  Supported ECC curves: {cap_result.stdout.strip()}"
         raise RuntimeError(
             f"This TPM does not support {curve_name} ({algo}).{supported_info}\n"
             f"\n"
@@ -199,10 +197,7 @@ def get_supported_algorithms_linux() -> list[str]:
 
     tpm2_testparms = shutil.which("tpm2_testparms")
     if not tpm2_testparms:
-        raise RuntimeError(
-            "tpm2_testparms not found.\n"
-            "  Install tpm2-tools: sudo apt install tpm2-tools"
-        )
+        raise RuntimeError("tpm2_testparms not found.\n  Install tpm2-tools: sudo apt install tpm2-tools")
 
     supported = []
     for algo_name, algo_info in _KEY_ALGORITHMS.items():
@@ -226,11 +221,13 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
     """Generates a TPM 2.0-backed certificate via PKCS#11 toolchain (Ubuntu 24+)."""
     # Pre-validate all required commands upfront.
     ptool_cmd = _resolve_tpm2_ptool()
-    require_commands([
-        ("p11tool", "gnutls-bin", "sudo apt install gnutls-bin"),
-        ("pkcs11-tool", "opensc", "sudo apt install opensc"),
-        ("certtool", "gnutls-bin", "sudo apt install gnutls-bin"),
-    ])
+    require_commands(
+        [
+            ("p11tool", "gnutls-bin", "sudo apt install gnutls-bin"),
+            ("pkcs11-tool", "opensc", "sudo apt install opensc"),
+            ("certtool", "gnutls-bin", "sudo apt install gnutls-bin"),
+        ]
+    )
 
     # Check TPM availability.
     _check_tpm_linux()

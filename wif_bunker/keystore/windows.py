@@ -68,9 +68,11 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
     - Does NOT trigger a Windows security dialog
     - Creates keys that support NCryptCreateClaim attestation
     """
-    require_commands([
-        ("powershell", "", "Built-in Windows command — ensure PowerShell is on PATH"),
-    ])
+    require_commands(
+        [
+            ("powershell", "", "Built-in Windows command — ensure PowerShell is on PATH"),
+        ]
+    )
 
     algo = config.key_algo_config
     ncrypt_algo = algo["ncrypt_algo"]
@@ -163,6 +165,3 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
     finally:
         if key_handle is not None:
             ncrypt.free_object(key_handle)
-
-
-

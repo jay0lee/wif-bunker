@@ -95,6 +95,7 @@ def _load_ctypes():
 # Public API
 # ---------------------------------------------------------------------------
 
+
 def test_algorithm(
     algorithm: str,
     key_length: int | None = None,

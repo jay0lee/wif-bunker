@@ -204,6 +204,7 @@ def require_commands(
 
     return found
 
+
 def preflight_check_write_access(directory: Path) -> None:
     """Verify we can write files to *directory* before starting long-running work.
 

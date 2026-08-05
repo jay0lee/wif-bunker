@@ -165,6 +165,7 @@ def _run_status() -> None:
             return
 
         from wif_bunker.cert import ecp_get_cert_pem
+
         _cert_pem_bytes = ecp_get_cert_pem(ecp_client_path, cert_config_path)
         logger.info("ECP:       %s Certificate retrieved (%d bytes)", SYM_CHECK, len(_cert_pem_bytes))
     except Exception as exc:
@@ -214,11 +215,13 @@ def _run_supported_algorithms(
         from wif_bunker.keystore.yubikey import (
             get_supported_algorithms_yubikey,  # pylint: disable=import-outside-toplevel
         )
+
         supported = get_supported_algorithms_yubikey(serial=yubikey_serial)
         all_algos = [k for k, v in _KEY_ALGORITHMS.items() if "yubikey" in v["platforms"]]
     elif sys.platform == "darwin":
         keystore_name = "macOS Secure Enclave"
         from wif_bunker.keystore.macos import get_supported_algorithms_macos  # pylint: disable=import-outside-toplevel
+
         supported = get_supported_algorithms_macos()
         all_algos = [k for k, v in _KEY_ALGORITHMS.items() if "darwin" in v["platforms"]]
     elif sys.platform == "win32":
@@ -226,11 +229,13 @@ def _run_supported_algorithms(
         from wif_bunker.keystore.windows import (
             get_supported_algorithms_windows,  # pylint: disable=import-outside-toplevel
         )
+
         supported = get_supported_algorithms_windows(soft_key=soft_key)
         all_algos = [k for k, v in _KEY_ALGORITHMS.items() if "win32" in v["platforms"]]
     elif sys.platform.startswith("linux"):
         keystore_name = "Linux TPM"
         from wif_bunker.keystore.linux import get_supported_algorithms_linux  # pylint: disable=import-outside-toplevel
+
         supported = get_supported_algorithms_linux()
         all_algos = [k for k, v in _KEY_ALGORITHMS.items() if "linux" in v["platforms"]]
     else:
@@ -247,4 +252,3 @@ def _run_supported_algorithms(
     else:
         for algo in supported:
             print(algo)
-

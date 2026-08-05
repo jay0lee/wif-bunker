@@ -34,7 +34,6 @@ _LINUX_TPM_PKCS11_SEARCH_PATHS: list[str] = [
 ]
 
 
-
 def _create_ca_and_sign(
     hw_public_key_pem: str,
     config: WorkloadConfig,
@@ -242,8 +241,6 @@ def _add_ecp_to_path(ecp_dir: Path) -> None:
         os.environ["PATH"] = ecp_dir_str + os.pathsep + current_path
 
 
-
-
 def build_certificate_config(
     config: WorkloadConfig,
     cert_bundle: CertificateBundle,
@@ -259,6 +256,7 @@ def build_certificate_config(
     """
     if config.use_yubikey:
         from wif_bunker.keystore.yubikey import build_ecp_pkcs11_config
+
         cert_configs = build_ecp_pkcs11_config(
             serial=config.yubikey_serial,
             workload_cn=config.workload_cn,
@@ -349,6 +347,7 @@ def build_certificate_config(
 
     return certificate_config, cert_config_path, workload_cert_path, trust_chain_path
 
+
 def build_adc_config(
     config: WorkloadConfig,
     project_number: str,
@@ -386,6 +385,7 @@ def build_adc_config(
     write_secure_file(adc_path, json.dumps(adc_config, indent=2))
     return adc_config, adc_path
 
+
 def run_ecp_diagnostics(config_path: Path | str, log: logging.Logger) -> None:
     """Deep ECP diagnostics."""
     log.warning("    Running ECP diagnostics (--debug)...")
@@ -403,9 +403,7 @@ def run_ecp_diagnostics(config_path: Path | str, log: logging.Logger) -> None:
             bin_data = ecp_bin.read_bytes()
             log.warning("    ECP binary: %s (%d KB)", ecp_bin, len(bin_data) // 1024)
             if sys.platform == "darwin":
-                log.warning(
-                    "    Contains SecCertificateCopyData (patched): %s", b"SecCertificateCopyData" in bin_data
-                )
+                log.warning("    Contains SecCertificateCopyData (patched): %s", b"SecCertificateCopyData" in bin_data)
                 log.warning("    Contains SecItemExport (unpatched): %s", b"SecItemExport" in bin_data)
         else:
             log.warning("    ECP binary NOT FOUND: %s", ecp_bin)
@@ -454,6 +452,7 @@ def ecp_get_cert_pem(ecp_client_lib: Path | str, cert_config_path: Path | str) -
     buf = ctypes.create_string_buffer(cert_len + 1)
     lib.GetCertPemForPython(str(cert_config_path).encode(), buf, cert_len + 1)
     return buf.value
+
 
 def verify_ecp_cert_retrieval(
     cert_config_path: Path | str,

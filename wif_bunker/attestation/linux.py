@@ -70,10 +70,7 @@ def _extract_ek_certificate(work_dir: Path) -> tuple[AttestationCheck, str | Non
                 ossl_cert = load_certificate(FILETYPE_ASN1, der_data)
                 pem_data = dump_certificate(FILETYPE_PEM, ossl_cert)
                 ek_pem = pem_data.decode("utf-8")
-                issuer = ", ".join(
-                    f"{k.decode()}={v.decode()}"
-                    for k, v in ossl_cert.get_issuer().get_components()
-                )
+                issuer = ", ".join(f"{k.decode()}={v.decode()}" for k, v in ossl_cert.get_issuer().get_components())
 
                 ek_pem_path.write_text(ek_pem, encoding="utf-8")
                 detail = f"{algo_name} EK certificate from NVRAM index {nv_index}. Issuer: {issuer}"
@@ -122,10 +119,7 @@ def _extract_ek_certificate(work_dir: Path) -> tuple[AttestationCheck, str | Non
 
                 pem_data = dump_certificate(FILETYPE_PEM, ossl_cert)
                 ek_pem = pem_data.decode("utf-8")
-                issuer = ", ".join(
-                    f"{k.decode()}={v.decode()}"
-                    for k, v in ossl_cert.get_issuer().get_components()
-                )
+                issuer = ", ".join(f"{k.decode()}={v.decode()}" for k, v in ossl_cert.get_issuer().get_components())
 
                 ek_pem_path.write_text(ek_pem, encoding="utf-8")
                 detail = f"EK certificate retrieved from manufacturer provisioning service. Issuer: {issuer}"
@@ -534,14 +528,16 @@ def _certify_key(work_dir: Path) -> tuple[AttestationCheck, bool]:
 
 def _attest_linux(config: WorkloadConfig) -> AttestationReport:  # pylint: disable=unused-argument
     """Perform full TPM 2.0 key attestation chain."""
-    require_commands([
-        ("tpm2_createek", "tpm2-tools", "sudo apt install tpm2-tools"),
-        ("tpm2_createak", "tpm2-tools", "sudo apt install tpm2-tools"),
-        ("tpm2_certify", "tpm2-tools", "sudo apt install tpm2-tools"),
-        ("tpm2_nvread", "tpm2-tools", "sudo apt install tpm2-tools"),
-        ("tpm2_makecredential", "tpm2-tools", "sudo apt install tpm2-tools"),
-        ("tpm2_activatecredential", "tpm2-tools", "sudo apt install tpm2-tools"),
-    ])
+    require_commands(
+        [
+            ("tpm2_createek", "tpm2-tools", "sudo apt install tpm2-tools"),
+            ("tpm2_createak", "tpm2-tools", "sudo apt install tpm2-tools"),
+            ("tpm2_certify", "tpm2-tools", "sudo apt install tpm2-tools"),
+            ("tpm2_nvread", "tpm2-tools", "sudo apt install tpm2-tools"),
+            ("tpm2_makecredential", "tpm2-tools", "sudo apt install tpm2-tools"),
+            ("tpm2_activatecredential", "tpm2-tools", "sudo apt install tpm2-tools"),
+        ]
+    )
 
     checks: list[AttestationCheck] = []
     artifacts: list[AttestationArtifact] = []
