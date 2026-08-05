@@ -292,6 +292,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
+
       # ── YubiKey: Discover serials, test error handling, pick random key ──
       - name: "YubiKey: Discover and validate"
         if: matrix.use_yubikey
