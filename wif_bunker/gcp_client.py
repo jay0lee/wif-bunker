@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import hashlib
 import json
 import logging
@@ -318,3 +319,218 @@ class GCPClient:
             )
             time.sleep(sleep_time)
         raise TimeoutError(f"WIF resource at {url} did not become ACTIVE within {max_attempts} attempts")
+
+    def ensure_project(self, project_id: str, folder: str | None = None) -> str:
+        """Create or reuse GCP project."""
+        crm_base = "cloudresourcemanager.googleapis.com"
+        try:
+            # Try to get existing
+            project_number = self.api_call(
+                "GET",
+                f"https://{crm_base}/v1/projects/{project_id}",
+            )["projectNumber"]
+            return project_number
+        except Exception as exc:
+            if "403" in str(exc) or "404" in str(exc):
+                # If we get here, it probably doesn't exist or we lack permissions.
+                # The prompt implies we only call ensure_project with intent to create if we are in the else branch, but actually the prompt says:
+                # "If project already exists (GET succeeds), return project_number
+                # If not, create it with optional folder parent, wait for LRO, return project_number"
+                pass
+            else:
+                raise
+
+        create_payload = {
+            "projectId": project_id,
+            "name": "WIF Bunker",
+        }
+        if folder:
+            create_payload["parent"] = {
+                "type": "folder",
+                "id": folder,
+            }
+            logger.info("    Parent folder: %s", folder)
+        operation = self.api_call(
+            "POST",
+            f"https://{crm_base}/v1/projects",
+            create_payload,
+        )
+        self.wait_for_lro(crm_base, operation["name"])
+        return self.api_call(
+            "GET",
+            f"https://{crm_base}/v1/projects/{project_id}",
+        )["projectNumber"]
+
+    def enable_apis(self, project_number: str, api_list: list[str]) -> None:
+        """Batch-enables the given APIs for the project."""
+        su_base = "serviceusage.googleapis.com"
+        operation = self.api_call(
+            "POST",
+            f"https://{su_base}/v1/projects/{project_number}/services:batchEnable",
+            {"serviceIds": api_list},
+        )
+        self.wait_for_lro(su_base, operation["name"])
+
+    def setup_wif_infrastructure(
+        self,
+        config: Any,
+        project_number: str,
+        cert_bundle: Any,
+        reuse_pool: bool,
+        use_sa: bool,
+        sa_email: str | None = None,
+        sa_name: str | None = None,
+    ) -> tuple[str | None, str]:
+        """Creates SA, WIF Pool, and WIF Provider in parallel."""
+        iam_base = "iam.googleapis.com"
+        pool_res_url = (
+            f"https://{iam_base}/v1/projects/{project_number}/locations/global/workloadIdentityPools/{config.pool_id}"
+        )
+        provider_res_url = f"{pool_res_url}/providers/{config.provider_id}"
+
+        def create_sa_task() -> str:
+            logger.info("[Thread] Creating Service Account...")
+            try:
+                result = self.api_call(
+                    "POST",
+                    f"https://{iam_base}/v1/projects/{config.project_id}/serviceAccounts",
+                    {
+                        "accountId": sa_name or config.sa_name,
+                        "serviceAccount": {"displayName": "WIF Bunker SA"},
+                    },
+                )
+                return result["email"]
+            except Exception as exc:
+                if "409" in str(exc) or "ALREADY_EXISTS" in str(exc):
+                    email = f"{sa_name or config.sa_name}@{config.project_id}.iam.gserviceaccount.com"
+                    logger.info("    SA already exists: %s", email)
+                    return email
+                raise
+
+        def create_pool_task() -> None:
+            logger.info("[Thread] Creating WIF Pool...")
+            try:
+                pool_op = self.api_call(
+                    "POST",
+                    f"https://{iam_base}/v1/projects/{project_number}"
+                    f"/locations/global/workloadIdentityPools"
+                    f"?workloadIdentityPoolId={config.pool_id}",
+                    {"displayName": "WIF Bunker Pool", "disabled": False},
+                )
+                self.wait_for_lro(iam_base, pool_op["name"])
+            except Exception as exc:
+                if "409" in str(exc) or "ALREADY_EXISTS" in str(exc):
+                    logger.info("    Pool already exists: %s", config.pool_id)
+                else:
+                    raise
+            self.wait_for_wif_resource(pool_res_url)
+
+        def create_provider_task() -> None:
+            if reuse_pool:
+                try:
+                    provs = self.api_call(
+                        "GET",
+                        f"{pool_res_url}/providers",
+                    ).get("workloadIdentityPoolProviders", [])
+                    for prov in provs:
+                        pname = prov["name"].split("/")[-1]
+                        if pname.startswith("bunker-x509-prov-") and pname != config.provider_id:
+                            logger.info("    Deleting stale provider: %s", pname)
+                            try:
+                                del_op = self.api_call("DELETE", f"{pool_res_url}/providers/{pname}")
+                                self.wait_for_lro(iam_base, del_op["name"])
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
+            cert_pin_condition = f'assertion.sha256Fingerprint == "{cert_bundle.sha256_fingerprint}"'
+            logger.info("    Cert pin condition: %s", cert_pin_condition)
+            provider_payload = {
+                "displayName": "WIF Bunker X.509 Provider",
+                "x509": {
+                    "trustStore": {
+                        "trustAnchors": [
+                            {"pemCertificate": cert_bundle.trust_anchor_pem},
+                        ],
+                    },
+                },
+                "attributeMapping": {"google.subject": "assertion.subject.dn.cn"},
+                "attributeCondition": cert_pin_condition,
+            }
+
+            if reuse_pool:
+                logger.info("[Thread] Reusing WIF pool: %s", config.pool_id)
+
+            logger.info("[Thread] Creating WIF X.509 Provider: %s", config.provider_id)
+            prov_op = self.api_call(
+                "POST",
+                f"{pool_res_url}/providers?workloadIdentityPoolProviderId={config.provider_id}",
+                provider_payload,
+            )
+            self.wait_for_lro(iam_base, prov_op["name"])
+            self.wait_for_wif_resource(provider_res_url)
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = []
+            if use_sa and not sa_email:
+                futures.append(("sa", executor.submit(create_sa_task)))
+            if not reuse_pool:
+                futures.append(("pool", executor.submit(create_pool_task)))
+            for tag, fut in futures:
+                result = fut.result()
+                if tag == "sa":
+                    sa_email = result
+
+        # Provider must be created after pool exists.
+        create_provider_task()
+
+        return sa_email, config.provider_id
+
+    def apply_iam_bindings(
+        self,
+        config: Any,
+        project_number: str,
+        workload_cn: str,
+        pool_id: str,
+        sa_email: str | None = None,
+        use_sa: bool = True,
+    ) -> None:
+        """Applies SA and project-level IAM bindings."""
+        crm_base = "cloudresourcemanager.googleapis.com"
+        iam_base = "iam.googleapis.com"
+
+        wif_principal = (
+            f"principal://iam.googleapis.com/projects/{project_number}"
+            f"/locations/global/workloadIdentityPools/{pool_id}"
+            f"/subject/{workload_cn}"
+        )
+
+        if use_sa and sa_email:
+            sa_iam_url = f"https://{iam_base}/v1/projects/{config.project_id}/serviceAccounts/{sa_email}:setIamPolicy"
+            sa_policy = self.api_call(
+                "POST",
+                sa_iam_url.replace(":setIamPolicy", ":getIamPolicy"),
+            )
+            if sa_policy is None:
+                sa_policy = {}
+            sa_policy.setdefault("bindings", []).append(
+                {"role": "roles/iam.workloadIdentityUser", "members": [wif_principal]},
+            )
+            self.api_call("POST", sa_iam_url, {"policy": sa_policy})
+
+        proj_iam_url = f"https://{crm_base}/v1/projects/{config.project_id}:setIamPolicy"
+        proj_policy = self.api_call(
+            "POST",
+            proj_iam_url.replace(":setIamPolicy", ":getIamPolicy"),
+        )
+        if proj_policy is None:
+            proj_policy = {}
+        if use_sa and sa_email:
+            proj_member = f"serviceAccount:{sa_email}"
+        else:
+            proj_member = wif_principal
+        proj_policy.setdefault("bindings", []).append(
+            {"role": "roles/browser", "members": [proj_member]},
+        )
+        self.api_call("POST", proj_iam_url, {"policy": proj_policy})

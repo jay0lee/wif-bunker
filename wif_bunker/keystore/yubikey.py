@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import secrets
 import string
+import subprocess
 import sys
 from pathlib import Path
 
@@ -74,13 +76,18 @@ def get_supported_algorithms_yubikey(serial: int | None = None) -> list[str]:
     return supported
 
 
+def yubikey_config_dir() -> Path:
+    """Return the platform-specific directory for YubiKey config files."""
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return base / "wif-bunker"
+
+
 def _yubikey_config_path(serial: int) -> Path:
     """Returns the path to the YubiKey credential configuration file."""
-    if sys.platform == "win32":
-        base = Path(os.environ.get("LOCALAPPDATA", "~")).expanduser()
-    else:
-        base = Path.home() / ".config"
-    return base / "wif-bunker" / f"yubikey_{serial}.json"
+    return yubikey_config_dir() / f"yubikey_{serial}.json"
 
 
 def generate_cert_yubikey(config: WorkloadConfig) -> CertificateBundle:
@@ -231,3 +238,107 @@ def generate_cert_yubikey(config: WorkloadConfig) -> CertificateBundle:
 
         # 9. Return CertificateBundle
         return bundle
+
+
+# --- YubiKey PKCS#11 library search paths ---
+_YUBIKEY_PKCS11_SEARCH_PATHS: dict[str, list[str]] = {
+    "linux": [
+        "/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so",
+        "/usr/lib/aarch64-linux-gnu/opensc-pkcs11.so",
+        "/usr/local/lib/opensc-pkcs11.so",
+        "/usr/lib/pkcs11/opensc-pkcs11.so",
+        "/usr/lib/x86_64-linux-gnu/libykcs11.so",
+        "/usr/lib/aarch64-linux-gnu/libykcs11.so",
+        "/usr/local/lib/libykcs11.so",
+        "/usr/lib/libykcs11.so",
+    ],
+    "darwin": [
+        "/opt/homebrew/lib/libykcs11.dylib",
+        "/usr/local/lib/libykcs11.dylib",
+    ],
+    "win32": [
+        r"C:\Program Files\Yubico\Yubico PIV Tool\bin\libykcs11.dll",
+        r"C:\Program Files (x86)\Yubico\Yubico PIV Tool\bin\libykcs11.dll",
+    ],
+}
+
+
+def find_pkcs11_library() -> str:
+    """Locate the PKCS#11 shared library for YubiKey ECP mTLS."""
+    env_path = os.environ.get("YKCS11_MODULE")
+    if env_path:
+        if Path(env_path).exists():
+            logger.info("    Using PKCS#11 library from YKCS11_MODULE: %s", env_path)
+            return env_path
+        raise FileNotFoundError(f"YKCS11_MODULE set to '{env_path}' but file does not exist.")
+
+    for platform_prefix, candidates in _YUBIKEY_PKCS11_SEARCH_PATHS.items():
+        if sys.platform.startswith(platform_prefix):
+            for candidate in candidates:
+                if Path(candidate).exists():
+                    logger.info("    Found YubiKey PKCS#11 library: %s", candidate)
+                    return candidate
+    install_hint = {
+        "linux": "sudo apt install opensc",
+        "darwin": "brew install yubico-piv-tool",
+        "win32": "Download from https://developers.yubico.com/yubico-piv-tool/",
+    }
+    hint = next((v for k, v in install_hint.items() if sys.platform.startswith(k)), "Install opensc")
+    raise FileNotFoundError(
+        f"Could not find a PKCS#11 module for YubiKey.\n"
+        f"Install it: {hint}\n"
+        f"Or specify the path with the YKCS11_MODULE environment variable."
+    )
+
+
+def build_ecp_pkcs11_config(serial: int | None, workload_cn: str) -> dict:
+    yk_module = find_pkcs11_library()
+    _is_opensc = "opensc" in yk_module.lower()
+
+    # Load PIN from stored YubiKey config.
+    yk_config_path = yubikey_config_dir() / f"yubikey_{serial or 'default'}.json"
+    yk_pin = ""
+    if yk_config_path.exists():
+        try:
+            yk_cfg = json.loads(yk_config_path.read_text(encoding="utf-8"))
+            yk_pin = yk_cfg.get("pin", "")
+        except Exception:
+            pass
+
+    # ECP uses the PKCS#11 CKA_LABEL to find the cert object.
+    if _is_opensc:
+        yk_label = "Certificate for PIV Authentication"
+    else:
+        yk_label = "X.509 Certificate for PIV Authentication"
+
+    # Discover the PKCS#11 slot ID for the target serial via pkcs11-tool.
+    yk_slot = "0"
+    try:
+        _slot_result = subprocess.run(
+            ["pkcs11-tool", "--module", yk_module, "--list-slots"],
+            capture_output=True, text=True, timeout=10,
+        )
+        _target_label = (
+            workload_cn if _is_opensc
+            else f"YubiKey PIV #{serial}"
+        )
+        _last_hex = None
+        for _line in _slot_result.stdout.splitlines():
+            _sm = re.search(r"Slot\s+\d+\s+\(0x([0-9a-fA-F]+)\)", _line)
+            if _sm:
+                _last_hex = _sm.group(1)
+            if _target_label in _line and _last_hex is not None:
+                yk_slot = _last_hex
+                break
+    except Exception:
+        pass
+
+    logger.info("    YubiKey PKCS#11 module=%s slot=0x%s label=%r", yk_module, yk_slot, yk_label)
+    return {
+        "pkcs11": {
+            "module": yk_module,
+            "slot": yk_slot,
+            "label": yk_label,
+            "user_pin": yk_pin,
+        },
+    }

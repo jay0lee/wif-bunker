@@ -203,3 +203,28 @@ def require_commands(
         raise RuntimeError(msg)
 
     return found
+
+def preflight_check_write_access(directory: Path) -> None:
+    """Verify we can write files to *directory* before starting long-running work.
+
+    Creates and immediately removes a temporary probe file.  Raises
+    ``SystemExit`` with a clear message if the directory is not writable.
+    """
+    probe = directory / ".wif-bunker-write-test"
+    try:
+        probe.write_text("probe", encoding="utf-8")
+        probe.unlink()
+    except PermissionError:
+        logger.error("")
+        logger.error("ERROR: Cannot write to the current directory.")
+        logger.error("  Directory: %s", directory)
+        logger.error("")
+        logger.error("wif-bunker needs to write configuration files (adc.json,")
+        logger.error("certificate_config.json, workload_cert.pem) to the current")
+        logger.error("directory. Please cd to a writable location first:")
+        logger.error("")
+        logger.error("  Windows:    cd %%USERPROFILE%%\\Desktop && wif-bunker ...")
+        logger.error("  macOS:      cd ~/Desktop && wif-bunker ...")
+        logger.error("  Linux:      cd ~/Desktop && wif-bunker ...")
+        logger.error("")
+        raise SystemExit(1) from None

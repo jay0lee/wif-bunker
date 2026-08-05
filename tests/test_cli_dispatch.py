@@ -7,7 +7,8 @@ from unittest.mock import patch
 
 import pytest
 
-from wif_bunker.cli import _main_impl, _preflight_check_write_access
+from wif_bunker.cli import _main_impl
+from wif_bunker.utils import preflight_check_write_access
 
 
 class TestArgumentParsing:
@@ -140,19 +141,19 @@ class TestConfigOverrides:
 
 class TestPreflightWriteAccess:
     def test_writable_dir_passes(self, tmp_path):
-        _preflight_check_write_access(tmp_path)
+        preflight_check_write_access(tmp_path)
 
     @pytest.mark.skipif(sys.platform == "win32", reason="chmod 0o444 behavior varies on Windows")
     def test_readonly_dir_exits(self, tmp_path):
         os.chmod(tmp_path, 0o444)
         try:
             with pytest.raises(SystemExit) as exc_info:
-                _preflight_check_write_access(tmp_path)
+                preflight_check_write_access(tmp_path)
             assert exc_info.value.code == 1
         finally:
             os.chmod(tmp_path, 0o755)
 
     def test_probe_file_cleaned_up(self, tmp_path):
-        _preflight_check_write_access(tmp_path)
+        preflight_check_write_access(tmp_path)
         probe = tmp_path / ".wif-bunker-write-test"
         assert not probe.exists()

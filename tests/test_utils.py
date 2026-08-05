@@ -3,8 +3,7 @@ import sys
 
 import pytest
 
-from wif_bunker.cli import _preflight_check_write_access
-from wif_bunker.utils import write_secure_file
+from wif_bunker.utils import preflight_check_write_access, write_secure_file
 
 
 @pytest.fixture
@@ -45,14 +44,14 @@ class TestWriteSecureFile:
 
 class TestPreflightWriteAccess:
     def test_writable_directory_passes(self, tmp_path):
-        _preflight_check_write_access(tmp_path)
+        preflight_check_write_access(tmp_path)
 
     @pytest.mark.skipif(sys.platform == "win32", reason="chmod not enforced on Windows")
     def test_readonly_directory_exits(self, readonly_dir):
         with pytest.raises(SystemExit):
-            _preflight_check_write_access(readonly_dir)
+            preflight_check_write_access(readonly_dir)
 
     def test_probe_file_cleaned_up(self, tmp_path):
-        _preflight_check_write_access(tmp_path)
+        preflight_check_write_access(tmp_path)
         probe = tmp_path / ".wif-bunker-write-test"
         assert not probe.exists()

@@ -3,26 +3,26 @@
 from __future__ import annotations
 
 import argparse
-import concurrent.futures
 import ctypes
-import json
 import logging
 import os
-import re
-import subprocess
 import sys
 import time
 from pathlib import Path
 
 import google.auth
 import requests
-from cryptography import x509 as cx509
 from google.auth.exceptions import OAuthError, RefreshError
 from google.auth.transport.requests import AuthorizedSession
 
 from get_ecp import get_ecp_platform_info
 from wif_bunker import __version__
-from wif_bunker.cert import _find_ecp_binaries
+from wif_bunker.cert import (
+    _find_ecp_binaries,
+    build_adc_config,
+    build_certificate_config,
+    verify_ecp_cert_retrieval,
+)
 from wif_bunker.config import (
     _CONFIG_FILES,
     _DEFAULT_CERT_LIFETIME_DAYS,
@@ -37,94 +37,11 @@ from wif_bunker.utils import (
     SYM_FAIL,
     SYM_OK,
     _CleanFormatter,
+    preflight_check_write_access,
     with_retries,
-    write_secure_file,
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _preflight_check_write_access(directory: Path) -> None:
-    """Verify we can write files to *directory* before starting long-running work.
-
-    Creates and immediately removes a temporary probe file.  Raises
-    ``SystemExit`` with a clear message if the directory is not writable.
-    """
-    probe = directory / ".wif-bunker-write-test"
-    try:
-        probe.write_text("probe", encoding="utf-8")
-        probe.unlink()
-    except PermissionError:
-        logger.error("")
-        logger.error("ERROR: Cannot write to the current directory.")
-        logger.error("  Directory: %s", directory)
-        logger.error("")
-        logger.error("wif-bunker needs to write configuration files (adc.json,")
-        logger.error("certificate_config.json, workload_cert.pem) to the current")
-        logger.error("directory. Please cd to a writable location first:")
-        logger.error("")
-        logger.error("  Windows:    cd %%USERPROFILE%%\\Desktop && wif-bunker ...")
-        logger.error("  macOS:      cd ~/Desktop && wif-bunker ...")
-        logger.error("  Linux:      cd ~/Desktop && wif-bunker ...")
-        logger.error("")
-        raise SystemExit(1) from None
-
-
-# --- YubiKey ykcs11 library search paths ---
-_YKCS11_SEARCH_PATHS: dict[str, list[str]] = {
-    "linux": [
-        "/usr/lib/x86_64-linux-gnu/libykcs11.so",
-        "/usr/lib/aarch64-linux-gnu/libykcs11.so",
-        "/usr/local/lib/libykcs11.so",
-        "/usr/lib/libykcs11.so",
-    ],
-    "darwin": [
-        "/opt/homebrew/lib/libykcs11.dylib",
-        "/usr/local/lib/libykcs11.dylib",
-    ],
-    "win32": [
-        r"C:\Program Files\Yubico\Yubico PIV Tool\bin\libykcs11.dll",
-        r"C:\Program Files (x86)\Yubico\Yubico PIV Tool\bin\libykcs11.dll",
-    ],
-}
-
-
-def _find_ykcs11_library() -> str:
-    """Locate the ykcs11 PKCS#11 shared library for ECP mTLS."""
-    # Allow explicit override via environment variable
-    env_path = os.environ.get("YKCS11_MODULE")
-    if env_path:
-        if Path(env_path).exists():
-            logger.info("    Using ykcs11 library from YKCS11_MODULE: %s", env_path)
-            return env_path
-        raise FileNotFoundError(f"YKCS11_MODULE set to '{env_path}' but file does not exist.")
-
-    for platform_prefix, candidates in _YKCS11_SEARCH_PATHS.items():
-        if sys.platform.startswith(platform_prefix):
-            for candidate in candidates:
-                if Path(candidate).exists():
-                    logger.info("    Found ykcs11 library: %s", candidate)
-                    return candidate
-    install_hint = {
-        "linux": "sudo apt install yubico-piv-tool",
-        "darwin": "brew install yubico-piv-tool",
-        "win32": "Download from https://developers.yubico.com/yubico-piv-tool/",
-    }
-    hint = next((v for k, v in install_hint.items() if sys.platform.startswith(k)), "Install yubico-piv-tool")
-    raise FileNotFoundError(
-        f"Could not find libykcs11 (YubiKey PKCS#11 module).\n"
-        f"Install it: {hint}\n"
-        f"Or specify the path with the YKCS11_MODULE environment variable."
-    )
-
-
-def _yubikey_config_dir() -> Path:
-    """Return the platform-specific directory for YubiKey config files."""
-    if sys.platform == "win32":
-        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-    else:
-        base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-    return base / "wif-bunker"
 
 
 def _main_impl() -> None:
@@ -416,61 +333,27 @@ def _main_impl() -> None:
     # Pre-flight: verify we can write to CWD before doing any GCP work.
     # This catches running from protected directories (e.g. C:\) early,
     # instead of failing 10+ minutes into the setup.
-    _preflight_check_write_access(Path.cwd())
+    preflight_check_write_access(Path.cwd())
 
     with GCPClient(
         use_adc=args.use_adc,
         client_secrets_file=args.client_secrets_file,
     ) as client:
-        crm_base = "cloudresourcemanager.googleapis.com"
-        su_base = "serviceusage.googleapis.com"
-        iam_base = "iam.googleapis.com"
-
         # --- Step 1: Create GCP Project (or reuse) ---
         if args.use_project:
             logger.info("=== 1) Using existing project: %s ===", config.project_id)
-            project_number = client.api_call(
-                "GET",
-                f"https://{crm_base}/v1/projects/{config.project_id}",
-            )["projectNumber"]
+            project_number = client.ensure_project(config.project_id)
             logger.info("    Project number: %s", project_number)
         else:
             logger.info("=== 1) Creating GCP Project (%s) ===", config.project_id)
-            create_payload = {
-                "projectId": config.project_id,
-                "name": "WIF Bunker",
-            }
-            if args.folder:
-                create_payload["parent"] = {
-                    "type": "folder",
-                    "id": args.folder,
-                }
-                logger.info("    Parent folder: %s", args.folder)
-            operation = client.api_call(
-                "POST",
-                f"https://{crm_base}/v1/projects",
-                create_payload,
-            )
-            client.wait_for_lro(crm_base, operation["name"])
-            project_number = client.api_call(
-                "GET",
-                f"https://{crm_base}/v1/projects/{config.project_id}",
-            )["projectNumber"]
+            project_number = client.ensure_project(config.project_id, folder=args.folder)
 
             # --- Step 2: Enable APIs ---
             logger.info("=== 2) Configuring APIs ===")
-            required_apis = [
-                "iam.googleapis.com",
-                "sts.googleapis.com",
-                "iamcredentials.googleapis.com",
-                "cloudresourcemanager.googleapis.com",
-            ]
-            operation = client.api_call(
-                "POST",
-                f"https://{su_base}/v1/projects/{project_number}/services:batchEnable",
-                {"serviceIds": required_apis},
-            )
-            client.wait_for_lro(su_base, operation["name"])
+            client.enable_apis(project_number, [
+                "iam.googleapis.com", "sts.googleapis.com",
+                "iamcredentials.googleapis.com", "cloudresourcemanager.googleapis.com",
+            ])
 
         # --- Step 3: Generate Hardware-Backed Certificate ---
         logger.info("=== 3) Generating Hardware-Backed Certificate ===")
@@ -484,152 +367,26 @@ def _main_impl() -> None:
         reuse_pool = bool(args.use_pool)
 
         logger.info("=== 4) Initializing SA & WIF Infrastructure ===")
-
-        pool_res_url = (
-            f"https://{iam_base}/v1/projects/{project_number}/locations/global/workloadIdentityPools/{config.pool_id}"
+        sa_email, _ = client.setup_wif_infrastructure(
+            config=config,
+            project_number=project_number,
+            cert_bundle=cert_bundle,
+            reuse_pool=reuse_pool,
+            use_sa=use_sa,
+            sa_email=sa_email,
+            sa_name=config.sa_name if args.create_service_account else None,
         )
-        provider_res_url = f"{pool_res_url}/providers/{config.provider_id}"
-
-        def create_sa_task() -> str:
-            logger.info("[Thread] Creating Service Account...")
-            try:
-                result = client.api_call(
-                    "POST",
-                    f"https://{iam_base}/v1/projects/{config.project_id}/serviceAccounts",
-                    {
-                        "accountId": config.sa_name,
-                        "serviceAccount": {"displayName": "WIF Bunker SA"},
-                    },
-                )
-                return result["email"]
-            except Exception as exc:
-                if "409" in str(exc) or "ALREADY_EXISTS" in str(exc):
-                    email = f"{config.sa_name}@{config.project_id}.iam.gserviceaccount.com"
-                    logger.info("    SA already exists: %s", email)
-                    return email
-                raise
-
-        def create_pool_task() -> None:
-            logger.info("[Thread] Creating WIF Pool...")
-            try:
-                pool_op = client.api_call(
-                    "POST",
-                    f"https://{iam_base}/v1/projects/{project_number}"
-                    f"/locations/global/workloadIdentityPools"
-                    f"?workloadIdentityPoolId={config.pool_id}",
-                    {"displayName": "WIF Bunker Pool", "disabled": False},
-                )
-                client.wait_for_lro(iam_base, pool_op["name"])
-            except Exception as exc:
-                if "409" in str(exc) or "ALREADY_EXISTS" in str(exc):
-                    logger.info("    Pool already exists: %s", config.pool_id)
-                else:
-                    raise
-            client.wait_for_wif_resource(pool_res_url)
-
-        def create_provider_task() -> None:
-            # Clean up stale providers from previous runs to avoid
-            # hitting the 200-provider-per-pool limit.
-            if reuse_pool:
-                try:
-                    provs = client.api_call(
-                        "GET",
-                        f"{pool_res_url}/providers",
-                    ).get("workloadIdentityPoolProviders", [])
-                    for prov in provs:
-                        pname = prov["name"].split("/")[-1]
-                        if pname.startswith("bunker-x509-prov-") and pname != config.provider_id:
-                            logger.info("    Deleting stale provider: %s", pname)
-                            try:
-                                del_op = client.api_call("DELETE", f"{pool_res_url}/providers/{pname}")
-                                client.wait_for_lro(iam_base, del_op["name"])
-                            except Exception:
-                                pass
-                except Exception:
-                    pass  # List failed — not critical
-
-            # Create X.509 provider with CA cert as trust anchor.
-            # attributeCondition pins the provider to the EXACT leaf cert
-            # via SHA-256 fingerprint.  The fingerprint covers the entire
-            # DER-encoded cert (subject, key, serial, etc.) so even a
-            # compromised CA key cannot produce a second accepted cert.
-            cert_pin_condition = f'assertion.sha256Fingerprint == "{cert_bundle.sha256_fingerprint}"'
-            logger.info("    Cert pin condition: %s", cert_pin_condition)
-            provider_payload = {
-                "displayName": "WIF Bunker X.509 Provider",
-                "x509": {
-                    "trustStore": {
-                        "trustAnchors": [
-                            {"pemCertificate": cert_bundle.trust_anchor_pem},
-                        ],
-                    },
-                },
-                "attributeMapping": {"google.subject": "assertion.subject.dn.cn"},
-                "attributeCondition": cert_pin_condition,
-            }
-
-            if reuse_pool:
-                logger.info("[Thread] Reusing WIF pool: %s", config.pool_id)
-
-            logger.info("[Thread] Creating WIF X.509 Provider: %s", config.provider_id)
-            prov_op = client.api_call(
-                "POST",
-                f"{pool_res_url}/providers?workloadIdentityPoolProviderId={config.provider_id}",
-                provider_payload,
-            )
-            client.wait_for_lro(iam_base, prov_op["name"])
-            client.wait_for_wif_resource(provider_res_url)
-
-        # Submit needed tasks in parallel.
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = []
-            if use_sa and not sa_email:
-                futures.append(("sa", executor.submit(create_sa_task)))
-            if not reuse_pool:
-                futures.append(("pool", executor.submit(create_pool_task)))
-            for tag, fut in futures:
-                result = fut.result()
-                if tag == "sa":
-                    sa_email = result
-
-        # Provider must be created after pool exists.
-        create_provider_task()
 
         # --- Step 5: IAM Bindings ---
         logger.info("=== 5) Applying IAM Bindings ===")
-        wif_principal = (
-            f"principal://iam.googleapis.com/projects/{project_number}"
-            f"/locations/global/workloadIdentityPools/{config.pool_id}"
-            f"/subject/{config.workload_cn}"
+        client.apply_iam_bindings(
+            config=config,
+            project_number=project_number,
+            workload_cn=config.workload_cn,
+            pool_id=config.pool_id,
+            sa_email=sa_email,
+            use_sa=use_sa,
         )
-
-        if use_sa:
-            # SA-level binding: allow WIF principal to impersonate the SA.
-            sa_iam_url = f"https://{iam_base}/v1/projects/{config.project_id}/serviceAccounts/{sa_email}:setIamPolicy"
-            sa_policy = client.api_call(
-                "POST",
-                sa_iam_url.replace(":setIamPolicy", ":getIamPolicy"),
-            )
-            sa_policy.setdefault("bindings", []).append(
-                {"role": "roles/iam.workloadIdentityUser", "members": [wif_principal]},
-            )
-            client.api_call("POST", sa_iam_url, {"policy": sa_policy})
-
-        # Project-level binding: grant to SA (impersonation mode) or
-        # directly to the WIF principal (no-SA mode).
-        proj_iam_url = f"https://{crm_base}/v1/projects/{config.project_id}:setIamPolicy"
-        proj_policy = client.api_call(
-            "POST",
-            proj_iam_url.replace(":setIamPolicy", ":getIamPolicy"),
-        )
-        if use_sa:
-            proj_member = f"serviceAccount:{sa_email}"
-        else:
-            proj_member = wif_principal
-        proj_policy.setdefault("bindings", []).append(
-            {"role": "roles/browser", "members": [proj_member]},
-        )
-        client.api_call("POST", proj_iam_url, {"policy": proj_policy})
 
         # --- Step 6: ECP & ADC Config Generation ---
         logger.info("=== 6) Generating ECP Certificate Config & ADC ===")
@@ -653,167 +410,15 @@ def _main_impl() -> None:
         # to find the C-shared libraries that perform hardware-backed signing.
         # The "cert_configs" section tells ECP which keystore + issuer to use
         # when locating the client certificate for the mTLS handshake.
-        if config.use_yubikey:
-            # YubiKey uses libykcs11 for PKCS#11 on all platforms.
-            ykcs11_module = _find_ykcs11_library()
-            # Load PIN from stored YubiKey config.
-            yk_config_path = _yubikey_config_dir() / f"yubikey_{config.yubikey_serial or 'default'}.json"
-            yk_pin = ""
-            if yk_config_path.exists():
-                try:
-                    yk_cfg = json.loads(yk_config_path.read_text())
-                    yk_pin = yk_cfg.get("pin", "")
-                except Exception:
-                    pass
-            # libykcs11 token labels are "YubiKey PIV #<serial>" and PKCS#11
-            # slot indices correspond to the order ykman enumerates devices.
-            # Determine the slot index for the target serial.
-            yk_slot = "0"
-            yk_label = "YubiKey PIV #" + str(config.yubikey_serial or "")
-            try:
-                from ykman.device import list_all_devices as _yk_list
-                for idx, (_, info) in enumerate(_yk_list()):
-                    if info.serial == config.yubikey_serial:
-                        yk_slot = str(idx)
-                        break
-            except Exception:
-                pass
-            cert_configs: dict = {
-                "pkcs11": {
-                    "module": ykcs11_module,
-                    "slot": yk_slot,
-                    "label": yk_label,
-                    "user_pin": yk_pin,
-                },
-            }
-        elif sys.platform == "win32":
-            cert_configs = {
-                "windows_store": {
-                    "store": "MY",
-                    "provider": "current_user",
-                    "issuer": cert_bundle.issuer_cn,
-                },
-            }
-        elif sys.platform == "darwin":
-            cert_configs = {
-                "macos_keychain": {
-                    "issuer": cert_bundle.issuer_cn,
-                },
-            }
-        else:
-            # Find the PKCS#11 module path dynamically.
-            pkcs11_module = None
-            for candidate in [
-                "/usr/lib/x86_64-linux-gnu/pkcs11/libtpm2_pkcs11.so",
-                "/usr/lib/aarch64-linux-gnu/pkcs11/libtpm2_pkcs11.so",
-                "/usr/lib/x86_64-linux-gnu/libtpm2_pkcs11.so.1",
-                "/usr/lib/aarch64-linux-gnu/libtpm2_pkcs11.so.1",
-                "/usr/lib/pkcs11/libtpm2_pkcs11.so",
-            ]:
-                if Path(candidate).exists():
-                    pkcs11_module = candidate
-                    break
-            if not pkcs11_module:
-                raise FileNotFoundError("Could not find libtpm2_pkcs11.so. Install libtpm2-pkcs11-1.")
-
-            # Discover the PKCS#11 slot ID for our token.
-            # ECP requires a numeric slot — doesn't support token_label.
-            slot_id = None
-            try:
-                slot_result = subprocess.run(
-                    ["pkcs11-tool", "--module", pkcs11_module, "--list-token-slots"],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                )
-                logger.debug("    pkcs11-tool slots:\n%s", slot_result.stdout)
-                # Parse output like:
-                #   Slot 0 (0x1): bunker-wif
-                #     token label : bunker-wif
-                # The label may appear on the Slot line itself.
-
-                last_slot_hex = None
-                for line in slot_result.stdout.splitlines():
-                    slot_match = re.search(r"Slot\s+\d+\s+\(0x([0-9a-fA-F]+)\)", line)
-                    if slot_match:
-                        last_slot_hex = slot_match.group(1)
-                    if "bunker-wif" in line and last_slot_hex:
-                        slot_id = last_slot_hex
-                        break
-            except Exception as exc:
-                logger.debug("    pkcs11-tool slot discovery failed: %s", exc)
-
-            # Fallback: try slot 1 (slot 0 is typically p11-kit trust)
-            if slot_id is None:
-                slot_id = "1"
-                logger.warning("    Could not discover PKCS#11 slot ID, defaulting to slot %s", slot_id)
-
-            logger.info("    Using PKCS#11 slot: 0x%s", slot_id)
-
-            cert_configs = {
-                "pkcs11": {
-                    "module": pkcs11_module,
-                    "slot": slot_id,
-                    "label": config.workload_cn,
-                    "user_pin": config.linux_tpm_pin,
-                },
-            }
-
-        # Write PEM files to disk.
-        workload_cert_path = Path.cwd() / "workload_cert.pem"
-        trust_chain_path = Path.cwd() / "trust_chain.pem"
-        write_secure_file(workload_cert_path, cert_bundle.workload_cert_pem)
-        write_secure_file(trust_chain_path, cert_bundle.trust_anchor_pem)
-        logger.info("    Workload cert PEM written: %s", workload_cert_path)
-        logger.info("    Trust chain PEM written:   %s", trust_chain_path)
-
-        # The "workload" section provides cert_path only (no key_path)
-        # because the private key is in the Secure Enclave / TPM.
-        # - cert_path: google-auth reads this for the STS subject token
-        # - key_path absent: the forked google-auth (jay0lee) tolerates
-        #   missing key_path and skips cert=(cert, key) injection
-        # - ECP handles mTLS signing via configure_mtls_channel()
-        cert_configs["workload"] = {"cert_path": str(workload_cert_path)}
-        certificate_config = {
-            "version": 1,
-            "cert_configs": cert_configs,
-            "libs": {
-                "ecp": str(ecp_binary),
-                "ecp_client": str(ecp_client_lib),
-                "tls_offload": str(tls_offload_lib),
-            },
-        }
-        cert_config_path = Path.cwd() / "certificate_config.json"
-        write_secure_file(
-            cert_config_path,
-            json.dumps(certificate_config, indent=2),
+        _certificate_config, cert_config_path, _workload_cert_path, trust_chain_path = build_certificate_config(
+            config, cert_bundle, ecp_binary, ecp_client_lib, tls_offload_lib
         )
-        logger.info("    ECP certificate_config.json written: %s", cert_config_path)
 
         # ADC config — points google-auth at the STS mTLS endpoint and
         # references the ECP certificate config for the mTLS channel.
-        adc_config = {
-            "type": "external_account",
-            "audience": (
-                f"//iam.googleapis.com/projects/{project_number}"
-                f"/locations/global/workloadIdentityPools/{config.pool_id}"
-                f"/providers/{config.provider_id}"
-            ),
-            "subject_token_type": "urn:ietf:params:oauth:token-type:mtls",
-            "token_url": "https://sts.mtls.googleapis.com/v1/token",
-            "credential_source": {
-                "certificate": {
-                    "use_default_certificate_config": "true",
-                    "trust_chain_path": str(trust_chain_path),
-                },
-            },
-        }
-        if use_sa:
-            adc_config["service_account_impersonation_url"] = (
-                f"https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/{sa_email}:generateAccessToken"
-            )
-        adc_path = Path.cwd() / "adc.json"
-        write_secure_file(adc_path, json.dumps(adc_config, indent=2))
+        _adc_config, adc_path = build_adc_config(
+            config, project_number, cert_config_path, trust_chain_path, sa_email, use_sa
+        )
 
         logger.info("=" * 70)
         logger.info("ECP & ADC Configuration Complete!")
@@ -848,61 +453,6 @@ def _main_impl() -> None:
 
         # --- Step 7: Full ADC Auth Flow Demo (ECP-backed mTLS) ---
 
-        def _run_ecp_diagnostics(config_path, log):
-            """Deep ECP diagnostics (only called with --debug when cert_len=0)."""
-            log.warning("    Running ECP diagnostics (--debug)...")
-            try:
-                with open(config_path, encoding="utf-8") as cfg_file:
-                    _cfg_text = cfg_file.read()
-                log.warning("    certificate_config.json:\n%s", _cfg_text)
-            except Exception as read_exc:
-                log.warning("    Could not read config: %s", read_exc)
-                return
-
-            # Check if ECP signer binary has Secure Enclave support
-            try:
-                _ecp_bin = Path(json.loads(_cfg_text)["libs"]["ecp"])
-                if _ecp_bin.exists():
-                    _bin_data = _ecp_bin.read_bytes()
-                    log.warning("    ECP binary: %s (%d KB)", _ecp_bin, len(_bin_data) // 1024)
-                    if sys.platform == "darwin":
-                        log.warning(
-                            "    Contains SecCertificateCopyData (patched): %s", b"SecCertificateCopyData" in _bin_data
-                        )
-                        log.warning("    Contains SecItemExport (unpatched): %s", b"SecItemExport" in _bin_data)
-                else:
-                    log.warning("    ECP binary NOT FOUND: %s", _ecp_bin)
-            except Exception as _e:
-                log.warning("    Binary check error: %s", _e)
-
-            # Run signer binary directly to capture its stderr
-            try:
-                _ecp_bin_path = str(Path(json.loads(_cfg_text)["libs"]["ecp"]))
-                _result = subprocess.run(
-                    [_ecp_bin_path, str(config_path)],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                )
-                log.warning("    ECP signer stderr: %s", _result.stderr[:500] if _result.stderr else "(empty)")
-            except subprocess.TimeoutExpired:
-                log.warning("    ECP signer listening for RPC (OK)")
-            except Exception as _e:
-                log.warning("    ECP signer error: %s", _e)
-
-            # Check keychain identities (macOS)
-            if sys.platform == "darwin":
-                try:
-                    _id_result = subprocess.run(
-                        ["security", "find-identity", "-v", "-p", "ssl-client"],
-                        capture_output=True,
-                        text=True,
-                        timeout=5,
-                    )
-                    log.warning("    Keychain SSL-client identities:\n%s", _id_result.stdout)
-                except Exception as _e:
-                    log.warning("    find-identity error: %s", _e)
-
         # Set environment so google-auth discovers our configs.
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(adc_path)
         os.environ["GOOGLE_API_USE_CLIENT_CERTIFICATE"] = "true"
@@ -925,53 +475,8 @@ def _main_impl() -> None:
         logger.info("=== 7a) ECP Certificate Retrieval ===")
 
         try:
-            _ecp_lib = ctypes.CDLL(str(ecp_client_lib))
-            _ecp_lib.GetCertPemForPython.argtypes = [
-                ctypes.c_char_p,
-                ctypes.c_char_p,
-                ctypes.c_int,
-            ]
-            _ecp_lib.GetCertPemForPython.restype = ctypes.c_int
-
-            # First call with buf=NULL to get required size.
-            _cert_len = _ecp_lib.GetCertPemForPython(
-                str(cert_config_path).encode(),
-                None,
-                0,
-            )
-            if _cert_len <= 0:
-                logger.error("    FAIL: ECP returned cert_len=%d", _cert_len)
-                if args.debug:
-                    _run_ecp_diagnostics(cert_config_path, logger)
-                raise RuntimeError("ECP cert retrieval failed (cert_len=0)")
-
-            # Second call to retrieve the actual PEM.
-            _cert_buf = ctypes.create_string_buffer(_cert_len + 1)
-            _ecp_lib.GetCertPemForPython(
-                str(cert_config_path).encode(),
-                _cert_buf,
-                _cert_len + 1,
-            )
-            _cert_pem_bytes = _cert_buf.value
-            _cert_pem = _cert_pem_bytes.decode("utf-8", errors="replace")
-            logger.info("    PASS: ECP returned %d bytes of cert PEM", _cert_len)
-
-            # Parse and show cert details.
-            try:
-                _parsed = cx509.load_pem_x509_certificate(_cert_pem_bytes)
-                _pub_key = _parsed.public_key()
-                _key_type = type(_pub_key).__name__
-                logger.info("    Cert subject:   %s", _parsed.subject)
-                logger.info("    Cert issuer:    %s", _parsed.issuer)
-                logger.info("    Key algorithm:  %s", _key_type)
-                logger.info("    Cert serial:    %s", format(_parsed.serial_number, "X"))
-            except Exception as _parse_err:
-                logger.warning("    Could not parse cert: %s", _parse_err)
-
-            logger.debug("    ECP cert PEM:\n%s", _cert_pem)
-
-        except Exception:
-            logger.exception("ECP cert retrieval failed")
+            verify_ecp_cert_retrieval(cert_config_path, ecp_client_lib, debug=args.debug)
+        except RuntimeError:
             sys.exit(1)
 
         # ── ADC Verification (always runs) ──
@@ -995,7 +500,7 @@ def _main_impl() -> None:
                 authed_session = AuthorizedSession(adc_creds)
                 authed_session.configure_mtls_offload_channel(str(cert_config_path))
                 target_api_res = authed_session.get(
-                    f"https://{crm_base}/v1/projects/{config.project_id}",
+                    f"https://cloudresourcemanager.googleapis.com/v1/projects/{config.project_id}",
                 )
                 target_api_res.raise_for_status()
                 return target_api_res.json()

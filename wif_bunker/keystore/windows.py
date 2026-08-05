@@ -7,10 +7,7 @@ and imports certificates via PowerShell CNG classes.
 from __future__ import annotations
 
 import logging
-import os
 import subprocess
-import sys
-from pathlib import Path
 
 from cryptography import x509 as cx509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -168,62 +165,4 @@ def _generate_cert_windows(config: WorkloadConfig) -> CertificateBundle:
             ncrypt.free_object(key_handle)
 
 
-def _find_ecp_binaries() -> tuple[Path, Path, Path]:
-    """Locates pre-installed ECP binaries.
 
-    Search order:
-      1. Bundled alongside the wif-bunker binary (<binary_dir>/ecp/)
-      2. Default platform location (~/.config/bunker-ecp or %LOCALAPPDATA%\\Google\\ECP)
-
-    Returns:
-        (ecp_binary, ecp_client_lib, tls_offload_lib) paths.
-
-    Raises:
-        FileNotFoundError: if ECP binaries are not found in any location.
-    """
-    from get_ecp import get_default_ecp_dir, get_ecp_binary_names  # pylint: disable=import-outside-toplevel
-
-    ecp_bin_name, libecp_name, tls_offload_name = get_ecp_binary_names()
-
-    # Determine the directory containing the wif-bunker binary.
-    if getattr(sys, "frozen", False):
-        binary_dir = Path(sys.executable).parent
-    else:
-        binary_dir = Path(__file__).parent
-
-    # Search locations in priority order.
-    search_dirs = [
-        binary_dir / "ecp",  # Bundled alongside binary
-        get_default_ecp_dir(),  # Platform default
-    ]
-
-    for ecp_dir in search_dirs:
-        ecp_bin = ecp_dir / ecp_bin_name
-        client = ecp_dir / libecp_name
-        offload = ecp_dir / tls_offload_name
-        if ecp_bin.exists() and client.exists() and offload.exists():
-            logger.info("    Using ECP binaries from %s", ecp_dir)
-            _add_ecp_to_path(ecp_dir)
-            return ecp_bin, client, offload
-
-    raise FileNotFoundError(
-        "ECP binaries not found. Install them with:\n"
-        "    python get_ecp.py\n"
-        "\n"
-        f"Searched: {[str(d) for d in search_dirs]}"
-    )
-
-
-def _add_ecp_to_path(ecp_dir: Path) -> None:
-    """Ensures the ECP binary directory is discoverable for DLL loading."""
-    ecp_dir_str = str(ecp_dir)
-
-    # os.add_dll_directory() is the ONLY mechanism that works on
-    # Python 3.8+ for DLL dependency resolution on Windows.
-    if sys.platform == "win32" and ecp_dir.is_dir():
-        os.add_dll_directory(ecp_dir_str)
-
-    # Also add to PATH for the current process.
-    current_path = os.environ.get("PATH", "")
-    if ecp_dir_str not in current_path:
-        os.environ["PATH"] = ecp_dir_str + os.pathsep + current_path
