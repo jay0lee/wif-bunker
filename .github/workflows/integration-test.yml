@@ -465,7 +465,7 @@ jobs:
               assert passed == total, (
                   f'Hardware attestation regression: {passed}/{total} checks passed, expected {total}/{total}'
               )
-              print(f'  ✓ All {total} attestation checks passed ({r["hardware_type"]})')
+              print(f'  \u2713 All {total} attestation checks passed ({r[\"hardware_type\"]})')
           " "$attestdir"
 
           rm -rf "$certdir" "$attestdir"
