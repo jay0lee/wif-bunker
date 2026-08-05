@@ -148,31 +148,42 @@ def _print_attestation_chain(report: AttestationReport) -> None:
     tpm = report.tpm_info or {}
     wk_name = report.workload_cn or "workload"
 
-    # Build TPM manufacturer string
-    tpm_mfr = tpm.get("manufacturer", "")
-    if not tpm_mfr:
-        mfr_id = tpm.get("ManufacturerId", 0)
-        try:
-            from wif_bunker.attestation.base import _decode_manufacturer_id  # pylint: disable=import-outside-toplevel
-            tpm_mfr = _decode_manufacturer_id(mfr_id) if mfr_id else ""
-        except ImportError:
-            tpm_mfr = ""
-    fw = tpm.get("firmware", "") or tpm.get("ManufacturerVersion", "")
-    tpm_desc = tpm_mfr or "TPM 2.0"
-    if fw:
-        tpm_desc += f" (FW {fw})"
+    is_yubikey = report.platform == "yubikey"
 
-    # Platform-specific attestation mechanism
-    if report.platform == "linux-tpm2":
-        certify_method = "tpm2_certify"
+    if is_yubikey:
+        # YubiKey attestation chain: Workload Key → Attestation Key → Yubico Root CA
+        fw = tpm.get("firmware", "")
+        yk_desc = f"YubiKey (FW {fw})" if fw else "YubiKey"
+
+        certify_method = "YubiKey PIV attestation"
+        ak_label = "Attestation Key"
     else:
-        certify_method = "NCryptCreateClaim"
+        # TPM attestation chain: Workload Key → EK → TPM manufacturer Root CA
+        tpm_mfr = tpm.get("manufacturer", "")
+        if not tpm_mfr:
+            mfr_id = tpm.get("ManufacturerId", 0)
+            try:
+                from wif_bunker.attestation.base import (
+                    _decode_manufacturer_id,  # pylint: disable=import-outside-toplevel
+                )
+                tpm_mfr = _decode_manufacturer_id(mfr_id) if mfr_id else ""
+            except ImportError:
+                tpm_mfr = ""
+        fw = tpm.get("firmware", "") or tpm.get("ManufacturerVersion", "")
+        yk_desc = tpm_mfr or "TPM 2.0"
+        if fw:
+            yk_desc += f" (FW {fw})"
 
-    # Extract EK issuer — try to pull just the OU for a compact display
+        if report.platform == "linux-tpm2":
+            certify_method = "tpm2_certify"
+        else:
+            certify_method = "NCryptCreateClaim"
+        ak_label = "Endorsement Key (EK)"
+
+    # Extract issuer — try to pull just the OU for a compact display
     ek_issuer_full = ek.get("issuer", "")
     ek_issuer_short = ek_issuer_full
     if "OU=" in ek_issuer_full:
-        # Pull the OU value for a cleaner display
         import re  # pylint: disable=import-outside-toplevel
         m = re.search(r"OU=([^,]+)", ek_issuer_full)
         if m:
@@ -182,12 +193,12 @@ def _print_attestation_chain(report: AttestationReport) -> None:
     logger.info("")
     logger.info("  %s  Workload Key: %s", _SYM_OK, wk_name)
     logger.info("       └─ certified by %s", certify_method)
-    logger.info("  %s  Endorsement Key (EK): %s", _SYM_OK, tpm_desc)
+    logger.info("  %s  %s: %s", _SYM_OK, ak_label, yk_desc)
     if ek_issuer_short and ek_issuer_short != "unknown":
         logger.info("       └─ signed by: %s", ek_issuer_short)
         # If we can infer the root from the issuer
         if "root" not in ek_issuer_short.lower():
-            # The intermediate's issuer is the root — we can extract from ek_issuer_full
+            import re  # pylint: disable=import-outside-toplevel
             root_ou = ""
             if "O=" in ek_issuer_full:
                 m = re.search(r"O=([^,]+)", ek_issuer_full)
@@ -199,17 +210,21 @@ def _print_attestation_chain(report: AttestationReport) -> None:
                 logger.info("  %s  Root CA: verified", _SYM_OK)
         else:
             logger.info("  %s  Root CA: %s", _SYM_OK, ek_issuer_short)
+    elif is_yubikey:
+        logger.info("       └─ signed by Yubico Root CA")
     else:
         logger.info("       └─ no EK certificate (software TPM)")
 
-    # Platform cert note
-    pi = report.platform_info
-    if not pi or not pi.get("manufacturer"):
-        logger.info("")
-        logger.info("  (i) Platform Certificate not found at TPM NV 0x01C08000")
-        logger.info("     (OEM binding unavailable — common on business PCs)")
+    # Platform cert note (TPM only — YubiKeys don't have NV storage)
+    if not is_yubikey:
+        pi = report.platform_info
+        if not pi or not pi.get("manufacturer"):
+            logger.info("")
+            logger.info("  (i) Platform Certificate not found at TPM NV 0x01C08000")
+            logger.info("     (OEM binding unavailable — common on business PCs)")
 
     logger.info("")
+
 
 
 def _format_text_report(report: AttestationReport) -> str:

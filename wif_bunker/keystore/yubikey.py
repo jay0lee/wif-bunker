@@ -167,7 +167,7 @@ def generate_cert_yubikey(config: WorkloadConfig) -> CertificateBundle:
             piv.authenticate(DEFAULT_MANAGEMENT_KEY)
             is_default = True
         except Exception:
-            pass
+            logger.debug("YubiKey management key is not default", exc_info=True)
 
         cfg_path = _yubikey_config_path(target_info.serial)
 
@@ -303,7 +303,7 @@ def build_ecp_pkcs11_config(serial: int | None, workload_cn: str) -> dict:
             yk_cfg = json.loads(yk_config_path.read_text(encoding="utf-8"))
             yk_pin = yk_cfg.get("pin", "")
         except Exception:
-            pass
+            logger.debug("Failed to read YubiKey config file", exc_info=True)
 
     # ECP uses the PKCS#11 CKA_LABEL to find the cert object.
     if _is_opensc:
@@ -331,7 +331,7 @@ def build_ecp_pkcs11_config(serial: int | None, workload_cn: str) -> dict:
                 yk_slot = _last_hex
                 break
     except Exception:
-        pass
+        logger.debug("Failed to discover PKCS#11 slot ID", exc_info=True)
 
     logger.info("    YubiKey PKCS#11 module=%s slot=0x%s label=%r", yk_module, yk_slot, yk_label)
     return {

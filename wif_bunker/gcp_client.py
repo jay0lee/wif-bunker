@@ -75,6 +75,7 @@ class GCPClient:
                     ).json()
                     identity = info.get("email", "unknown")
                 except Exception:
+                    logger.debug("Failed to get email from ADC token", exc_info=True)
                     identity = "unknown"
             logger.info("Authenticated via Application Default Credentials as: %s", identity)
         else:
@@ -183,7 +184,7 @@ class GCPClient:
         try:
             webbrowser.open(auth_url)
         except Exception:
-            pass  # User will use the printed URL.
+            logger.debug("Failed to open web browser", exc_info=True)
 
         # Wait for the auth code from either source:
         #   1. Local server catches the redirect automatically
@@ -330,8 +331,8 @@ class GCPClient:
                 f"https://{crm_base}/v1/projects/{project_id}",
             )["projectNumber"]
             return project_number
-        except Exception as exc:
-            if "403" in str(exc) or "404" in str(exc):
+        except requests.exceptions.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code in (403, 404):
                 # If we get here, it probably doesn't exist or we lack permissions.
                 # The prompt implies we only call ensure_project with intent to create if we are in the else branch, but actually the prompt says:
                 # "If project already exists (GET succeeds), return project_number
@@ -400,8 +401,8 @@ class GCPClient:
                     },
                 )
                 return result["email"]
-            except Exception as exc:
-                if "409" in str(exc) or "ALREADY_EXISTS" in str(exc):
+            except requests.exceptions.HTTPError as exc:
+                if exc.response is not None and exc.response.status_code == 409:
                     email = f"{sa_name or config.sa_name}@{config.project_id}.iam.gserviceaccount.com"
                     logger.info("    SA already exists: %s", email)
                     return email
@@ -418,8 +419,8 @@ class GCPClient:
                     {"displayName": "WIF Bunker Pool", "disabled": False},
                 )
                 self.wait_for_lro(iam_base, pool_op["name"])
-            except Exception as exc:
-                if "409" in str(exc) or "ALREADY_EXISTS" in str(exc):
+            except requests.exceptions.HTTPError as exc:
+                if exc.response is not None and exc.response.status_code == 409:
                     logger.info("    Pool already exists: %s", config.pool_id)
                 else:
                     raise
@@ -440,9 +441,9 @@ class GCPClient:
                                 del_op = self.api_call("DELETE", f"{pool_res_url}/providers/{pname}")
                                 self.wait_for_lro(iam_base, del_op["name"])
                             except Exception:
-                                pass
+                                logger.debug("Failed to delete stale provider", exc_info=True)
                 except Exception:
-                    pass
+                    logger.debug("Failed to list/delete providers", exc_info=True)
 
             cert_pin_condition = f'assertion.sha256Fingerprint == "{cert_bundle.sha256_fingerprint}"'
             logger.info("    Cert pin condition: %s", cert_pin_condition)

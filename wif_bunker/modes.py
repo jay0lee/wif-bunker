@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ctypes
 import datetime
 import json
 import logging
@@ -165,14 +164,9 @@ def _run_status() -> None:
             logger.error("ECP:       %s ECP client library not found at: %s", SYM_CROSS, ecp_client_path)
             return
 
-        _ecp_lib = ctypes.CDLL(ecp_client_path)
-        _ecp_lib.GetCertPemForPython.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
-        _ecp_lib.GetCertPemForPython.restype = ctypes.c_int
-        _cert_len = _ecp_lib.GetCertPemForPython(str(cert_config_path).encode(), None, 0)
-        if _cert_len <= 0:
-            logger.error("ECP:       %s ECP returned cert_len=%d", SYM_CROSS, _cert_len)
-            return
-        logger.info("ECP:       %s Certificate retrieved (%d bytes)", SYM_CHECK, _cert_len)
+        from wif_bunker.cert import ecp_get_cert_pem
+        _cert_pem_bytes = ecp_get_cert_pem(ecp_client_path, cert_config_path)
+        logger.info("ECP:       %s Certificate retrieved (%d bytes)", SYM_CHECK, len(_cert_pem_bytes))
     except Exception as exc:
         logger.error("ECP:       %s %s", SYM_CROSS, exc)
         return

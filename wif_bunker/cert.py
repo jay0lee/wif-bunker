@@ -25,6 +25,15 @@ from wif_bunker.utils import SYM_ARROW, write_secure_file
 
 logger = logging.getLogger(__name__)
 
+_LINUX_TPM_PKCS11_SEARCH_PATHS: list[str] = [
+    "/usr/lib/x86_64-linux-gnu/pkcs11/libtpm2_pkcs11.so",
+    "/usr/lib/aarch64-linux-gnu/pkcs11/libtpm2_pkcs11.so",
+    "/usr/lib/x86_64-linux-gnu/libtpm2_pkcs11.so.1",
+    "/usr/lib/aarch64-linux-gnu/libtpm2_pkcs11.so.1",
+    "/usr/lib/pkcs11/libtpm2_pkcs11.so",
+]
+
+
 
 def _create_ca_and_sign(
     hw_public_key_pem: str,
@@ -235,7 +244,19 @@ def _add_ecp_to_path(ecp_dir: Path) -> None:
 
 
 
-def build_certificate_config(config, cert_bundle, ecp_binary, ecp_client_lib, tls_offload_lib) -> dict:
+def build_certificate_config(
+    config: WorkloadConfig,
+    cert_bundle: CertificateBundle,
+    ecp_binary: Path,
+    ecp_client_lib: Path,
+    tls_offload_lib: Path,
+) -> tuple[dict, Path, Path, Path]:
+    """Build the ECP certificate_config.json and write PEM files to disk.
+
+    Returns:
+        Tuple of (certificate_config_dict, cert_config_path,
+        workload_cert_path, trust_chain_path).
+    """
     if config.use_yubikey:
         from wif_bunker.keystore.yubikey import build_ecp_pkcs11_config
         cert_configs = build_ecp_pkcs11_config(
@@ -259,13 +280,7 @@ def build_certificate_config(config, cert_bundle, ecp_binary, ecp_client_lib, tl
     else:
         # Find the PKCS#11 module path dynamically.
         pkcs11_module = None
-        for candidate in [
-            "/usr/lib/x86_64-linux-gnu/pkcs11/libtpm2_pkcs11.so",
-            "/usr/lib/aarch64-linux-gnu/pkcs11/libtpm2_pkcs11.so",
-            "/usr/lib/x86_64-linux-gnu/libtpm2_pkcs11.so.1",
-            "/usr/lib/aarch64-linux-gnu/libtpm2_pkcs11.so.1",
-            "/usr/lib/pkcs11/libtpm2_pkcs11.so",
-        ]:
+        for candidate in _LINUX_TPM_PKCS11_SEARCH_PATHS:
             if Path(candidate).exists():
                 pkcs11_module = candidate
                 break
@@ -334,7 +349,19 @@ def build_certificate_config(config, cert_bundle, ecp_binary, ecp_client_lib, tl
 
     return certificate_config, cert_config_path, workload_cert_path, trust_chain_path
 
-def build_adc_config(config, project_number, cert_config_path, trust_chain_path, sa_email, use_sa) -> tuple:
+def build_adc_config(
+    config: WorkloadConfig,
+    project_number: str,
+    cert_config_path: Path,
+    trust_chain_path: Path,
+    sa_email: str | None,
+    use_sa: bool,
+) -> tuple[dict, Path]:
+    """Build the Application Default Credentials (ADC) configuration file.
+
+    Returns:
+        Tuple of (adc_config_dict, adc_config_path).
+    """
     adc_config = {
         "type": "external_account",
         "audience": (
@@ -359,103 +386,110 @@ def build_adc_config(config, project_number, cert_config_path, trust_chain_path,
     write_secure_file(adc_path, json.dumps(adc_config, indent=2))
     return adc_config, adc_path
 
-def run_ecp_diagnostics(config_path, log):
+def run_ecp_diagnostics(config_path: Path | str, log: logging.Logger) -> None:
     """Deep ECP diagnostics."""
     log.warning("    Running ECP diagnostics (--debug)...")
     try:
         with open(config_path, encoding="utf-8") as cfg_file:
-            _cfg_text = cfg_file.read()
-        log.warning("    certificate_config.json:\n%s", _cfg_text)
+            cfg_text = cfg_file.read()
+        log.warning("    certificate_config.json:\n%s", cfg_text)
     except Exception as read_exc:
         log.warning("    Could not read config: %s", read_exc)
         return
 
     try:
-        _ecp_bin = Path(json.loads(_cfg_text)["libs"]["ecp"])
-        if _ecp_bin.exists():
-            _bin_data = _ecp_bin.read_bytes()
-            log.warning("    ECP binary: %s (%d KB)", _ecp_bin, len(_bin_data) // 1024)
+        ecp_bin = Path(json.loads(cfg_text)["libs"]["ecp"])
+        if ecp_bin.exists():
+            bin_data = ecp_bin.read_bytes()
+            log.warning("    ECP binary: %s (%d KB)", ecp_bin, len(bin_data) // 1024)
             if sys.platform == "darwin":
                 log.warning(
-                    "    Contains SecCertificateCopyData (patched): %s", b"SecCertificateCopyData" in _bin_data
+                    "    Contains SecCertificateCopyData (patched): %s", b"SecCertificateCopyData" in bin_data
                 )
-                log.warning("    Contains SecItemExport (unpatched): %s", b"SecItemExport" in _bin_data)
+                log.warning("    Contains SecItemExport (unpatched): %s", b"SecItemExport" in bin_data)
         else:
-            log.warning("    ECP binary NOT FOUND: %s", _ecp_bin)
-    except Exception as _e:
-        log.warning("    Binary check error: %s", _e)
+            log.warning("    ECP binary NOT FOUND: %s", ecp_bin)
+    except Exception as e:
+        log.warning("    Binary check error: %s", e)
 
     try:
-        _ecp_bin_path = str(Path(json.loads(_cfg_text)["libs"]["ecp"]))
-        _result = subprocess.run(
-            [_ecp_bin_path, str(config_path)],
+        ecp_bin_path = str(Path(json.loads(cfg_text)["libs"]["ecp"]))
+        result = subprocess.run(
+            [ecp_bin_path, str(config_path)],
             capture_output=True,
             text=True,
             timeout=10,
         )
-        log.warning("    ECP signer stderr: %s", _result.stderr[:500] if _result.stderr else "(empty)")
+        log.warning("    ECP signer stderr: %s", result.stderr[:500] if result.stderr else "(empty)")
     except subprocess.TimeoutExpired:
         log.warning("    ECP signer listening for RPC (OK)")
-    except Exception as _e:
-        log.warning("    ECP signer error: %s", _e)
+    except Exception as e:
+        log.warning("    ECP signer error: %s", e)
 
     if sys.platform == "darwin":
         try:
-            _id_result = subprocess.run(
+            id_result = subprocess.run(
                 ["security", "find-identity", "-v", "-p", "ssl-client"],
                 capture_output=True,
                 text=True,
                 timeout=5,
             )
-            log.warning("    Keychain SSL-client identities:\n%s", _id_result.stdout)
-        except Exception as _e:
-            log.warning("    find-identity error: %s", _e)
+            log.warning("    Keychain SSL-client identities:\n%s", id_result.stdout)
+        except Exception as e:
+            log.warning("    find-identity error: %s", e)
 
 
-def verify_ecp_cert_retrieval(cert_config_path, ecp_client_lib, debug=False):
+def ecp_get_cert_pem(ecp_client_lib: Path | str, cert_config_path: Path | str) -> bytes:
+    """Call ECP's GetCertPemForPython and return raw PEM bytes.
+
+    Raises:
+        RuntimeError: If ECP returns cert_len <= 0.
+    """
+    lib = ctypes.CDLL(str(ecp_client_lib))
+    lib.GetCertPemForPython.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
+    lib.GetCertPemForPython.restype = ctypes.c_int
+    cert_len = lib.GetCertPemForPython(str(cert_config_path).encode(), None, 0)
+    if cert_len <= 0:
+        raise RuntimeError(f"ECP returned cert_len={cert_len}")
+    buf = ctypes.create_string_buffer(cert_len + 1)
+    lib.GetCertPemForPython(str(cert_config_path).encode(), buf, cert_len + 1)
+    return buf.value
+
+def verify_ecp_cert_retrieval(
+    cert_config_path: Path | str,
+    ecp_client_lib: Path | str,
+    debug: bool = False,
+) -> str:
+    """Verify that ECP can retrieve the certificate using the provided config.
+
+    Returns:
+        The PEM-encoded certificate string.
+    """
     try:
-        _ecp_lib = ctypes.CDLL(str(ecp_client_lib))
-        _ecp_lib.GetCertPemForPython.argtypes = [
-            ctypes.c_char_p,
-            ctypes.c_char_p,
-            ctypes.c_int,
-        ]
-        _ecp_lib.GetCertPemForPython.restype = ctypes.c_int
-
-        _cert_len = _ecp_lib.GetCertPemForPython(
-            str(cert_config_path).encode(),
-            None,
-            0,
-        )
-        if _cert_len <= 0:
-            logger.error("    FAIL: ECP returned cert_len=%d", _cert_len)
+        try:
+            cert_pem_bytes = ecp_get_cert_pem(ecp_client_lib, cert_config_path)
+            logger.info("    PASS: ECP returned %d bytes of cert PEM", len(cert_pem_bytes))
+        except RuntimeError as e:
+            logger.error("    FAIL: %s", e)
             if debug:
                 run_ecp_diagnostics(cert_config_path, logger)
-            raise RuntimeError("ECP cert retrieval failed (cert_len=0)")
+            raise RuntimeError("ECP cert retrieval failed (cert_len=0)") from e
 
-        _cert_buf = ctypes.create_string_buffer(_cert_len + 1)
-        _ecp_lib.GetCertPemForPython(
-            str(cert_config_path).encode(),
-            _cert_buf,
-            _cert_len + 1,
-        )
-        _cert_pem_bytes = _cert_buf.value
-        _cert_pem = _cert_pem_bytes.decode("utf-8", errors="replace")
-        logger.info("    PASS: ECP returned %d bytes of cert PEM", _cert_len)
+        cert_pem = cert_pem_bytes.decode("utf-8", errors="replace")
 
         try:
-            _parsed = cx509.load_pem_x509_certificate(_cert_pem_bytes)
-            _pub_key = _parsed.public_key()
-            _key_type = type(_pub_key).__name__
-            logger.info("    Cert subject:   %s", _parsed.subject)
-            logger.info("    Cert issuer:    %s", _parsed.issuer)
-            logger.info("    Key algorithm:  %s", _key_type)
-            logger.info("    Cert serial:    %s", format(_parsed.serial_number, "X"))
-        except Exception as _parse_err:
-            logger.warning("    Could not parse cert: %s", _parse_err)
+            parsed = cx509.load_pem_x509_certificate(cert_pem_bytes)
+            pub_key = parsed.public_key()
+            key_type = type(pub_key).__name__
+            logger.info("    Cert subject:   %s", parsed.subject)
+            logger.info("    Cert issuer:    %s", parsed.issuer)
+            logger.info("    Key algorithm:  %s", key_type)
+            logger.info("    Cert serial:    %s", format(parsed.serial_number, "X"))
+        except Exception as parse_err:
+            logger.warning("    Could not parse cert: %s", parse_err)
 
-        logger.debug("    ECP cert PEM:\n%s", _cert_pem)
-        return _cert_pem
+        logger.debug("    ECP cert PEM:\n%s", cert_pem)
+        return cert_pem
 
     except RuntimeError:
         raise

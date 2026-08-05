@@ -44,8 +44,8 @@ from wif_bunker.utils import (
 logger = logging.getLogger(__name__)
 
 
-def _main_impl() -> None:
-    """Parse arguments and run the WIF Bunker setup or status workflow."""
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser."""
     parser = argparse.ArgumentParser(
         description="WIF Bunker — Hardware-backed X.509 Workload Identity Federation",
     )
@@ -140,7 +140,7 @@ def _main_impl() -> None:
         metavar="ALGO",
         help=(
             "Key algorithm for the hardware-backed certificate. "
-            "Choices: " + ", ".join(algo_help_lines) + ". "
+            f"Choices: {', '.join(algo_help_lines)}. "
             "macOS supports es256/es384 only. Default: es256."
         ),
     )
@@ -227,20 +227,14 @@ def _main_impl() -> None:
             "'always' requires touch for every operation."
         ),
     )
+    return parser
 
-    args = parser.parse_args()
 
+def _validate_and_configure(parser: argparse.ArgumentParser, args: argparse.Namespace, config: WorkloadConfig) -> None:
+    """Apply CLI arguments to config and validate combinations."""
     if args.use_adc and args.client_secrets_file:
         parser.error("--use-adc and --client-secrets-file are mutually exclusive")
 
-    handler = logging.StreamHandler()
-    handler.setFormatter(_CleanFormatter())
-    logging.basicConfig(
-        level=logging.DEBUG if args.debug else logging.INFO,
-        handlers=[handler],
-    )
-
-    config = WorkloadConfig()
     # Override config from CLI flags
     if args.use_project:
         config.project_id = args.use_project
@@ -296,6 +290,22 @@ def _main_impl() -> None:
     # Validate --cert-file is only used with --attest
     if args.cert_file and not args.attest:
         parser.error("--cert-file can only be used with --attest")
+
+
+def _main_impl() -> None:
+    """Parse arguments and run the WIF Bunker setup or status workflow."""
+    parser = _build_arg_parser()
+    args = parser.parse_args()
+
+    handler = logging.StreamHandler()
+    handler.setFormatter(_CleanFormatter())
+    logging.basicConfig(
+        level=logging.DEBUG if args.debug else logging.INFO,
+        handlers=[handler],
+    )
+
+    config = WorkloadConfig()
+    _validate_and_configure(parser, args, config)
 
     # --- Mode dispatch: --status, --attest, --supported-algorithms, or --cert-only exit early ---
     if args.status:

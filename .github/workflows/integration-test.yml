@@ -54,18 +54,16 @@ jobs:
             soft_key_flag: "--soft-key"
             artifact_name: wif-bunker-windows-x86_64
             expected_algos: "es256 es384 rsa2048 rsa3072 rsa4096"
-          # Hardware TPM (NUC8) temporarily disabled while YubiKey testing
-          # is being brought up — NUC can only run one self-hosted job at a time.
-          # - name: Hardware TPM (NUC8)
-          #   runs_on: '["self-hosted", "linux", "x64", "tpm-hardware"]'
-          #   soft_key_flag: ""
-          #   artifact_name: wif-bunker-linux-x86_64
-          #   self_hosted: true
-          #   expected_algos: "es256 rsa2048"
+          - name: Hardware TPM (NUC8)
+            runs_on: '["self-hosted", "linux", "x64", "tpm-hardware"]'
+            soft_key_flag: ""
+            artifact_name: wif-bunker-linux-x86_64-tpm
+            self_hosted: true
+            expected_algos: "es256 rsa2048"
           - name: YubiKey (NUC8)
             runs_on: '["self-hosted", "linux", "x64", "tpm-hardware"]'
             soft_key_flag: ""
-            artifact_name: wif-bunker-linux-x86_64
+            artifact_name: wif-bunker-linux-x86_64-yubikey
             self_hosted: true
             use_yubikey: true
             expected_algos: "es256 es384 rsa2048"
@@ -465,9 +463,9 @@ jobs:
           print(f'  Report valid: {r[\"platform\"]}, {passed}/{total} checks passed')
           if '${{ matrix.self_hosted }}' == 'true':
               assert passed == total, (
-                  f'Hardware TPM attestation regression: {passed}/{total} checks passed, expected {total}/{total}'
+                  f'Hardware attestation regression: {passed}/{total} checks passed, expected {total}/{total}'
               )
-              print(f'  ✓ All {total} attestation checks passed (hardware TPM)')
+              print(f'  ✓ All {total} attestation checks passed ({r["hardware_type"]})')
           " "$attestdir"
 
           rm -rf "$certdir" "$attestdir"
