@@ -2,7 +2,7 @@
 
 **Hardware-backed Workload Identity Federation for Google Cloud**
 
-WIF Bunker makes authenticating to Google Cloud as simple as downloading a service account key — but without the security risk. Instead of exportable JSON keys sitting on disk, your credentials are locked inside your machine's hardware security module (TPM or Secure Enclave) and can never be extracted.
+WIF Bunker makes authenticating to Google Cloud as simple as downloading a service account key — but without the security risk. Instead of exportable JSON keys sitting on disk, your credentials are locked inside your machine's hardware security module (TPM, Secure Enclave, or YubiKey) and can never be extracted.
 
 One command. No key files. No secrets to rotate.
 
@@ -25,6 +25,16 @@ This single command:
 | **Rotation** | Manual, error-prone | Re-run before expiry (max 390 days) |
 | **Setup complexity** | Download a file | One command |
 | **Compliance** | Fails most security audits | Hardware-backed identity |
+| **Attestation** | None | Cryptographic proof of hardware residency |
+
+## Supported Hardware
+
+| Platform | Hardware | Algorithms |
+|---|---|---|
+| **Linux** | TPM 2.0 | ES256, ES384, RSA 2048/3072/4096 |
+| **macOS** | Secure Enclave (Apple Silicon) | ES256, ES384 |
+| **Windows** | TPM 2.0 (CNG) | ES256, ES384, RSA 2048/3072/4096 |
+| **Cross-platform** | YubiKey 5 (PIV) | ES256, ES384, RSA 2048 (4096 on fw 5.7+) |
 
 ## Installation
 
@@ -36,11 +46,9 @@ This single command:
 sudo apt install tpm2-tools libtpm2-pkcs11-1 libtpm2-pkcs11-tools python3-tpm2-pkcs11-tools gnutls-bin opensc
 ```
 
-> **Note:** These package names are the same on Ubuntu 22.04, 24.04, and 26.04.
-> Modern kernels (4.11+) include a built-in TPM resource manager at `/dev/tpmrm0` —
-> the userspace `tpm2-abrmd` daemon is no longer needed.
-
 **macOS prerequisites:** macOS 15 (Sequoia) or later with Apple Silicon (Secure Enclave).
+
+**YubiKey prerequisites (any OS):** YubiKey 5 series with firmware 5.0+. On Linux, `pcscd` must be running (`sudo apt install pcscd`).
 
 ```bash
 bash <(curl -s -S -L https://raw.githubusercontent.com/jay0lee/wif-bunker/master/packaging/install.sh)
@@ -120,6 +128,97 @@ credentials, project = google.auth.default()
 # Authenticated via hardware-backed mTLS — no key files involved
 ```
 
+## YubiKey Support
+
+WIF Bunker supports YubiKey 5 series devices as a cross-platform hardware keystore using the PIV (Personal Identity Verification) applet. This is ideal for:
+
+- **Portable credentials** — move your hardware-backed identity between machines
+- **Air-gapped environments** — use a removable token instead of a platform TPM
+- **Shared workstations** — each user plugs in their own YubiKey
+
+### Basic usage
+
+```bash
+# Use the platform TPM (default, no flag needed)
+wif-bunker --create-project my-project --folder 123456789
+
+# Use a YubiKey instead
+wif-bunker --use-yubikey --create-project my-project --folder 123456789
+```
+
+### Multiple YubiKeys
+
+If multiple YubiKeys are connected, specify which one:
+
+```bash
+wif-bunker --use-yubikey --yubikey-serial 20602167 --create-project my-project --folder 123456789
+```
+
+### PIV slots
+
+By default, WIF Bunker uses slot `9a` (Authentication). You can use other PIV slots:
+
+| Slot | Name | Use case |
+|---|---|---|
+| `9a` | Authentication | Default. General-purpose authentication |
+| `9c` | Digital Signature | Non-repudiation signing |
+| `9d` | Key Management | Encryption/decryption |
+| `9e` | Card Authentication | Contactless authentication |
+
+```bash
+wif-bunker --use-yubikey --yubikey-slot 9c --create-project my-project --folder 123456789
+```
+
+### Touch policy
+
+Control whether physical touch is required for cryptographic operations:
+
+| Policy | Behavior | Use case |
+|---|---|---|
+| `never` | No touch required (default) | Headless servers, CI/CD |
+| `cached` | Touch once per 15 seconds | Interactive with convenience |
+| `always` | Touch for every operation | Maximum security |
+
+```bash
+wif-bunker --use-yubikey --yubikey-touch-policy cached --create-project my-project --folder 123456789
+```
+
+## Hardware Attestation
+
+WIF Bunker can generate **cryptographic proof** that your private key lives in hardware and was never exposed to software. This is useful for compliance audits, zero-trust policies, and security reviews.
+
+```bash
+# Generate a cert, then attest it
+wif-bunker --cert-only --output-dir /tmp/certs
+wif-bunker --attest --cert-file /tmp/certs/workload_cert.pem --output-dir /tmp/attestation
+```
+
+### What attestation proves
+
+| Check | TPM 2.0 | YubiKey | Windows CNG |
+|---|---|---|---|
+| Key generated in hardware | ✓ | ✓ | ✓ |
+| Key is non-exportable | ✓ | ✓ | ✓ |
+| Manufacturer chain of trust | ✓ | ✓ | ✓ |
+| Device model/serial | ✓ | ✓ | — |
+| Firmware version | — | ✓ | — |
+| PIN/touch policy | — | ✓ | — |
+
+> **Note:** macOS Secure Enclave does not expose attestation APIs. Apple's security model relies on the Secure Enclave's hardware design rather than certificate-based attestation.
+
+### Attestation output
+
+The `--attest` flag writes attestation artifacts (PEM certificates, TPM quotes) to the output directory and prints a verification report:
+
+```
+=== Hardware Key Attestation ===
+  ✓ Key generated on hardware (YubiKey 5C, serial 35270891, firmware 5.7.4)
+  ✓ Key is non-exportable (touch: never, PIN: once)
+  ✓ Attestation chain verified against Yubico Root CA
+  ✓ Form factor: USB-C Keychain
+  All 4/4 attestation checks passed (yubikey-piv)
+```
+
 ## How It Works
 
 WIF Bunker bridges your OS hardware security module to Google Cloud's [Workload Identity Federation](https://cloud.google.com/iam/docs/workload-identity-federation) using mutual TLS (mTLS).
@@ -135,8 +234,8 @@ WIF Bunker bridges your OS hardware security module to Google Cloud's [Workload 
 │                                           │             │
 │                                ┌──────────▼───────────┐ │
 │                                │  Hardware Keystore    │ │
-│                                │  (TPM / Secure        │ │
-│                                │   Enclave / CNG)      │ │
+│                                │  TPM / Secure Enclave │ │
+│                                │  YubiKey / CNG        │ │
 │                                └──────────┬───────────┘ │
 └───────────────────────────────────────────┼─────────────┘
                                             │ mTLS
@@ -171,6 +270,7 @@ WIF Bunker bridges your OS hardware security module to Google Cloud's [Workload 
 - **Key storage:** Windows CNG keystore (non-exportable, TPM-bound)
 - **Certificate store:** `CurrentUser\My`
 - **Supported algorithms:** ECDSA P-256, ECDSA P-384, RSA 2048/3072/4096
+- **Attestation:** Full CNG/TPM attestation with AIK quotes
 - **CI testing:** `--soft-key` uses `Microsoft Software Key Storage Provider` (no TPM required)
 
 </details>
@@ -182,6 +282,7 @@ WIF Bunker bridges your OS hardware security module to Google Cloud's [Workload 
 - **Key storage:** Secure Enclave (non-exportable, hardware-fused)
 - **Certificate store:** Login keychain (`login.keychain-db`)
 - **Supported algorithms:** ECDSA P-256, ECDSA P-384 (Secure Enclave constraint)
+- **Attestation:** Not supported (Apple does not expose Secure Enclave attestation APIs)
 - **Requires:** macOS 15 (Sequoia) or later, Apple Silicon
 
 </details>
@@ -193,7 +294,22 @@ WIF Bunker bridges your OS hardware security module to Google Cloud's [Workload 
 - **Key storage:** TPM 2.0 PKCS#11 store (`~/.tpm2_pkcs11`)
 - **Tools required:** `tpm2-tools`, `libtpm2-pkcs11-tools`, `python3-tpm2-pkcs11-tools`, `gnutls-bin`, `opensc`
 - **Supported algorithms:** ECDSA P-256, ECDSA P-384, RSA 2048/3072/4096
+- **Attestation:** Full TPM 2.0 attestation (EK certificate chain, key certification, manufacturer provenance)
 - **Development:** Supports [swtpm](https://github.com/stefanberger/swtpm) (software TPM) for testing without hardware
+
+</details>
+
+<details>
+<summary><strong>YubiKey — PIV applet (cross-platform)</strong></summary>
+
+- **Key generation:** `ykman piv keys generate` (on-device, non-exportable)
+- **Key storage:** YubiKey PIV applet (hardware-bound, survives resets)
+- **Supported algorithms:** ECDSA P-256, ECDSA P-384, RSA 2048, RSA 4096 (firmware 5.7+)
+- **Attestation:** PIV key attestation with chain verification against bundled Yubico Root CAs. Reports device model, serial number, firmware version, form factor, PIN/touch policy.
+- **Firmware requirement:** 5.0 or later
+- **PIV slots:** 9a (Authentication, default), 9c (Signature), 9d (Key Management), 9e (Card Auth)
+- **Touch policy:** `never` (default), `cached` (15s), `always`
+- **Works on:** Linux (requires `pcscd`), macOS, Windows
 
 </details>
 
@@ -238,18 +354,30 @@ wif-bunker [OPTIONS]
 | Flag | Description |
 |------|-------------|
 | `--cert-only` | Generate a hardware-backed certificate without setting up WIF or GCP resources |
+| `--attest` | Generate hardware attestation artifacts proving keys reside in hardware |
 | `--status` | Show current configuration status, certificate expiry, and test ECP/ADC connectivity |
+| `--supported-algorithms` | Query the active keystore for supported key algorithms |
 
-### Options
+### Key Options
 
 | Flag | Description |
 |------|-------------|
-| `--key-algorithm ALGO` | Key algorithm: `es256` (default), `es384`, `rsa2048`, `rsa3072`, `rsa4096` |
+| `--key-algorithm ALGO` | `es256` (default), `es384`, `rsa2048`, `rsa3072`, `rsa4096` |
 | `--cert-lifetime DAYS` | Certificate validity in days (1-390, default: 90) |
-| `--output-dir DIR` | Output directory for cert files (with `--cert-only` only) |
+| `--output-dir DIR` | Output directory for `--cert-only` or `--attest` artifacts |
+| `--cert-file PATH` | Path to workload certificate PEM (used with `--attest`) |
 | `--soft-key` | Windows only — use software keys instead of TPM (for CI testing) |
 | `--debug` | Enable verbose debug logging |
 | `--version` | Show version |
+
+### YubiKey Options
+
+| Flag | Description |
+|------|-------------|
+| `--use-yubikey` | Use a YubiKey PIV device instead of the platform TPM/Secure Enclave |
+| `--yubikey-serial SERIAL` | YubiKey serial number (required if multiple YubiKeys are connected) |
+| `--yubikey-slot {9a,9c,9d,9e}` | PIV slot for the workload key (default: `9a`) |
+| `--yubikey-touch-policy {never,cached,always}` | Touch policy (default: `never`) |
 
 ## Reusing Existing Resources
 
@@ -355,8 +483,10 @@ The upstream [ECP](https://github.com/googleapis/enterprise-certificate-proxy) b
 ## Security
 
 - **Non-exportable keys:** Private keys are generated inside the hardware security module and cannot be read or copied by any software, including WIF Bunker itself.
+- **Hardware attestation:** Cryptographic proof that keys reside in hardware, verifiable against manufacturer root CAs (TPM vendors, Yubico).
 - **Certificate fingerprint pinning:** The WIF provider's `attributeCondition` pins authentication to the exact certificate fingerprint, preventing use of other certificates signed by the same CA.
 - **Ephemeral CA:** The CA that signs the workload certificate exists only in memory during setup. It is never written to disk.
+- **Good citizen:** WIF Bunker does not interfere with other applications using the TPM (disk encryption, Secure Boot, etc.). Only handles it creates are managed.
 - **Build provenance:** All release binaries include [SLSA build provenance attestations](https://slsa.dev/) verifiable via `gh attestation verify`.
 - **Pinned dependencies:** All GitHub Actions in CI/CD workflows are pinned to commit SHAs.
 
