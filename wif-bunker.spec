@@ -43,6 +43,7 @@ for pkg in ('google-auth', 'requests', 'cryptography', 'certifi', 'urllib3', 'ch
 datas += [
     ('wif_bunker/attestation/roots/roots/*.pem', 'wif_bunker/attestation/roots/roots'),
     ('wif_bunker/attestation/roots/intermediates/*.pem', 'wif_bunker/attestation/roots/intermediates'),
+    ('wif_bunker/attestation/roots/manually-managed/*.pem', 'wif_bunker/attestation/roots/manually-managed'),
     ('wif_bunker/attestation/roots/yubico/*.pem', 'wif_bunker/attestation/roots/yubico'),
 ]
 
@@ -93,6 +94,7 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     version=version_file,
+    contents_directory='lib',
 )
 
 coll = COLLECT(
@@ -104,5 +106,4 @@ coll = COLLECT(
     upx=False,
     upx_exclude=[],
     name='wif-bunker',
-    contents_directory='lib',
 )

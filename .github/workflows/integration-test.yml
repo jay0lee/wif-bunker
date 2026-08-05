@@ -234,17 +234,32 @@ jobs:
         if: matrix.self_hosted && !matrix.use_yubikey
         run: |
           # If a previous run crashed before post-test cleanup, stale
-          # persistent handles may fill TPM NV storage.  Only remove
-          # OUR "bunker-wif" token — leave other apps' handles alone.
+          # persistent handles may fill TPM NV storage.  Clean up both
+          # the filesystem store AND the TPM hardware handles.
+
+          # 1. Remove the PKCS#11 store directory if it exists
           if [ -d "$HOME/.tpm2_pkcs11" ]; then
             export TPM2_PKCS11_STORE="$HOME/.tpm2_pkcs11"
-            echo "Cleaning up stale bunker-wif TPM token..."
+            echo "Removing stale bunker-wif PKCS#11 token..."
             tpm2_ptool rmtoken --label=bunker-wif 2>/dev/null || true
             rm -rf "$HOME/.tpm2_pkcs11"
-            echo "TPM pre-cleanup complete."
-          else
-            echo "No stale TPM store found — skipping."
           fi
+
+          # 2. Evict ALL persistent handles from owner hierarchy.
+          #    On a dedicated CI runner, only our tool creates these.
+          HANDLES=$(tpm2_getcap handles-persistent 2>/dev/null | grep -oP '0x[0-9A-Fa-f]+' || true)
+          if [ -n "$HANDLES" ]; then
+            echo "Evicting stale TPM persistent handles..."
+            for h in $HANDLES; do
+              echo "  Evicting $h"
+              tpm2_evictcontrol -c "$h" 2>/dev/null || true
+            done
+            echo "Evicted $(echo "$HANDLES" | wc -w) handle(s)."
+          else
+            echo "No stale TPM persistent handles found."
+          fi
+
+          echo "TPM pre-cleanup complete."
 
       # ── Windows ARM64: click through OOBE privacy wizard ──
       # GHA Windows ARM64 runners show a 2-page OOBE privacy dialog.
@@ -642,14 +657,20 @@ jobs:
         run: |
           rm -rf .venv /tmp/adc_*.txt
           # Clean up our tpm2_pkcs11 token to free NV handles.
-          # IMPORTANT: only remove OUR "bunker-wif" token — do NOT blindly
-          # evict all persistent handles, as other apps (disk encryption,
-          # secure boot, etc.) may own handles in the TPM.
+          # Remove both the filesystem store AND the TPM persistent handles.
           if [ -d "$HOME/.tpm2_pkcs11" ]; then
             export TPM2_PKCS11_STORE="$HOME/.tpm2_pkcs11"
             tpm2_ptool rmtoken --label=bunker-wif 2>/dev/null || true
-            # Wipe the store dir so next run starts fresh
             rm -rf "$HOME/.tpm2_pkcs11"
+          fi
+          # Evict all persistent handles from owner hierarchy.
+          # On a dedicated CI runner, only our tool creates these.
+          HANDLES=$(tpm2_getcap handles-persistent 2>/dev/null | grep -oP '0x[0-9A-Fa-f]+' || true)
+          if [ -n "$HANDLES" ]; then
+            for h in $HANDLES; do
+              tpm2_evictcontrol -c "$h" 2>/dev/null || true
+            done
+            echo "Post-test: evicted $(echo "$HANDLES" | wc -w) TPM handle(s)."
           fi
           # Reset YubiKey PIV state if this was a YubiKey test
           if [ -n "$YUBIKEY_FLAGS" ]; then
