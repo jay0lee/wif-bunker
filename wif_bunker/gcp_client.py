@@ -16,7 +16,6 @@ import requests
 from google.auth.transport.requests import Request as GoogleAuthRequest
 
 from wif_bunker.config import LRO_TIMEOUT_SECONDS, MAX_BACKOFF_SECONDS
-from wif_bunker.utils import with_retries
 
 logger = logging.getLogger(__name__)
 
@@ -269,7 +268,6 @@ class GCPClient:
     def __exit__(self, *exc: Any) -> None:
         self.session.close()
 
-    @with_retries(max_attempts=10, expected_errors=(403, 404))
     def api_call(
         self,
         method: str,
@@ -322,25 +320,26 @@ class GCPClient:
         raise TimeoutError(f"WIF resource at {url} did not become ACTIVE within {max_attempts} attempts")
 
     def ensure_project(self, project_id: str, folder: str | None = None) -> str:
-        """Create or reuse GCP project."""
+        """Create or reuse GCP project.
+
+        1. GET the project — if it exists, return its number immediately.
+        2. If 403/404, the project doesn't exist — create it.
+        3. POST returns an LRO; poll until done.
+        4. GET the project number (with brief propagation retry).
+        """
         crm_base = "cloudresourcemanager.googleapis.com"
+        project_url = f"https://{crm_base}/v1/projects/{project_id}"
+
+        # Step 1: check if the project already exists (no retry — 403/404 is the answer).
         try:
-            # Try to get existing
-            project_number = self.api_call(
-                "GET",
-                f"https://{crm_base}/v1/projects/{project_id}",
-            )["projectNumber"]
-            return project_number
+            return self.api_call("GET", project_url)["projectNumber"]
         except requests.exceptions.HTTPError as exc:
             if exc.response is not None and exc.response.status_code in (403, 404):
-                # If we get here, it probably doesn't exist or we lack permissions.
-                # The prompt implies we only call ensure_project with intent to create if we are in the else branch, but actually the prompt says:
-                # "If project already exists (GET succeeds), return project_number
-                # If not, create it with optional folder parent, wait for LRO, return project_number"
-                pass
+                pass  # Project doesn't exist — create it below.
             else:
                 raise
 
+        # Step 2: create the project.
         create_payload = {
             "projectId": project_id,
             "name": "WIF Bunker",
@@ -351,16 +350,31 @@ class GCPClient:
                 "id": folder,
             }
             logger.info("    Parent folder: %s", folder)
-        operation = self.api_call(
-            "POST",
-            f"https://{crm_base}/v1/projects",
-            create_payload,
-        )
-        self.wait_for_lro(crm_base, operation["name"])
-        return self.api_call(
-            "GET",
-            f"https://{crm_base}/v1/projects/{project_id}",
-        )["projectNumber"]
+
+        try:
+            operation = self.api_call(
+                "POST",
+                f"https://{crm_base}/v1/projects",
+                create_payload,
+            )
+            self.wait_for_lro(crm_base, operation["name"])
+        except requests.exceptions.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 409:
+                logger.info("    Project already exists (409), reusing.")
+            else:
+                raise
+
+        # Step 3: fetch project number (brief retry for propagation).
+        for attempt in range(5):
+            try:
+                return self.api_call("GET", project_url)["projectNumber"]
+            except requests.exceptions.HTTPError:
+                if attempt < 4:
+                    sleep_time = min(2**attempt, 10)
+                    logger.info("    Waiting for project propagation (%d/5), %ds...", attempt + 1, sleep_time)
+                    time.sleep(sleep_time)
+                else:
+                    raise
 
     def enable_apis(self, project_number: str, api_list: list[str]) -> None:
         """Batch-enables the given APIs for the project."""

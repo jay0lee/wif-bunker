@@ -180,7 +180,7 @@ def _verify_ek_chain_openssl(
             return True, ""
         except X509StoreContextError as e:
             if "unable to get local issuer certificate" in str(e) and depth < 3:
-                # Try AIA chasing
+                # Try AIA chasing — extract the issuer cert URL from the AIA extension.
                 cert_pem = OpenSSL.crypto.dump_certificate(FILETYPE_PEM, current_cert).decode("utf-8")
                 result = subprocess.run(
                     ["openssl", "x509", "-noout", "-text"],
@@ -189,27 +189,29 @@ def _verify_ek_chain_openssl(
                     text=True,
                 )
                 m = re.search(r"CA Issuers - URI:(https?://[^\s]+)", result.stdout)
-                if m:
-                    url = m.group(1)
-                    logger.debug(f"AIA chasing: fetching intermediate from {url}")
+                if not m:
+                    return False, (
+                        f"{e} — cert has no AIA extension with a CA Issuers URL, "
+                        "so the missing issuer cannot be fetched automatically"
+                    )
+                url = m.group(1)
+                try:
+                    logger.info("    AIA chasing: fetching issuer cert from %s", url)
+                    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(req, timeout=10) as response:
+                        cert_data = response.read()
+
                     try:
-                        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                        with urllib.request.urlopen(req, timeout=10) as response:
-                            cert_data = response.read()
+                        fetched_cert = load_certificate(FILETYPE_PEM, cert_data)
+                    except Exception:
+                        fetched_cert = load_certificate(FILETYPE_ASN1, cert_data)
 
-                        try:
-                            fetched_cert = load_certificate(FILETYPE_PEM, cert_data)
-                        except Exception:
-                            fetched_cert = load_certificate(FILETYPE_ASN1, cert_data)
+                    intermediates.append(fetched_cert)
 
-                        intermediates.append(fetched_cert)
-
-                        # Recursively verify the fetched certificate as the new target to continue chasing if needed
-                        # Wait, X509StoreContext verifies the current_cert using the chain.
-                        # We just retry the original ek_cert verification with the new intermediate added to the chain.
-                        return _verify_with_aia_chasing(current_cert, depth + 1)
-                    except Exception as fetch_err:
-                        logger.debug(f"AIA fetch failed: {fetch_err}")
+                    # Retry verification with the newly fetched intermediate in the chain.
+                    return _verify_with_aia_chasing(current_cert, depth + 1)
+                except Exception as fetch_err:
+                    return False, (f"{e} — AIA fetch from {url} failed: {fetch_err}")
             return False, str(e)
 
     success, err_msg = _verify_with_aia_chasing(ek_cert)

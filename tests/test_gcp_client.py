@@ -238,3 +238,137 @@ def test_wait_for_wif_resource_timeout():
         client.wait_for_wif_resource("https://iam.googleapis.com/v1/pool/123", max_attempts=2)
 
     client.session.close()
+
+
+# ---------------------------------------------------------------------------
+# ensure_project
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_project_exists():
+    """If the project already exists, return its number immediately — no retry."""
+    client = _make_client_with_token()
+
+    with patch.object(client, "api_call", return_value={"projectNumber": "123456"}) as mock_call:
+        result = client.ensure_project("my-project")
+
+    assert result == "123456"
+    # Only one GET call — no retry, no POST.
+    mock_call.assert_called_once_with(
+        "GET",
+        "https://cloudresourcemanager.googleapis.com/v1/projects/my-project",
+    )
+    client.session.close()
+
+
+def test_ensure_project_creates_new():
+    """If project doesn't exist (403), create it via LRO."""
+    client = _make_client_with_token()
+
+    get_403 = _mock_response(403)
+
+    call_count = 0
+
+    def mock_api_call(method, url, json_payload=None):
+        nonlocal call_count
+        call_count += 1
+        if method == "GET" and call_count == 1:
+            # First GET: project doesn't exist
+            get_403.raise_for_status()
+        elif method == "POST":
+            return {"name": "operations/create-op"}
+        elif method == "GET":
+            return {"projectNumber": "789"}
+        return None
+
+    with (
+        patch.object(client, "api_call", side_effect=mock_api_call),
+        patch.object(client, "wait_for_lro"),
+        patch("wif_bunker.gcp_client.time.sleep"),
+    ):
+        result = client.ensure_project("new-project")
+
+    assert result == "789"
+    client.session.close()
+
+
+def test_ensure_project_409_already_exists():
+    """If POST returns 409 (project already exists), reuse it."""
+    client = _make_client_with_token()
+
+    call_count = 0
+
+    def mock_api_call(method, url, json_payload=None):
+        nonlocal call_count
+        call_count += 1
+        if method == "GET" and call_count == 1:
+            # First GET: 403
+            resp = _mock_response(403)
+            resp.raise_for_status()
+        elif method == "POST":
+            # POST: 409 — already exists
+            resp = _mock_response(409)
+            resp.raise_for_status()
+        elif method == "GET":
+            return {"projectNumber": "42"}
+        return None
+
+    with (
+        patch.object(client, "api_call", side_effect=mock_api_call),
+        patch("wif_bunker.gcp_client.time.sleep"),
+    ):
+        result = client.ensure_project("existing-project")
+
+    assert result == "42"
+    client.session.close()
+
+
+def test_api_call_does_not_retry_403():
+    """api_call raises HTTPError immediately on 403 — no retries."""
+    client = _make_client_with_token()
+
+    resp_403 = _mock_response(403)
+    with (
+        patch.object(client.session, "request", return_value=resp_403) as mock_req,
+        pytest.raises(requests.HTTPError),
+    ):
+        client.api_call("GET", "https://example.com/v1/resource")
+
+    # Only one request — no retries.
+    assert mock_req.call_count == 1
+    client.session.close()
+
+
+def test_ensure_project_propagation_retry():
+    """Final GET retries briefly after project creation (propagation delay)."""
+    client = _make_client_with_token()
+
+    call_count = 0
+
+    def mock_api_call(method, url, json_payload=None):
+        nonlocal call_count
+        call_count += 1
+        if method == "GET" and call_count == 1:
+            # First GET: project doesn't exist
+            resp = _mock_response(403)
+            resp.raise_for_status()
+        elif method == "POST":
+            return {"name": "operations/create-op"}
+        elif method == "GET" and call_count <= 4:
+            # GETs 2-3: propagation delay
+            resp = _mock_response(403)
+            resp.raise_for_status()
+        elif method == "GET":
+            # GET 4: project visible
+            return {"projectNumber": "999"}
+        return None
+
+    with (
+        patch.object(client, "api_call", side_effect=mock_api_call),
+        patch.object(client, "wait_for_lro"),
+        patch("wif_bunker.gcp_client.time.sleep"),
+    ):
+        result = client.ensure_project("slow-project")
+
+    assert result == "999"
+    client.session.close()

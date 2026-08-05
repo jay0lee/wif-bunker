@@ -27,15 +27,14 @@ class TestRealHardwareCerts:
         reason="Intel NUC EK cert fixture not available",
     )
     def test_intel_nuc_ek_verifies(self):
-        """Real Intel NUC8 EK cert should verify against bundled + manually-managed roots.
+        """Real Intel NUC8 EK cert should verify against bundled + manually-managed certs.
 
-        This cert requires AIA chasing to fetch the Intel intermediate CA.
-        It chains: EK → CNL intermediate (via AIA) → Intel TPM EK Root (manually-managed).
+        Chain: EK → CNL intermediate (manually-managed) → Intel TPM EK Root (manually-managed).
+        No AIA chasing needed — all certs are bundled locally.
         """
         ek_pem = (FIXTURES_DIR / "nuc_intel_ek.pem").read_text()
         result = verify_ek_chain(ek_pem)
-        # May fail in CI (no network for AIA fetch) but should not crash
-        assert result is not None
+        assert result.passed is True, f"Intel NUC EK should verify: {result.detail}"
 
     @pytest.mark.skipif(
         not (FIXTURES_DIR / "nuc_intel_ek.pem").exists(),
