@@ -241,6 +241,70 @@ def test_wait_for_wif_resource_timeout():
 
 
 # ---------------------------------------------------------------------------
+# api_call_with_iam_retry
+# ---------------------------------------------------------------------------
+
+
+def test_iam_retry_succeeds_first_try():
+    """No retry needed — returns result immediately."""
+    client = _make_client_with_token()
+    mock_resp = _mock_response(json_data={"name": "sa@proj.iam"})
+
+    with patch.object(client.session, "request", return_value=mock_resp) as mock_req:
+        result = client.api_call_with_iam_retry("POST", "https://example.com/v1/sa")
+
+    assert result == {"name": "sa@proj.iam"}
+    assert mock_req.call_count == 1
+    client.session.close()
+
+
+def test_iam_retry_retries_403_then_succeeds():
+    """Retries on 403 and succeeds on second attempt."""
+    client = _make_client_with_token()
+    resp_403 = _mock_response(403)
+    resp_ok = _mock_response(json_data={"name": "pool/123"})
+
+    with (
+        patch.object(client.session, "request", side_effect=[resp_403, resp_ok]),
+        patch("wif_bunker.gcp_client.time.sleep"),
+    ):
+        result = client.api_call_with_iam_retry("POST", "https://example.com/v1/pool")
+
+    assert result == {"name": "pool/123"}
+    client.session.close()
+
+
+def test_iam_retry_exhausts_attempts():
+    """Raises after max_attempts 403s."""
+    client = _make_client_with_token()
+    resp_403 = _mock_response(403)
+
+    with (
+        patch.object(client.session, "request", return_value=resp_403),
+        patch("wif_bunker.gcp_client.time.sleep"),
+        pytest.raises(requests.HTTPError),
+    ):
+        client.api_call_with_iam_retry("POST", "https://example.com/v1/pool", max_attempts=3)
+
+    client.session.close()
+
+
+def test_iam_retry_does_not_retry_non_403():
+    """Non-403 errors raise immediately — no retry."""
+    client = _make_client_with_token()
+    resp_500 = _mock_response(500)
+
+    with (
+        patch.object(client.session, "request", return_value=resp_500) as mock_req,
+        pytest.raises(requests.HTTPError),
+    ):
+        client.api_call_with_iam_retry("POST", "https://example.com/v1/pool")
+
+    assert mock_req.call_count == 1
+    client.session.close()
+
+
+# ---------------------------------------------------------------------------
 # ensure_project
 # ---------------------------------------------------------------------------
 

@@ -274,7 +274,7 @@ class GCPClient:
         url: str,
         json_payload: dict | None = None,
     ) -> dict | None:
-        """Make an authenticated GCP API call with automatic retries."""
+        """Make a single authenticated GCP API call — no retries."""
         if self._credentials:
             # ADC mode — auto-refresh and apply credentials.
             self._credentials.refresh(self._auth_request)
@@ -286,6 +286,38 @@ class GCPClient:
         res = self.session.request(method, url, json=json_payload, headers=headers)
         res.raise_for_status()
         return res.json() if res.content else None
+
+    def api_call_with_iam_retry(
+        self,
+        method: str,
+        url: str,
+        json_payload: dict | None = None,
+        max_attempts: int = 8,
+    ) -> dict | None:
+        """api_call with retry on 403 (IAM propagation delay).
+
+        After project creation or API enablement, IAM permissions can
+        take several seconds to propagate.  Use this for calls where a
+        403 is expected to be transient (SA/pool/provider creation,
+        IAM policy bindings).  Not for existence checks where 403
+        means 'does not exist'.
+        """
+        for attempt in range(max_attempts):
+            try:
+                return self.api_call(method, url, json_payload)
+            except requests.exceptions.HTTPError as exc:
+                if exc.response is not None and exc.response.status_code == 403 and attempt < max_attempts - 1:
+                    sleep_time = min(2**attempt, MAX_BACKOFF_SECONDS)
+                    logger.info(
+                        "    Waiting for IAM propagation (%d/%d), %ds...",
+                        attempt + 1,
+                        max_attempts,
+                        sleep_time,
+                    )
+                    time.sleep(sleep_time)
+                    continue
+                raise
+        return None  # unreachable, but satisfies type checker
 
     def wait_for_lro(
         self,
@@ -379,7 +411,7 @@ class GCPClient:
     def enable_apis(self, project_number: str, api_list: list[str]) -> None:
         """Batch-enables the given APIs for the project."""
         su_base = "serviceusage.googleapis.com"
-        operation = self.api_call(
+        operation = self.api_call_with_iam_retry(
             "POST",
             f"https://{su_base}/v1/projects/{project_number}/services:batchEnable",
             {"serviceIds": api_list},
@@ -406,7 +438,7 @@ class GCPClient:
         def create_sa_task() -> str:
             logger.info("[Thread] Creating Service Account...")
             try:
-                result = self.api_call(
+                result = self.api_call_with_iam_retry(
                     "POST",
                     f"https://{iam_base}/v1/projects/{config.project_id}/serviceAccounts",
                     {
@@ -425,7 +457,7 @@ class GCPClient:
         def create_pool_task() -> None:
             logger.info("[Thread] Creating WIF Pool...")
             try:
-                pool_op = self.api_call(
+                pool_op = self.api_call_with_iam_retry(
                     "POST",
                     f"https://{iam_base}/v1/projects/{project_number}"
                     f"/locations/global/workloadIdentityPools"
@@ -478,7 +510,7 @@ class GCPClient:
                 logger.info("[Thread] Reusing WIF pool: %s", config.pool_id)
 
             logger.info("[Thread] Creating WIF X.509 Provider: %s", config.provider_id)
-            prov_op = self.api_call(
+            prov_op = self.api_call_with_iam_retry(
                 "POST",
                 f"{pool_res_url}/providers?workloadIdentityPoolProviderId={config.provider_id}",
                 provider_payload,
@@ -523,7 +555,7 @@ class GCPClient:
 
         if use_sa and sa_email:
             sa_iam_url = f"https://{iam_base}/v1/projects/{config.project_id}/serviceAccounts/{sa_email}:setIamPolicy"
-            sa_policy = self.api_call(
+            sa_policy = self.api_call_with_iam_retry(
                 "POST",
                 sa_iam_url.replace(":setIamPolicy", ":getIamPolicy"),
             )
@@ -532,10 +564,10 @@ class GCPClient:
             sa_policy.setdefault("bindings", []).append(
                 {"role": "roles/iam.workloadIdentityUser", "members": [wif_principal]},
             )
-            self.api_call("POST", sa_iam_url, {"policy": sa_policy})
+            self.api_call_with_iam_retry("POST", sa_iam_url, {"policy": sa_policy})
 
         proj_iam_url = f"https://{crm_base}/v1/projects/{config.project_id}:setIamPolicy"
-        proj_policy = self.api_call(
+        proj_policy = self.api_call_with_iam_retry(
             "POST",
             proj_iam_url.replace(":setIamPolicy", ":getIamPolicy"),
         )
@@ -548,4 +580,4 @@ class GCPClient:
         proj_policy.setdefault("bindings", []).append(
             {"role": "roles/browser", "members": [proj_member]},
         )
-        self.api_call("POST", proj_iam_url, {"policy": proj_policy})
+        self.api_call_with_iam_retry("POST", proj_iam_url, {"policy": proj_policy})
