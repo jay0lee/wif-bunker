@@ -450,6 +450,75 @@ def _ncrypt_create_claim(config: WorkloadConfig, key_info: dict | None = None) -
     key_handle = wintypes.HANDLE()
     ak_handle = None
 
+    # ---------------------------------------------------------------
+    # Declare argtypes/restype for every ncrypt function we call.
+    # WITHOUT these, ctypes defaults to c_int (32-bit) for return
+    # values AND may truncate 64-bit HANDLE arguments on 64-bit
+    # Windows, causing NCryptCreateClaim to receive garbage handles.
+    # ---------------------------------------------------------------
+    ncrypt.NCryptOpenStorageProvider.argtypes = [
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+    ]
+    ncrypt.NCryptOpenStorageProvider.restype = ctypes.c_long
+
+    ncrypt.NCryptOpenKey.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+    ]
+    ncrypt.NCryptOpenKey.restype = ctypes.c_long
+
+    ncrypt.NCryptCreatePersistedKey.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+    ]
+    ncrypt.NCryptCreatePersistedKey.restype = ctypes.c_long
+
+    ncrypt.NCryptSetProperty.argtypes = [
+        ctypes.c_void_p,
+        wintypes.LPCWSTR,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+    ]
+    ncrypt.NCryptSetProperty.restype = ctypes.c_long
+
+    ncrypt.NCryptGetProperty.argtypes = [
+        ctypes.c_void_p,
+        wintypes.LPCWSTR,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.DWORD,
+    ]
+    ncrypt.NCryptGetProperty.restype = ctypes.c_long
+
+    ncrypt.NCryptFinalizeKey.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+    ncrypt.NCryptFinalizeKey.restype = ctypes.c_long
+
+    ncrypt.NCryptCreateClaim.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.DWORD,
+    ]
+    ncrypt.NCryptCreateClaim.restype = ctypes.c_long
+
+    ncrypt.NCryptFreeObject.argtypes = [ctypes.c_void_p]
+    ncrypt.NCryptFreeObject.restype = ctypes.c_long
+
     if not key_info:
         return (
             AttestationCheck(
