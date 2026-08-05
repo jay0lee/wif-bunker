@@ -24,7 +24,7 @@ if project:
 
 # ── Verify ADC works: call the target project ──
 if project:
-    print(f"\n--- API Verification ---")
+    print("\n--- API Verification ---")
     resp = authed_session.get(
         f"https://cloudresourcemanager.googleapis.com/v1/projects/{project}",
     )
