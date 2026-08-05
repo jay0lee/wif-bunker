@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from cryptography import x509
-from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 
 logger = logging.getLogger(__name__)
 
@@ -91,28 +90,24 @@ def _load_certs(directory: Path) -> list[x509.Certificate]:
     return certs
 
 
-def _verify_ek_chain_pyopenssl(
+def _verify_ek_chain_openssl(
     ek_pem: str, roots_dir: Path, intermediates_dir: Path, manually_managed_dir: Path | None = None
 ) -> AttestationCheck:
-    """Verify EK cert chain using pyOpenSSL when cryptography's strict parser fails.
+    """Verify EK cert chain using pyOpenSSL's X509StoreContext.
 
-    **Why this exists:**
+    Uses OpenSSL's native chain verification rather than the ``cryptography``
+    library's strict Rust-based parser, which rejects certificates with
+    non-canonical DER encoding (e.g. ``InvalidSetOrdering`` in Nuvoton TPMs).
+    See pyca/cryptography#7189 — the maintainers refuse to add leniency.
 
-    The ``cryptography`` library (>= v42) uses a strict Rust-based X.509
-    parser that rejects certificates with non-canonical DER encoding — in
-    particular, SET OF elements that aren't sorted in lexicographic order
-    (``InvalidSetOrdering``).  The library maintainers intentionally refuse
-    to add a leniency flag for this (see pyca/cryptography#7189).
+    In practice, 100% of real-world TPM EK certificates we've tested
+    (Intel, Nuvoton/Dell) require this path — either because the cert has
+    non-standard encoding, or because an intermediate must be fetched via
+    AIA chasing (which only this path implements).
 
-    Several major TPM manufacturers (e.g. Nuvoton on Dell hardware) ship
-    EK certificates that violate this rule.  The certificate data itself is
-    perfectly valid — OpenSSL has no trouble with it.
-
-    OpenSSL's ``d2i_X509`` / ``i2d_X509`` preserves original DER byte
-    ordering on output, so the "re-encode to fix" approach doesn't work.
-    Instead we use ``pyOpenSSL``'s ``X509StoreContext`` to do the **entire**
-    chain verification natively in OpenSSL's C library — no conversion back
-    to ``cryptography`` needed.
+    Includes AIA (Authority Information Access) chasing: if the issuer
+    certificate is not bundled locally, it fetches intermediates from the
+    URLs embedded in the cert's AIA extension (up to 3 levels deep).
     """
     import re
     import subprocess
@@ -128,7 +123,7 @@ def _verify_ek_chain_pyopenssl(
         load_certificate,
     )
 
-    logger.debug("Using pyOpenSSL X509StoreContext for EK chain verification")
+    logger.debug("Verifying EK chain via OpenSSL X509StoreContext")
 
     try:
         ek_cert = load_certificate(FILETYPE_PEM, ek_pem.encode("utf-8"))
@@ -136,7 +131,7 @@ def _verify_ek_chain_pyopenssl(
         return AttestationCheck(
             name="EK certificate chain verified",
             passed=False,
-            detail=f"pyOpenSSL could not parse EK certificate either: {e}",
+            detail=f"Could not parse EK certificate: {e}",
         )
 
     # Build an X509Store with all root CAs.
@@ -160,7 +155,7 @@ def _verify_ek_chain_pyopenssl(
         return AttestationCheck(
             name="EK certificate chain verified",
             passed=False,
-            detail="No root CA certificates could be loaded by pyOpenSSL.",
+            detail="No root CA certificates could be loaded.",
         )
 
     # Load intermediates (untrusted chain certs).
@@ -223,7 +218,7 @@ def _verify_ek_chain_pyopenssl(
         return AttestationCheck(
             name="EK certificate chain verified",
             passed=False,
-            detail=f"EK certificate chain verification failed (pyOpenSSL): {err_msg}",
+            detail=f"EK certificate chain verification failed: {err_msg}",
         )
 
     return AttestationCheck(
@@ -231,7 +226,7 @@ def _verify_ek_chain_pyopenssl(
         passed=True,
         detail=(
             "EK certificate verified against tpm-ca-certificates bundle "
-            "(via pyOpenSSL — cert has non-standard DER encoding)"
+            "(https://github.com/loicsikidi/tpm-ca-certificates)"
         ),
     )
 
@@ -239,14 +234,12 @@ def _verify_ek_chain_pyopenssl(
 def verify_ek_chain(ek_pem: str) -> AttestationCheck:
     """Verify EK certificate against known manufacturer root CAs.
 
-    Shared by Linux and Windows attestation modules. Loads individual
-    root and intermediate CA PEMs from the ``roots/roots/`` and
-    ``roots/intermediates/`` directories (sourced from
-    https://github.com/loicsikidi/tpm-ca-certificates) and uses
-    cryptography.x509.verification.
+    Shared by Linux and Windows attestation modules. Loads root and
+    intermediate CA PEMs from the ``roots/`` directory tree (sourced from
+    https://github.com/loicsikidi/tpm-ca-certificates) and verifies the
+    EK cert chain using OpenSSL's X509StoreContext via pyOpenSSL.
 
-    Falls back to pyOpenSSL's X509StoreContext for certs with non-canonical
-    DER encoding (e.g. Nuvoton TPMs with InvalidSetOrdering in issuer).
+    Includes AIA chasing for intermediates not bundled locally.
     """
     # In PyInstaller builds, data files are extracted under sys._MEIPASS
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
@@ -264,111 +257,7 @@ def verify_ek_chain(ek_pem: str) -> AttestationCheck:
             detail="No manufacturer root CA certificates bundled. Chain verification skipped.",
         )
 
-    # Try the standard path: cryptography's strict parser.
-    ek_cert = None
-    try:
-        ek_cert = x509.load_pem_x509_certificate(ek_pem.encode("utf-8"))
-    except Exception:
-        # Strict parser rejected the cert (e.g. InvalidSetOrdering).
-        # Fall back to pyOpenSSL for the entire chain verification.
-        logger.debug("cryptography's strict parser rejected EK cert; falling back to pyOpenSSL")
-        return _verify_ek_chain_pyopenssl(ek_pem, roots_dir, intermediates_dir, manually_managed_dir)
-
-    try:
-        roots = _load_certs(roots_dir)
-        if manually_managed_dir.exists():
-            roots.extend(_load_certs(manually_managed_dir))
-
-        intermediates = []
-        if intermediates_dir.exists():
-            intermediates.extend(_load_certs(intermediates_dir))
-        if manually_managed_dir.exists():
-            intermediates.extend(_load_certs(manually_managed_dir))
-
-        # Build issuer lookup using raw subject bytes.
-        all_ca_certs: list[x509.Certificate] = roots + intermediates
-        issuer_lookup: dict[bytes, x509.Certificate] = {}
-        for cert in all_ca_certs:
-            try:
-                issuer_lookup[cert.subject.public_bytes()] = cert
-            except Exception:
-                pass
-
-        # Walk up the chain from the EK cert to a trusted root.
-        current = ek_cert
-        depth = 0
-        max_depth = 10
-        while depth < max_depth:
-            try:
-                issuer_bytes = current.issuer.public_bytes()
-            except Exception:
-                return AttestationCheck(
-                    name="EK certificate chain verified",
-                    passed=False,
-                    detail=(
-                        "Could not read EK certificate issuer field. "
-                        "The TPM manufacturer may have used non-standard DER encoding."
-                    ),
-                )
-
-            issuer_cert = issuer_lookup.get(issuer_bytes)
-            if issuer_cert is None:
-                try:
-                    issuer_str = current.issuer.rfc4514_string()
-                except Exception:
-                    issuer_str = "(unparseable issuer)"
-                return AttestationCheck(
-                    name="EK certificate chain verified",
-                    passed=False,
-                    detail=(f"Could not find issuer '{issuer_str}' in bundled manufacturer CA certificates."),
-                )
-
-            # Verify the signature.
-            issuer_pub = issuer_cert.public_key()
-            if isinstance(issuer_pub, rsa.RSAPublicKey):
-                issuer_pub.verify(
-                    current.signature,
-                    current.tbs_certificate_bytes,
-                    padding.PKCS1v15(),
-                    current.signature_hash_algorithm,
-                )
-            elif isinstance(issuer_pub, ec.EllipticCurvePublicKey):
-                issuer_pub.verify(
-                    current.signature,
-                    current.tbs_certificate_bytes,
-                    ec.ECDSA(current.signature_hash_algorithm),
-                )
-            else:
-                return AttestationCheck(
-                    name="EK certificate chain verified",
-                    passed=False,
-                    detail=f"Unsupported key type: {type(issuer_pub).__name__}",
-                )
-
-            if issuer_cert in roots:
-                return AttestationCheck(
-                    name="EK certificate chain verified",
-                    passed=True,
-                    detail=(
-                        "EK certificate verified against tpm-ca-certificates bundle "
-                        "(https://github.com/loicsikidi/tpm-ca-certificates)"
-                    ),
-                )
-
-            current = issuer_cert
-            depth += 1
-
-        return AttestationCheck(
-            name="EK certificate chain verified",
-            passed=False,
-            detail="Certificate chain too deep (exceeded 10 levels).",
-        )
-    except Exception as e:
-        return AttestationCheck(
-            name="EK certificate chain verified",
-            passed=False,
-            detail=f"EK certificate did not chain to any bundled manufacturer root CA. Error: {e}",
-        )
+    return _verify_ek_chain_openssl(ek_pem, roots_dir, intermediates_dir, manually_managed_dir)
 
 
 # TPM Manufacturer IDs — the ManufacturerId from Get-Tpm is a 32-bit int

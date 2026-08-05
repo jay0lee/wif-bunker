@@ -7,7 +7,6 @@ import logging
 import os
 import re
 import secrets
-import string
 import subprocess
 import sys
 from pathlib import Path
@@ -17,6 +16,7 @@ from cryptography.hazmat.primitives import serialization
 
 from wif_bunker.cert import _create_ca_and_sign
 from wif_bunker.config import CertificateBundle, WorkloadConfig
+from wif_bunker.utils import generate_pin
 
 logger = logging.getLogger(__name__)
 
@@ -165,9 +165,8 @@ def generate_cert_yubikey(config: WorkloadConfig) -> CertificateBundle:
 
         if is_default:
             logger.info("Initializing YubiKey with randomized credentials...")
-            alphabet = string.ascii_letters + string.digits
-            new_pin = "".join(secrets.choice(alphabet) for _ in range(8))
-            new_puk = "".join(secrets.choice(alphabet) for _ in range(8))
+            new_pin = generate_pin(length=8)  # PIV spec: max 8 chars
+            new_puk = generate_pin(length=8)
             new_mgm = secrets.token_bytes(24)
 
             piv.change_pin("123456", new_pin)

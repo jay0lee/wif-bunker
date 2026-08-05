@@ -66,8 +66,8 @@ addopts = "-v --tb=short -m 'not integration'"
 
 # ── Coverage ──
 [tool.coverage.run]
-source = ["wif_bunker", "get_ecp"]
+source = ["wif_bunker"]
 
 [tool.coverage.report]
 show_missing = true
-fail_under = 50
+fail_under = 59

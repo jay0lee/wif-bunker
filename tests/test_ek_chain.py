@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import datetime
 
-import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -13,7 +12,7 @@ from cryptography.x509.oid import NameOID
 from wif_bunker.attestation.base import (
     AttestationCheck,
     _load_certs,
-    _verify_ek_chain_pyopenssl,
+    _verify_ek_chain_openssl,
     verify_ek_chain,
 )
 
@@ -175,32 +174,6 @@ class TestVerifyEkChain:
         assert isinstance(result, AttestationCheck)
         assert result.passed is False
 
-    def test_does_not_call_openssl(self, tmp_path, monkeypatch):
-        """verify_ek_chain uses cryptography library, not openssl CLI."""
-        import subprocess
-
-        original_run = subprocess.run
-
-        def fail_on_openssl(*args, **kwargs):
-            cmd = args[0] if args else kwargs.get("args", [])
-            if isinstance(cmd, list) and cmd and cmd[0] == "openssl":
-                pytest.fail("verify_ek_chain should not call openssl CLI")
-            return original_run(*args, **kwargs)
-
-        ca_pem, ek_pem = _generate_ca_and_signed_cert()
-        roots_dir = tmp_path / "roots" / "roots"
-        roots_dir.mkdir(parents=True)
-        (roots_dir / "test_ca.pem").write_text(ca_pem)
-
-        monkeypatch.setattr(
-            "wif_bunker.attestation.base.__file__",
-            str(tmp_path / "base.py"),
-        )
-        monkeypatch.setattr(subprocess, "run", fail_on_openssl)
-
-        result = verify_ek_chain(ek_pem)
-        assert result.passed is True
-
 
 def _generate_3_cert_chain() -> tuple[str, str, str]:
     """Generate a root, intermediate, and EK certificate."""
@@ -257,6 +230,49 @@ def _generate_3_cert_chain() -> tuple[str, str, str]:
     )
 
 
+class TestMissingIntermediateFallback:
+    """Tests for chain verification when intermediate is missing from bundled certs."""
+
+    def test_manually_managed_roots_loaded(self, tmp_path, monkeypatch):
+        """Certs in manually-managed/ are loaded as both roots and intermediates."""
+        root_pem, inter_pem, ek_pem = _generate_3_cert_chain()
+
+        # Put root in manually-managed instead of roots/
+        roots_dir = tmp_path / "roots" / "roots"
+        roots_dir.mkdir(parents=True)
+        manually_managed = tmp_path / "roots" / "manually-managed"
+        manually_managed.mkdir(parents=True)
+
+        # Need at least one cert in roots dir to pass the empty check
+        (roots_dir / "dummy.pem").write_text(_generate_self_signed_cert())
+        # Put the actual root in manually-managed
+        (manually_managed / "custom_root.pem").write_text(root_pem)
+
+        # Also need the intermediate for the 3-cert chain
+        inter_dir = tmp_path / "roots" / "intermediates"
+        inter_dir.mkdir(parents=True)
+        (inter_dir / "inter.pem").write_text(inter_pem)
+
+        monkeypatch.setattr("wif_bunker.attestation.base.__file__", str(tmp_path / "base.py"))
+        result = verify_ek_chain(ek_pem)
+        assert result.passed is True, f"Failed with manually-managed root: {result.detail}"
+
+    def test_missing_intermediate_no_aia_still_fails(self, tmp_path, monkeypatch):
+        """When intermediate is missing and AIA chasing can't help, check fails cleanly."""
+        root_pem, _inter_pem, ek_pem = _generate_3_cert_chain()
+
+        roots_dir = tmp_path / "roots" / "roots"
+        roots_dir.mkdir(parents=True)
+        (roots_dir / "root.pem").write_text(root_pem)
+        (tmp_path / "roots" / "intermediates").mkdir(parents=True)
+
+        monkeypatch.setattr("wif_bunker.attestation.base.__file__", str(tmp_path / "base.py"))
+
+        # EK cert has no AIA extension, so AIA chasing has nothing to fetch
+        result = verify_ek_chain(ek_pem)
+        assert result.passed is False
+
+
 class TestVerifyEkChainIntermediates:
     """Tests for intermediate CA handling in verify_ek_chain."""
 
@@ -292,11 +308,11 @@ class TestVerifyEkChainIntermediates:
         assert result.passed is False
 
 
-class TestPyOpenSSLFallback:
-    """Tests for the pyOpenSSL X509StoreContext fallback when cryptography rejects a cert."""
+class TestOpenSSLVerification:
+    """Tests for _verify_ek_chain_openssl (the sole chain verification path)."""
 
-    def test_pyopenssl_verifies_valid_chain(self, tmp_path):
-        """_verify_ek_chain_pyopenssl verifies a properly-signed cert."""
+    def test_verifies_valid_chain(self, tmp_path):
+        """_verify_ek_chain_openssl verifies a properly-signed cert."""
         ca_pem, ek_pem = _generate_ca_and_signed_cert()
 
         roots_dir = tmp_path / "roots"
@@ -304,12 +320,11 @@ class TestPyOpenSSLFallback:
         (roots_dir / "ca.pem").write_text(ca_pem)
         intermediates_dir = tmp_path / "intermediates"
 
-        result = _verify_ek_chain_pyopenssl(ek_pem, roots_dir, intermediates_dir)
+        result = _verify_ek_chain_openssl(ek_pem, roots_dir, intermediates_dir)
         assert result.passed is True
-        assert "pyOpenSSL" in result.detail
 
-    def test_pyopenssl_rejects_unrelated_cert(self, tmp_path):
-        """_verify_ek_chain_pyopenssl fails when cert is not signed by any root."""
+    def test_rejects_unrelated_cert(self, tmp_path):
+        """_verify_ek_chain_openssl fails when cert is not signed by any root."""
         ca_pem, _ = _generate_ca_and_signed_cert()
         _, unrelated_ek_pem = _generate_ca_and_signed_cert()  # different CA
 
@@ -318,12 +333,12 @@ class TestPyOpenSSLFallback:
         (roots_dir / "ca.pem").write_text(ca_pem)
         intermediates_dir = tmp_path / "intermediates"
 
-        result = _verify_ek_chain_pyopenssl(unrelated_ek_pem, roots_dir, intermediates_dir)
+        result = _verify_ek_chain_openssl(unrelated_ek_pem, roots_dir, intermediates_dir)
         assert result.passed is False
         assert "verification failed" in result.detail
 
-    def test_pyopenssl_garbage_cert(self, tmp_path):
-        """_verify_ek_chain_pyopenssl gives clear error on garbage input."""
+    def test_garbage_cert(self, tmp_path):
+        """_verify_ek_chain_openssl gives clear error on garbage input."""
         ca_pem, _ = _generate_ca_and_signed_cert()
         roots_dir = tmp_path / "roots"
         roots_dir.mkdir()
@@ -331,32 +346,12 @@ class TestPyOpenSSLFallback:
         intermediates_dir = tmp_path / "intermediates"
 
         garbage_pem = "-----BEGIN CERTIFICATE-----\nbm90YWNlcnQ=\n-----END CERTIFICATE-----"
-        result = _verify_ek_chain_pyopenssl(garbage_pem, roots_dir, intermediates_dir)
+        result = _verify_ek_chain_openssl(garbage_pem, roots_dir, intermediates_dir)
         assert result.passed is False
         assert "could not parse" in result.detail.lower()
 
-    def test_verify_ek_chain_falls_back_to_pyopenssl(self, tmp_path, monkeypatch):
-        """When cryptography rejects the EK cert, verify_ek_chain falls back to pyOpenSSL."""
-        from unittest.mock import patch
-
-        ca_pem, ek_pem = _generate_ca_and_signed_cert()
-        roots_dir = tmp_path / "roots" / "roots"
-        roots_dir.mkdir(parents=True)
-        (roots_dir / "ca.pem").write_text(ca_pem)
-        monkeypatch.setattr("wif_bunker.attestation.base.__file__", str(tmp_path / "base.py"))
-
-        # Make cryptography's parser always fail for the EK cert
-        with patch(
-            "wif_bunker.attestation.base.x509.load_pem_x509_certificate",
-            side_effect=ValueError("Simulated InvalidSetOrdering"),
-        ):
-            result = verify_ek_chain(ek_pem)
-
-        assert result.passed is True
-        assert "pyOpenSSL" in result.detail
-
-    def test_both_parsers_fail_gives_clear_error(self, tmp_path, monkeypatch):
-        """When both cryptography and pyOpenSSL fail, error is clear."""
+    def test_garbage_pem_via_verify_ek_chain(self, tmp_path, monkeypatch):
+        """Garbage PEM through the public API gives clear error."""
         ca_pem, _ = _generate_ca_and_signed_cert()
         roots_dir = tmp_path / "roots" / "roots"
         roots_dir.mkdir(parents=True)

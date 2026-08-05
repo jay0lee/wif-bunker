@@ -5,7 +5,11 @@ def test_config_defaults():
     config = WorkloadConfig()
     assert config.pool_id == "bunker-wif-pool"
     assert config.sa_name == "bunker-wif-sa"
-    assert config.linux_tpm_pin == "bunker123"
+    assert len(config.linux_tpm_pin) == 24
+    assert config.linux_tpm_pin.isalnum()
+    # Verify each instance gets a unique PIN
+    config2 = WorkloadConfig()
+    assert config.linux_tpm_pin != config2.linux_tpm_pin
     assert config.key_algorithm == "es256"
 
 

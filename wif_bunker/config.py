@@ -75,6 +75,18 @@ _KEY_ALGORITHMS: dict[str, dict] = {
 _CONFIG_FILES = ("adc.json", "certificate_config.json", "workload_cert.pem", "trust_chain.pem")
 
 
+def _generate_tpm_pin(length: int = 24) -> str:
+    """Generate a random alphanumeric PIN for TPM PKCS#11 tokens.
+
+    Default 24 chars — never human-typed, stored in 0o600 config files.
+    """
+    import secrets  # pylint: disable=import-outside-toplevel
+    import string  # pylint: disable=import-outside-toplevel
+
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
 # --- Runtime Configuration ---
 @dataclass
 class WorkloadConfig:
@@ -83,7 +95,7 @@ class WorkloadConfig:
     sa_name: str = "bunker-wif-sa"
     pool_id: str = "bunker-wif-pool"
     provider_id: str = field(init=False)  # unique per run
-    linux_tpm_pin: str = "bunker123"
+    linux_tpm_pin: str = field(default_factory=lambda: _generate_tpm_pin())
     key_algorithm: str = "es256"
     cert_lifetime_days: int = _DEFAULT_CERT_LIFETIME_DAYS
     soft_key: bool = False  # Use software keys (CI testing, no TPM required)

@@ -1,9 +1,49 @@
 import stat
+import string
 import sys
 
 import pytest
 
-from wif_bunker.utils import preflight_check_write_access, write_secure_file
+from wif_bunker.utils import generate_pin, preflight_check_write_access, write_secure_file
+
+
+class TestGeneratePin:
+    """Tests for the shared PIN generation function."""
+
+    def test_default_length(self):
+        pin = generate_pin()
+        assert len(pin) == 24
+
+    def test_custom_length(self):
+        for length in (4, 8, 16, 32, 64):
+            pin = generate_pin(length=length)
+            assert len(pin) == length
+
+    def test_alphanumeric_only(self):
+        allowed = set(string.ascii_letters + string.digits)
+        for _ in range(50):
+            pin = generate_pin()
+            assert set(pin).issubset(allowed), f"PIN contains non-alphanumeric: {pin}"
+
+    def test_uniqueness(self):
+        """100 generated PINs should all be unique (collision at 62^24 is impossible)."""
+        pins = {generate_pin() for _ in range(100)}
+        assert len(pins) == 100
+
+    def test_yubikey_length(self):
+        """YubiKey PIV spec limits PINs to 8 chars."""
+        pin = generate_pin(length=8)
+        assert len(pin) == 8
+        assert pin.isalnum()
+
+    def test_length_zero(self):
+        pin = generate_pin(length=0)
+        assert pin == ""
+
+    def test_length_one(self):
+        pin = generate_pin(length=1)
+        assert len(pin) == 1
+        assert pin.isalnum()
 
 
 @pytest.fixture

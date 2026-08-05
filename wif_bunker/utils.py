@@ -55,6 +55,23 @@ SYM_CHECK = "\u2713" if _UNICODE else "[ok]"
 SYM_CROSS = "\u2717" if _UNICODE else "[X]"
 
 
+def generate_pin(length: int = 24) -> str:
+    """Generate a cryptographically random alphanumeric PIN.
+
+    Used by both Linux TPM (PKCS#11 token PIN) and YubiKey (PIV PIN)
+    to replace hardcoded defaults with per-setup random values.
+
+    Default length is 24 chars — since PINs are never human-typed
+    (stored in 0o600 config files), longer is strictly better.
+    YubiKey callers should pass length=8 (PIV spec limit).
+    """
+    import secrets  # pylint: disable=import-outside-toplevel
+    import string  # pylint: disable=import-outside-toplevel
+
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
 class _CleanFormatter(logging.Formatter):
     """Strips the level prefix from INFO messages for a cleaner CLI experience."""
 
