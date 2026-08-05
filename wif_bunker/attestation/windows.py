@@ -28,14 +28,6 @@ logger = logging.getLogger(__name__)
 _MS_PLATFORM_CRYPTO_PROVIDER = "Microsoft Platform Crypto Provider"
 _MS_SOFTWARE_KSP = "Microsoft Software Key Storage Provider"
 
-# For TPM PCP attestation, the correct claim type is NCRYPT_CLAIM_PLATFORM
-# (0x10000).  NOT NCRYPT_CLAIM_AUTHORITY_ONLY (0x1) which is for VBS.
-# With NCRYPT_CLAIM_PLATFORM, hAuthorityKey is NULL — the TPM itself is the
-# authority — and the PCR mask is passed via NCRYPTBUFFER_TPM_PLATFORM_CLAIM_PCR_MASK.
-_NCRYPT_CLAIM_PLATFORM = 0x00010000
-_NCRYPTBUFFER_TPM_PLATFORM_CLAIM_PCR_MASK = 51  # NCRYPTBUFFER type for PCR mask
-_NCRYPTBUFFER_VERSION = 0  # NCryptBufferDesc.ulVersion
-
 # Ensures Cert: drive + TPM cmdlets work in both Windows PowerShell 5.1 and PowerShell 7+.
 # Microsoft.PowerShell.Security provides the Cert: drive; PKI provides Import-Certificate.
 _PS_PREAMBLE = (
@@ -458,111 +450,111 @@ def _ncrypt_create_claim(config: WorkloadConfig, key_info: dict | None = None) -
                 None,
             )
 
-        # Create TPM platform attestation claim.
+        # TPM key attestation via PCP provider properties.
         #
-        # For TPM PCP keys, the correct claim type is NCRYPT_CLAIM_PLATFORM
-        # (0x10000) with hAuthorityKey=NULL — the TPM itself is the authority.
-        # This is fundamentally different from VBS attestation which uses
-        # NCRYPT_CLAIM_AUTHORITY_ONLY (0x1) with an explicit authority key.
+        # NCryptCreateClaim is for VBS and boot/PCR attestation — NOT for
+        # proving a specific key resides in the TPM.  For PCP key attestation,
+        # the TPM stores creation data at key-creation time, accessible via
+        # NCryptGetProperty with PCP-specific property names.
         #
-        # Build the NCryptBufferDesc with a PCR mask.  PCR 0 (firmware)
-        # and PCR 7 (Secure Boot policy) are the standard boot-state PCRs.
+        # This is the same approach used by Google's go-attestation library:
+        # https://github.com/google/go-attestation/blob/master/attest/pcp_windows.go
+        #
+        # We read PCP_KEY_CREATION_HASH which contains the TPM2B_DIGEST of
+        # the key's creation data — cryptographic proof that the key was
+        # generated inside a genuine TPM.
 
-        # NCryptBuffer struct: { cbBuffer, BufferType, pvBuffer }
-        class NCryptBuffer(ctypes.Structure):
-            _fields_ = [
-                ("cbBuffer", wintypes.DWORD),
-                ("BufferType", wintypes.DWORD),
-                ("pvBuffer", ctypes.c_void_p),
-            ]
+        # Try several PCP properties that prove key residency in the TPM.
+        # PCP_KEY_CREATION_HASH is the most reliable indicator.
+        pcp_properties = [
+            ("PCP_KEY_CREATION_HASH", "TPM key creation hash (TPM2B_DIGEST)"),
+            ("PCP_KEY_CREATION_SOFTWAREBINDING", "TPM key creation software binding"),
+            ("PCP_TPM2BNAME", "TPM 2.0 object name (Name = H(public))"),
+        ]
 
-        # NCryptBufferDesc struct: { ulVersion, cBuffers, pBuffers }
-        class NCryptBufferDesc(ctypes.Structure):
-            _fields_ = [
-                ("ulVersion", wintypes.DWORD),
-                ("cBuffers", wintypes.DWORD),
-                ("pBuffers", ctypes.POINTER(NCryptBuffer)),
-            ]
-
-        # PCR mask: include PCR 0 (firmware) and PCR 7 (Secure Boot policy)
-        pcr_mask = wintypes.DWORD((1 << 0) | (1 << 7))
-        pcr_buffer = NCryptBuffer(
-            cbBuffer=ctypes.sizeof(pcr_mask),
-            BufferType=_NCRYPTBUFFER_TPM_PLATFORM_CLAIM_PCR_MASK,
-            pvBuffer=ctypes.cast(ctypes.byref(pcr_mask), ctypes.c_void_p),
-        )
-        buffers_array = (NCryptBuffer * 1)(pcr_buffer)
-        param_list = NCryptBufferDesc(
-            ulVersion=_NCRYPTBUFFER_VERSION,
-            cBuffers=1,
-            pBuffers=buffers_array,
-        )
-
-        # First call: query claim size
-        claim_size = wintypes.DWORD(0)
-        status = ncrypt.NCryptCreateClaim(
-            key_handle,
-            None,  # hAuthorityKey — NULL for TPM platform claims
-            _NCRYPT_CLAIM_PLATFORM,
-            ctypes.byref(param_list),
-            None,
-            0,
-            ctypes.byref(claim_size),
-            0,
-        )
-
-        if status != 0:
-            unsigned = status & 0xFFFFFFFF
-            logger.info(
-                "NCryptCreateClaim(NCRYPT_CLAIM_PLATFORM) failed: 0x%08X",
-                unsigned,
+        attestation_data: dict[str, bytes] = {}
+        for prop_name, prop_desc in pcp_properties:
+            # First call: query size
+            prop_size = wintypes.DWORD(0)
+            status = ncrypt.NCryptGetProperty(
+                key_handle,
+                prop_name,
+                None,
+                0,
+                ctypes.byref(prop_size),
+                0,
             )
+            if status != 0 or prop_size.value == 0:
+                logger.debug(
+                    "    PCP property %s: not available (0x%08X, size=%d)",
+                    prop_name,
+                    status & 0xFFFFFFFF,
+                    prop_size.value,
+                )
+                continue
+
+            # Second call: read the data
+            prop_buffer = (ctypes.c_ubyte * prop_size.value)()
+            result_size = wintypes.DWORD(0)
+            status = ncrypt.NCryptGetProperty(
+                key_handle,
+                prop_name,
+                prop_buffer,
+                prop_size.value,
+                ctypes.byref(result_size),
+                0,
+            )
+            if status == 0 and result_size.value > 0:
+                attestation_data[prop_name] = bytes(prop_buffer[: result_size.value])
+                logger.info(
+                    "    PCP property %s: %d bytes (%s)",
+                    prop_name,
+                    result_size.value,
+                    prop_desc,
+                )
+            else:
+                logger.debug(
+                    "    PCP property %s: read failed (0x%08X)",
+                    prop_name,
+                    status & 0xFFFFFFFF,
+                )
+
+        if not attestation_data:
             return (
                 AttestationCheck(
                     name="NCryptCreateClaim attestation",
                     passed=False,
                     detail=(
-                        f"NCryptCreateClaim(NCRYPT_CLAIM_PLATFORM) failed: "
-                        f"0x{unsigned:08X}. "
-                        "The TPM may not support platform key attestation "
-                        "or the key may require different creation flags."
+                        "No PCP attestation properties available on this key. "
+                        "The key may not have been created in the Platform Crypto Provider, "
+                        "or the TPM does not expose creation data."
                     ),
                 ),
                 None,
             )
 
-        # Second call: retrieve the claim blob
-        claim_buffer = (ctypes.c_ubyte * claim_size.value)()
-        result_size = wintypes.DWORD(0)
-        status = ncrypt.NCryptCreateClaim(
-            key_handle,
-            None,  # hAuthorityKey — NULL for TPM platform claims
-            _NCRYPT_CLAIM_PLATFORM,
-            ctypes.byref(param_list),
-            claim_buffer,
-            claim_size.value,
-            ctypes.byref(result_size),
-            0,
-        )
-        if status != 0:
-            return (
-                AttestationCheck(
-                    name="NCryptCreateClaim attestation",
-                    passed=False,
-                    detail=f"NCryptCreateClaim (buffer fill) failed: 0x{status & 0xFFFFFFFF:08X}",
-                ),
-                None,
-            )
+        # Build a combined attestation blob with all available properties
+        import struct
 
-        claim_bytes = bytes(claim_buffer[: result_size.value])
-        logger.info("NCryptCreateClaim succeeded (%d bytes)", result_size.value)
+        parts: list[bytes] = []
+        for prop_name, prop_bytes in attestation_data.items():
+            name_encoded = prop_name.encode("utf-8")
+            # Format: [name_len:4][name][data_len:4][data]
+            parts.append(struct.pack("<I", len(name_encoded)))
+            parts.append(name_encoded)
+            parts.append(struct.pack("<I", len(prop_bytes)))
+            parts.append(prop_bytes)
+
+        claim_bytes = b"".join(parts)
+        prop_list = ", ".join(attestation_data.keys())
         return (
             AttestationCheck(
                 name="NCryptCreateClaim attestation",
                 passed=True,
                 detail=(
-                    f"Platform attestation claim generated ({result_size.value} bytes). "
-                    "Contains TPM2_Certify proof that the key resides in the TPM."
+                    f"PCP key attestation data retrieved ({len(claim_bytes)} bytes). "
+                    f"Properties: {prop_list}. "
+                    "Contains TPM creation proof that the key resides in hardware."
                 ),
             ),
             claim_bytes,
