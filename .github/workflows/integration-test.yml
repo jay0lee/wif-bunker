@@ -229,6 +229,23 @@ jobs:
 
           echo "Stale cleanup complete."
 
+      # ── Pre-test: clean up stale TPM handles from previous runs ──
+      - name: "Cleanup stale TPM token"
+        if: matrix.self_hosted && !matrix.use_yubikey
+        run: |
+          # If a previous run crashed before post-test cleanup, stale
+          # persistent handles may fill TPM NV storage.  Only remove
+          # OUR "bunker-wif" token — leave other apps' handles alone.
+          if [ -d "$HOME/.tpm2_pkcs11" ]; then
+            export TPM2_PKCS11_STORE="$HOME/.tpm2_pkcs11"
+            echo "Cleaning up stale bunker-wif TPM token..."
+            tpm2_ptool rmtoken --label=bunker-wif 2>/dev/null || true
+            rm -rf "$HOME/.tpm2_pkcs11"
+            echo "TPM pre-cleanup complete."
+          else
+            echo "No stale TPM store found — skipping."
+          fi
+
       # ── Windows ARM64: click through OOBE privacy wizard ──
       # GHA Windows ARM64 runners show a 2-page OOBE privacy dialog.
       # Can't be killed or minimized — must click through it.
@@ -624,6 +641,16 @@ jobs:
         if: always() && matrix.self_hosted
         run: |
           rm -rf .venv /tmp/adc_*.txt
+          # Clean up our tpm2_pkcs11 token to free NV handles.
+          # IMPORTANT: only remove OUR "bunker-wif" token — do NOT blindly
+          # evict all persistent handles, as other apps (disk encryption,
+          # secure boot, etc.) may own handles in the TPM.
+          if [ -d "$HOME/.tpm2_pkcs11" ]; then
+            export TPM2_PKCS11_STORE="$HOME/.tpm2_pkcs11"
+            tpm2_ptool rmtoken --label=bunker-wif 2>/dev/null || true
+            # Wipe the store dir so next run starts fresh
+            rm -rf "$HOME/.tpm2_pkcs11"
+          fi
           # Reset YubiKey PIV state if this was a YubiKey test
           if [ -n "$YUBIKEY_FLAGS" ]; then
             SERIAL="${{ steps.yubikey.outputs.serial }}"
