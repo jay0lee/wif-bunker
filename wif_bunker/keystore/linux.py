@@ -217,6 +217,76 @@ def get_supported_algorithms_linux() -> list[str]:
     return supported
 
 
+def _evict_bunker_persistent_handles(tpm_store: Path, ptool_cmd: list[str], log: logging.Logger) -> None:
+    """Evict only persistent handles owned by our 'bunker-wif' token.
+
+    tpm2_ptool rmtoken removes the PKCS#11 token from the SQLite store
+    but does NOT evict the TPM primary object from NV storage.  We must
+    clean up our own handles to avoid orphans that cause addprimary to
+    fail on subsequent runs.
+
+    IMPORTANT: We only evict handles we can prove belong to our token.
+    Other applications (disk encryption, Secure Boot, VPN keys, etc.)
+    may have their own persistent handles — we must never touch those.
+    """
+    import re  # pylint: disable=import-outside-toplevel
+
+    if not tpm_store.exists():
+        return
+
+    # 1. Ask tpm2_ptool for our token's primary object handle(s).
+    #    listprimaries shows the esys-tr / persistent handle for each PID.
+    our_handles: list[str] = []
+    try:
+        result = subprocess.run(
+            [*ptool_cmd, "listprimaries"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={**os.environ, "TPM2_PKCS11_STORE": str(tpm_store)},
+        )
+        # Output lines contain handle values like "0x81000001"
+        our_handles = re.findall(r"0x[0-9A-Fa-f]+", result.stdout)
+    except Exception as exc:
+        log.debug("    Could not list primaries from store: %s", exc)
+
+    if not our_handles:
+        # Fallback: if the store DB is corrupt or listprimaries fails,
+        # check if there's ONLY one persistent handle in the TPM and
+        # the store directory exists (implying we created it).
+        # If multiple handles exist, we can't tell which is ours — skip.
+        try:
+            cap = subprocess.run(
+                ["tpm2_getcap", "handles-persistent"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            all_handles = re.findall(r"0x[0-9A-Fa-f]+", cap.stdout)
+            if len(all_handles) == 1:
+                our_handles = all_handles
+                log.debug("    Fallback: single persistent handle %s likely ours.", all_handles[0])
+            elif all_handles:
+                log.debug(
+                    "    %d persistent handles found but cannot identify ours — skipping eviction.",
+                    len(all_handles),
+                )
+        except Exception as exc:
+            log.debug("    Could not enumerate persistent handles: %s", exc)
+
+    for h in our_handles:
+        try:
+            subprocess.run(
+                ["tpm2_evictcontrol", "-c", h],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            log.debug("    Evicted bunker-wif persistent handle %s.", h)
+        except Exception as exc:
+            log.debug("    Could not evict handle %s: %s", h, exc)
+
+
 def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
     """Generates a TPM 2.0-backed certificate via PKCS#11 toolchain (Ubuntu 24+)."""
     # Pre-validate all required commands upfront.
@@ -238,10 +308,28 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
 
     tpm_store = Path.home() / ".tpm2_pkcs11"
     os.environ["TPM2_PKCS11_STORE"] = str(tpm_store)
-    tpm_store.mkdir(parents=True, exist_ok=True)
 
     try:
-        # 1. Initialize TPM PKCS#11 token and generate hardware-backed key
+        # 1. Clean slate: remove any previous PKCS#11 token + TPM handles.
+        #    rmtoken removes the logical token from SQLite but does NOT
+        #    evict the TPM primary object from NV storage.  We must do
+        #    both to avoid orphaned handles that cause addprimary to fail.
+        if tpm_store.exists():
+            subprocess.run(
+                [*ptool_cmd, "rmtoken", "--label=bunker-wif"],
+                capture_output=True,
+                text=True,
+            )  # Ignore errors — token may not exist yet.
+
+        _evict_bunker_persistent_handles(tpm_store, ptool_cmd, logger)
+
+        # Wipe the store directory so init creates a fresh SQLite DB.
+        # This avoids stale DB entries referencing evicted handles.
+        if tpm_store.exists():
+            shutil.rmtree(tpm_store)
+        tpm_store.mkdir(parents=True, exist_ok=True)
+
+        # 2. Initialize fresh TPM PKCS#11 store and generate key
         init_result = subprocess.run(
             [*ptool_cmd, "init"],
             check=True,
@@ -249,13 +337,6 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
             text=True,
         )
         logger.debug("    tpm2_ptool init: %s", init_result.stdout.strip())
-
-        # Remove existing token if present (reuse flow).
-        subprocess.run(
-            [*ptool_cmd, "rmtoken", "--label=bunker-wif"],
-            capture_output=True,
-            text=True,
-        )  # Ignore errors — token may not exist yet.
 
         token_result = subprocess.run(
             [
