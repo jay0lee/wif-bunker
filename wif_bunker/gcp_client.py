@@ -13,6 +13,7 @@ from typing import Any, ClassVar
 
 import google.auth
 import requests
+from google.auth.exceptions import TransportError
 from google.auth.transport.requests import Request as GoogleAuthRequest
 
 from wif_bunker.config import LRO_TIMEOUT_SECONDS, MAX_BACKOFF_SECONDS
@@ -294,13 +295,12 @@ class GCPClient:
         json_payload: dict | None = None,
         max_attempts: int = 8,
     ) -> dict | None:
-        """api_call with retry on 403 (IAM propagation delay).
+        """api_call with retry on transient errors.
 
-        After project creation or API enablement, IAM permissions can
-        take several seconds to propagate.  Use this for calls where a
-        403 is expected to be transient (SA/pool/provider creation,
-        IAM policy bindings).  Not for existence checks where 403
-        means 'does not exist'.
+        Retries on:
+          - HTTP 403 (IAM propagation delay after project/API setup)
+          - ConnectionError / ConnectionResetError (transient network)
+          - google.auth TransportError (STS/mTLS handshake reset)
         """
         for attempt in range(max_attempts):
             try:
@@ -313,6 +313,19 @@ class GCPClient:
                         attempt + 1,
                         max_attempts,
                         sleep_time,
+                    )
+                    time.sleep(sleep_time)
+                    continue
+                raise
+            except (requests.exceptions.ConnectionError, TransportError, OSError) as exc:
+                if attempt < max_attempts - 1:
+                    sleep_time = min(2**attempt, MAX_BACKOFF_SECONDS)
+                    logger.warning(
+                        "    Transient connection error (%d/%d), retrying in %ds: %s",
+                        attempt + 1,
+                        max_attempts,
+                        sleep_time,
+                        exc,
                     )
                     time.sleep(sleep_time)
                     continue

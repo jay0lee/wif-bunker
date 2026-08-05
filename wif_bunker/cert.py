@@ -456,9 +456,9 @@ def ecp_get_cert_pem(ecp_client_lib: Path | str, cert_config_path: Path | str) -
         RuntimeError: If ECP returns cert_len <= 0.
     """
     if sys.platform == "linux":
-        logger.info("    ECP cert retrieval: subprocess isolation (platform=%s)", sys.platform)
+        logger.debug("    ECP cert retrieval: subprocess isolation (platform=%s)", sys.platform)
         return _ecp_get_cert_subprocess(ecp_client_lib, cert_config_path)
-    logger.info("    ECP cert retrieval: in-process (platform=%s)", sys.platform)
+    logger.debug("    ECP cert retrieval: in-process (platform=%s)", sys.platform)
     return _ecp_get_cert_inprocess(ecp_client_lib, cert_config_path)
 
 
@@ -517,7 +517,7 @@ def _find_system_python() -> str:
     for name in ("python3", "python"):
         found = shutil.which(name)
         if found:
-            logger.info("    _find_system_python: frozen binary, using system %s", found)
+            logger.debug("    _find_system_python: frozen binary, using system %s", found)
             return found
 
     raise RuntimeError("Cannot find system python3 for subprocess ECP isolation. Ensure python3 is on PATH.")
