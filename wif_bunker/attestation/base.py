@@ -172,6 +172,13 @@ def _verify_ek_chain_openssl(
                 except Exception:
                     pass
 
+    logger.info(
+        "    EK chain: %d roots loaded, %d intermediates loaded (dirs: %s)",
+        roots_loaded,
+        len(intermediates),
+        ", ".join(str(d) for d in dirs_to_check + dirs_to_check_int if d.exists()),
+    )
+
     # AIA Chasing logic
     def _verify_with_aia_chasing(current_cert, depth=0):
         try:
@@ -190,6 +197,12 @@ def _verify_ek_chain_openssl(
                 )
                 m = re.search(r"CA Issuers - URI:(https?://[^\s]+)", result.stdout)
                 if not m:
+                    logger.info(
+                        "    AIA: openssl x509 -text returned rc=%d, stdout=%d bytes, stderr=%s",
+                        result.returncode,
+                        len(result.stdout),
+                        result.stderr.strip()[:200] if result.stderr else "(empty)",
+                    )
                     return False, (
                         f"{e} — cert has no AIA extension with a CA Issuers URL, "
                         "so the missing issuer cannot be fetched automatically"
