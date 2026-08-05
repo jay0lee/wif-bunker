@@ -255,8 +255,9 @@ class TestImportCertToStore:
         mock_crypt32.CertAddCertificateContextToStore.assert_called_once()
         mock_crypt32.CertSetCertificateContextProperty.assert_called_once()
 
-        # Verify cleanup
-        assert mock_crypt32.CertFreeCertificateContext.call_count == 2
+        # Verify cleanup — only cert_context is freed, NOT stored_context
+        # (freeing stored_context can remove the cert from the store).
+        assert mock_crypt32.CertFreeCertificateContext.call_count == 1
         mock_crypt32.CertCloseStore.assert_called_once()
 
     @patch("wif_bunker.keystore.ncrypt._load_ctypes")

@@ -255,19 +255,37 @@ def create_tpm_key(
         if status != 0:
             raise RuntimeError(f"NCryptSetProperty('Export Policy') failed: 0x{status & 0xFFFFFFFF:08X}")
 
-        # 5. Finalize (persist) the key.
+        # 5. Set PCP_KEY_USAGE_POLICY for TPM keys so NCryptCreateClaim can
+        #    attest them.  Without this, NCryptCreateClaim returns
+        #    PCP_E_KEY_NOT_LOADED (0x8029040F) on many TPMs (Dell/Nuvoton).
+        #
+        #    NCRYPT_PCP_SIGNATURE_KEY (0x1) marks this as a signing key
+        #    eligible for attestation.  Unlike NCRYPT_PCP_IDENTITY_KEY (0x8),
+        #    it does NOT restrict the key to TPM-internal operations — the
+        #    key can still sign arbitrary data (TLS handshakes via ECP).
+        #
+        #    Attestation itself is performed by a separate Attestation Key
+        #    (AK) created in attestation/windows.py with IDENTITY_KEY policy.
+        #    Skip for software KSP keys (soft_key) which don't support PCP.
+        _NCRYPT_PCP_SIGNATURE_KEY = 0x00000001
+        if provider_name == MS_PLATFORM_CRYPTO_PROVIDER:
+            usage_policy = wintypes.DWORD(_NCRYPT_PCP_SIGNATURE_KEY)
+            status = ncrypt.NCryptSetProperty(
+                key_handle,
+                "PCP_KEY_USAGE_POLICY",
+                ctypes.byref(usage_policy),
+                ctypes.sizeof(usage_policy),
+                0,
+            )
+            if status != 0:
+                logger.warning(
+                    "NCryptSetProperty('PCP_KEY_USAGE_POLICY') failed: 0x%08X (attestation may not work)",
+                    status & 0xFFFFFFFF,
+                )
+
+        # 6. Finalize (persist) the key.
         #    After this call, the key is stored in the TPM / software KSP
         #    and survives reboots.
-        #
-        #    NOTE: We intentionally do NOT set PCP_KEY_USAGE_POLICY here.
-        #    Setting NCRYPT_PCP_IDENTITY_KEY (0x8) would make this a
-        #    "restricted signing key" that can ONLY sign TPM-internal
-        #    structures (attestation blobs).  The workload key needs to
-        #    sign arbitrary data (TLS handshakes via ECP), so it must
-        #    remain an unrestricted signing key.
-        #
-        #    Attestation is handled by a separate Attestation Key (AK)
-        #    created in attestation/windows.py, which IS an identity key.
         status = ncrypt.NCryptFinalizeKey(key_handle, 0)
         if status != 0:
             raise RuntimeError(f"NCryptFinalizeKey failed: 0x{status & 0xFFFFFFFF:08X}")
@@ -750,9 +768,11 @@ def import_cert_to_store(
         logger.info("    Cert imported to CurrentUser\\My and bound to key '%s'", key_name)
 
     finally:
-        if stored_context:
-            crypt32.CertFreeCertificateContext(stored_context)
+        # Free the temporary cert context (not store-managed).
         if cert_context:
             crypt32.CertFreeCertificateContext(cert_context)
+        # Close the store.  Do NOT free stored_context beforehand —
+        # it is a reference INTO the store, and freeing it on some
+        # Windows versions/TPM combos removes the cert from the store.
         if store_handle:
             crypt32.CertCloseStore(store_handle, 0)
