@@ -342,6 +342,16 @@ def _main_impl() -> None:
     # instead of failing 10+ minutes into the setup.
     preflight_check_write_access(Path.cwd())
 
+    # Pre-flight: if using YubiKey, verify the PKCS#11 library exists
+    # before spending minutes on GCP project/IAM setup.
+    if config.use_yubikey:
+        from wif_bunker.keystore.yubikey import find_pkcs11_library
+        try:
+            find_pkcs11_library()
+        except FileNotFoundError as exc:
+            logger.error("❌ %s", exc)
+            raise SystemExit(1) from exc
+
     with GCPClient(
         use_adc=args.use_adc,
         client_secrets_file=args.client_secrets_file,

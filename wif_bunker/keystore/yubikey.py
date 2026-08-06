@@ -278,16 +278,33 @@ def find_pkcs11_library() -> str:
                 if Path(candidate).exists():
                     logger.info("    Found YubiKey PKCS#11 library: %s", candidate)
                     return candidate
-    install_hint = {
-        "linux": "sudo apt install opensc",
-        "darwin": "brew install yubico-piv-tool",
-        "win32": "Download from https://developers.yubico.com/yubico-piv-tool/",
-    }
-    hint = next((v for k, v in install_hint.items() if sys.platform.startswith(k)), "Install opensc")
+    if sys.platform.startswith("win32"):
+        hint = (
+            "The YubiKey PKCS#11 library (libykcs11.dll) is required for mTLS.\n"
+            "\n"
+            "  Install the Yubico PIV Tool:\n"
+            "    1. Download the .msi installer from:\n"
+            "       https://developers.yubico.com/yubico-piv-tool/Releases/\n"
+            "    2. Run the installer (adds libykcs11.dll to Program Files)\n"
+            "    3. Re-run wif-bunker\n"
+        )
+    elif sys.platform.startswith("darwin"):
+        hint = (
+            "The YubiKey PKCS#11 library (libykcs11.dylib) is required for mTLS.\n"
+            "\n"
+            "  Install: brew install yubico-piv-tool\n"
+        )
+    else:
+        hint = (
+            "The YubiKey PKCS#11 library (libykcs11.so) is required for mTLS.\n"
+            "\n"
+            "  Install: sudo apt install opensc\n"
+            "  Or:      sudo apt install libykcs11-1\n"
+        )
     raise FileNotFoundError(
-        f"Could not find a PKCS#11 module for YubiKey.\n"
-        f"Install it: {hint}\n"
-        f"Or specify the path with the YKCS11_MODULE environment variable."
+        f"Could not find a PKCS#11 module for YubiKey.\n\n"
+        f"{hint}\n"
+        f"Or set the YKCS11_MODULE environment variable to the library path."
     )
 
 
