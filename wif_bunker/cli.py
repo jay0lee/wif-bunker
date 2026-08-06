@@ -564,6 +564,15 @@ def _main_impl() -> None:
         # End-to-end proof: TPM key → ECP → mTLS → Google STS → API call.
         logger.info("=== 7) ADC Verification ===")
 
+        # On Windows + YubiKey: pre-cache the PIN via NCrypt so that
+        # ECP/tls_offload can sign silently (no PIN dialog).
+        if sys.platform == "win32" and config.use_yubikey:
+            from wif_bunker.keystore.yubikey import precache_yubikey_pin_ncrypt
+            precache_yubikey_pin_ncrypt(
+                serial=config.yubikey_serial,
+                issuer_cn=cert_bundle.issuer_cn,
+            )
+
         try:
             # Allow IAM bindings to propagate before attempting auth.
             logger.info("    Waiting 15s for IAM propagation...")

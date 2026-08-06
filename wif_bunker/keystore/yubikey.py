@@ -370,3 +370,109 @@ def build_ecp_pkcs11_config(serial: int | None, workload_cn: str) -> dict:
             "user_pin": yk_pin,
         },
     }
+
+
+def precache_yubikey_pin_ncrypt(serial: int | None, issuer_cn: str) -> bool:
+    """Pre-cache the YubiKey PIN via Windows NCrypt for silent mTLS signing.
+
+    On Windows, ECP/tls_offload calls NCrypt with NCRYPT_SILENT_FLAG,
+    which suppresses the PIN dialog.  This function opens the smart card
+    key handle, sets the PIN via NCryptSetProperty, and performs a dummy
+    sign to verify/cache the PIN in the smart card subsystem.
+
+    Returns True if the PIN was successfully cached.
+    """
+    if sys.platform != "win32":
+        return False
+
+    # Load PIN from stored config
+    yk_config_path = yubikey_config_dir() / f"yubikey_{serial or 'default'}.json"
+    if not yk_config_path.exists():
+        logger.warning("    No YubiKey config file found at %s", yk_config_path)
+        return False
+    try:
+        yk_cfg = json.loads(yk_config_path.read_text(encoding="utf-8"))
+        pin = yk_cfg.get("pin", "")
+    except Exception:
+        logger.debug("Failed to read YubiKey config for PIN", exc_info=True)
+        return False
+    if not pin:
+        logger.warning("    No PIN found in YubiKey config")
+        return False
+
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        ncrypt = ctypes.windll.ncrypt
+
+        # Constants
+        MS_SMART_CARD_KEY_STORAGE_PROVIDER = "Microsoft Smart Card Key Storage Provider"
+        NCRYPT_PIN_PROPERTY = "SmartCardPin"
+
+        # Open the Smart Card KSP
+        h_provider = ctypes.c_void_p()
+        status = ncrypt.NCryptOpenStorageProvider(
+            ctypes.byref(h_provider),
+            MS_SMART_CARD_KEY_STORAGE_PROVIDER,
+            0,
+        )
+        if status != 0:
+            logger.debug("    NCryptOpenStorageProvider failed: 0x%08x", status & 0xFFFFFFFF)
+            return False
+
+        try:
+            # Enumerate keys to find the one matching our cert's issuer
+            # We use PowerShell to get the key container name
+            result = subprocess.run(
+                ["powershell", "-Command",
+                 "Get-ChildItem Cert:\\CurrentUser\\My"
+                 f" | Where-Object {{ $_.Issuer -match '{issuer_cn}' }}"
+                 " | ForEach-Object {"
+                 " $k = [System.Security.Cryptography.X509Certificates.ECDsaCertificateExtensions]::GetECDsaPrivateKey($_);"
+                 " if ($k -and $k.Key) { $k.Key.UniqueName }"
+                 " }"],
+                capture_output=True, text=True, timeout=15,
+            )
+            key_name = result.stdout.strip()
+            if not key_name:
+                logger.debug("    Could not find key container name for issuer %s", issuer_cn)
+                return False
+
+            # Open the key handle
+            h_key = ctypes.c_void_p()
+            status = ncrypt.NCryptOpenKey(
+                h_provider,
+                ctypes.byref(h_key),
+                key_name,
+                0,  # dwLegacyKeySpec
+                0,  # dwFlags
+            )
+            if status != 0:
+                logger.debug("    NCryptOpenKey failed: 0x%08x", status & 0xFFFFFFFF)
+                return False
+
+            try:
+                # Set the PIN on the key handle
+                pin_bytes = pin.encode("utf-8")
+                status = ncrypt.NCryptSetProperty(
+                    h_key,
+                    NCRYPT_PIN_PROPERTY,
+                    pin_bytes,
+                    len(pin_bytes),
+                    0,  # dwFlags
+                )
+                if status != 0:
+                    logger.debug("    NCryptSetProperty(PIN) failed: 0x%08x", status & 0xFFFFFFFF)
+                    return False
+
+                logger.info("    ✓ YubiKey PIN pre-cached for mTLS signing")
+                return True
+            finally:
+                ncrypt.NCryptFreeObject(h_key)
+        finally:
+            ncrypt.NCryptFreeObject(h_provider)
+
+    except Exception:
+        logger.debug("Failed to pre-cache YubiKey PIN via NCrypt", exc_info=True)
+        return False
