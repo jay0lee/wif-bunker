@@ -101,7 +101,7 @@ jobs:
             swtpm swtpm-tools \
             tpm2-tools tpm2-abrmd libtss2-tcti-tabrmd0 libtss2-dev dbus \
             libtpm2-pkcs11-1 libtpm2-pkcs11-tools python3-tpm2-pkcs11-tools \
-            gnutls-bin opensc
+            libpcsclite-dev pkg-config gnutls-bin opensc
 
           SWTPM_DIR=$(mktemp -d)
           swtpm socket \
