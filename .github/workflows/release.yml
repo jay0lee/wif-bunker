@@ -52,6 +52,17 @@ jobs:
         with:
           python-version: '3.x'
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install OpenSSL (Windows)
+        if: matrix.platform_name == 'windows'
+        run: choco install openssl -y
+
+      - name: Build hardmTLS
+        working-directory: hardmtls-native
+        run: cargo build --release
+
       - name: Inject version
         shell: bash
         run: |
@@ -88,11 +99,6 @@ jobs:
 
       - name: Run PyInstaller
         run: pyinstaller wif-bunker.spec
-
-      - name: Download ECP
-        run: python get_ecp.py --output dist/wif-bunker/ecp
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
 
       - name: Smoke test (Unix)
         if: matrix.platform_name != 'windows'

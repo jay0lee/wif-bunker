@@ -58,10 +58,26 @@ excludes = [
     'test',
 ]
 
+# ── hardmTLS native library ──
+# Built by `cargo build --release` in hardmtls-native/ before PyInstaller runs.
+# Bundled into dist/wif-bunker/hardmtls/ so certificate_config.json can point
+# libs.ecp_client and libs.tls_offload at it.
+import platform
+
+_hardmtls_dir = os.path.join('hardmtls-native', 'target', 'release')
+if platform.system() == 'Darwin':
+    _hardmtls_lib = os.path.join(_hardmtls_dir, 'libhardmtls.dylib')
+elif platform.system() == 'Linux':
+    _hardmtls_lib = os.path.join(_hardmtls_dir, 'libhardmtls.so')
+else:
+    _hardmtls_lib = os.path.join(_hardmtls_dir, 'hardmtls.dll')
+
+hardmtls_binaries = [(_hardmtls_lib, 'hardmtls')] if os.path.exists(_hardmtls_lib) else []
+
 a = Analysis(
     ['wif_bunker/cli.py'],
     pathex=[],
-    binaries=[],
+    binaries=hardmtls_binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],

@@ -4,9 +4,11 @@ on:
   push:
     paths:
       - 'hardmtls-native/**'
+      - '.github/workflows/hardmtls-ci.yml'
   pull_request:
     paths:
       - 'hardmtls-native/**'
+      - '.github/workflows/hardmtls-ci.yml'
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,31 +21,45 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-    
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      
+
       - name: Install OpenSSL (Windows)
         if: runner.os == 'Windows'
         run: choco install openssl -y
-      
+
       - name: Formatting
         working-directory: hardmtls-native
         run: cargo fmt --all -- --check
-      
+
       - name: Linting
         working-directory: hardmtls-native
         run: cargo clippy --all-targets --all-features -- -D warnings
-      
+
       - name: Tests
         working-directory: hardmtls-native
         run: cargo test --all-features
-      
+
       - name: Documentation
         working-directory: hardmtls-native
         run: cargo doc --no-deps
+
+      - name: Build release
+        working-directory: hardmtls-native
+        run: cargo build --release
+
+      - name: Upload native library
+        uses: actions/upload-artifact@v4
+        with:
+          name: libhardmtls-${{ matrix.os }}
+          path: |
+            hardmtls-native/target/release/libhardmtls.dylib
+            hardmtls-native/target/release/libhardmtls.so
+            hardmtls-native/target/release/hardmtls.dll
+          if-no-files-found: ignore
