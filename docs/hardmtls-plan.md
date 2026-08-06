@@ -46,6 +46,30 @@ point to the same `hardmtls` binary. Downstream apps (`gcloud`, `terraform`,
 any Google SDK) load it transparently via google-auth. Zero changes required
 in downstream consumers.
 
+### 100% Test Coverage from Day 1
+
+> [!IMPORTANT]
+> Every module ships with tests. No code merges without 100% line
+> coverage. Tests are not a follow-up task — they are part of each
+> module's LoE estimate.
+
+**Enforcement:**
+- `cargo-tarpaulin` or `cargo-llvm-cov` in CI, fail build below 100%
+- `#[cfg(test)]` module in every `.rs` file
+- Integration tests in `tests/` directory
+
+**Mock strategy by backend:**
+
+| Backend | What to mock | How |
+|---|---|---|
+| `pkcs11.rs` | PKCS#11 module (`C_Sign`, `C_Login`, etc.) | Mock `dlopen` → in-memory function table that returns known signatures |
+| `win_ncrypt.rs` | `ncrypt.dll` (`NCryptSignHash`, `NCryptOpenKey`) | Conditional compilation: `#[cfg(test)]` replaces FFI calls with mock |
+| `mac_se.rs` | Security.framework (`SecKeyCreateSignature`) | Same conditional compilation pattern |
+| `ssl_ctx.rs` | OpenSSL `SSL_CTX*` | Create real `SSL_CTX` via `openssl-sys` in test, verify cert/key attached |
+| `config.rs` | Filesystem | `tempfile` crate, write JSON to temp dir |
+| `lib.rs` | Full C API | `#[test]` calls exported functions with mock backends |
+| `dispatch.rs` | Backend selection | Unit test each config variant → correct backend type |
+
 ---
 
 ## Signing Backends
@@ -298,20 +322,22 @@ Replaced by hardmTLS binary distribution.
 ## Level of Effort
 
 ### Phase 1: Core Library (all backends)
-**LoE: 14-21 days** | Priority: **P0**
+**LoE: 16-24 days** | Priority: **P0**
 
-| Task | Est |
-|---|---|
-| Rust project scaffold, CI matrix (Linux/macOS/Windows) | 1-2 days |
-| `config.rs` — `certificate_config.json` parser | 0.5 day |
-| `dispatch.rs` — backend selection from cert_configs | 0.5 day |
-| `ssl_ctx.rs` — `ConfigureSslContext` (OpenSSL `SSL_CTX` + custom `EVP_PKEY`) | 2-3 days |
-| `lib.rs` — C API exports (`ConfigureSslContext`, `GetCertPemForPython`, `SignForPython`) | 1 day |
-| `backends/pkcs11.rs` — PKCS#11 signing (cross-platform) | 2-3 days |
-| `backends/win_ncrypt.rs` — Windows NCrypt/CNG (TPM KSP) | 1-2 days |
-| `backends/mac_se.rs` — macOS Security.framework (SE + Keychain) | 2-3 days |
-| Cross-platform builds (.dll, .so, .dylib) | 1-2 days |
-| Integration tests (hardmTLS ↔ google-auth ↔ real keystores) | 2-3 days |
+All estimates include writing tests to 100% coverage for that module.
+
+| Task | Code | Tests | Total |
+|---|---|---|---|
+| Rust project scaffold, CI matrix, coverage gate | 1 day | 0.5 day | 1-2 days |
+| `config.rs` — `certificate_config.json` parser | 0.5 day | 0.5 day | 1 day |
+| `dispatch.rs` — backend selection from cert_configs | 0.5 day | 0.5 day | 1 day |
+| `ssl_ctx.rs` — `ConfigureSslContext` (OpenSSL SSL_CTX + custom EVP_PKEY) | 2 days | 1 day | 2-3 days |
+| `lib.rs` — C API exports | 0.5 day | 0.5 day | 1 day |
+| `backends/pkcs11.rs` — PKCS#11 signing (cross-platform) | 1.5 days | 1.5 days | 2-3 days |
+| `backends/win_ncrypt.rs` — Windows NCrypt/CNG (TPM KSP) | 1 day | 1 day | 1-2 days |
+| `backends/mac_se.rs` — macOS Security.framework (SE + Keychain) | 1.5 days | 1.5 days | 2-3 days |
+| Cross-platform builds (.dll, .so, .dylib) | 1 day | — | 1-2 days |
+| Integration tests (hardmTLS ↔ google-auth ↔ real keystores) | — | 2-3 days | 2-3 days |
 
 ### Phase 2: WIF Bunker Integration + Cleanup
 **LoE: 3-5 days** | Priority: **P0**
@@ -351,10 +377,10 @@ Replaced by hardmTLS binary distribution.
 
 | Phase | Effort | Priority |
 |---|---|---|
-| Phase 1: Core Rust library | 14-21 days | P0 |
+| Phase 1: Core Rust library (incl. 100% test coverage) | 16-24 days | P0 |
 | Phase 2: WIF Bunker integration | 3-5 days | P0 |
 | Phase 3: Downstream validation | 1-2 days | P1 |
-| **Total** | **18-28 days** | |
+| **Total** | **20-31 days** | |
 
 ---
 
@@ -386,13 +412,35 @@ Replaced by hardmTLS binary distribution.
 
 ## Verification Plan
 
+### Test Coverage Enforcement
+
+**100% line coverage is a CI gate.** No PR merges if coverage drops.
+
+```bash
+# Run tests with coverage
+cargo tarpaulin --out html --fail-under 100
+
+# Or with llvm-cov (more accurate for conditional compilation)
+cargo llvm-cov --fail-under-lines 100
+```
+
+Platform-specific backends use conditional compilation (`#[cfg(target_os)]`).
+Coverage is measured per-platform — `win_ncrypt.rs` is only counted on
+Windows CI, `mac_se.rs` only on macOS CI, `pkcs11.rs` on all three.
+
 ### Automated Tests
 
 ```bash
-# Rust unit + integration tests
+# Rust unit + integration tests (all platforms)
 cargo test
-cargo test --target x86_64-pc-windows-msvc    # Windows cross-compile
-cargo test --target aarch64-apple-darwin       # macOS ARM
+
+# Coverage gate (per-platform CI)
+cargo llvm-cov --fail-under-lines 100
+
+# Cross-platform CI matrix
+# - ubuntu-latest:  pkcs11.rs + config.rs + dispatch.rs + ssl_ctx.rs + lib.rs
+# - windows-latest: win_ncrypt.rs + pkcs11.rs + above
+# - macos-latest:   mac_se.rs + pkcs11.rs + above
 
 # Python integration
 pytest tests/test_hardmtls_integration.py
