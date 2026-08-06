@@ -12,39 +12,86 @@
 # The "Environment dump" and "Post-run diagnostics" steps run
 # automatically before/after this script — no need to add them here.
 
-set -euo pipefail
+set -uo pipefail  # no -e: we want to see ALL output even if something fails
+RC=0
 
 echo "=== Quick Test: Hardware TPM ECP/PKCS#11 Debug ==="
+echo ""
 
 # 1. Generate a workload key+cert
-python -m wif_bunker --cert-only --output-dir test1
+echo "--- Step 1: Generate workload key+cert ---"
+python -m wif_bunker --cert-only --output-dir test1 || { echo "FAIL: cert generation"; RC=1; }
 echo ""
 
 # 2. Check what wif-bunker created
-echo "=== Files created ==="
-ls -la test1/
+echo "--- Step 2: Files created ---"
+ls -la test1/ 2>/dev/null || echo "(test1/ not found)"
 echo ""
 
-# 3. Show the adc.json to verify PKCS#11 URI
-echo "=== adc.json ==="
-cat test1/adc.json
+# 3. Check PKCS#11 store state
+echo "--- Step 3: PKCS#11 store ---"
+echo "TPM2_PKCS11_STORE=$TPM2_PKCS11_STORE"
+ls -la "$HOME/.tpm2_pkcs11/" 2>/dev/null || echo "(store not found)"
 echo ""
 
-# 4. Check PKCS#11 store state
-echo "=== PKCS#11 store ==="
-ls -la "$HOME/.tpm2_pkcs11/"
-echo ""
-
-# 5. Verify PKCS#11 tokens visible
-echo "=== PKCS#11 tokens ==="
+# 4. Verify PKCS#11 tokens visible to pkcs11-tool
+echo "--- Step 4: PKCS#11 tokens (via pkcs11-tool) ---"
 pkcs11-tool --module /usr/lib/x86_64-linux-gnu/pkcs11/libtpm2_pkcs11.so -T 2>&1 || true
 echo ""
 
-# 6. Try ECP directly to reproduce the CKR_GENERAL_ERROR
-echo "=== Testing ECP ==="
-if [ -d "ecp" ]; then
-  export GOOGLE_APPLICATION_CREDENTIALS="$(pwd)/test1/adc.json"
-  ./ecp/ecp 2>&1 || echo "(ECP exited with rc=$?)"
+# 5. Verify PKCS#11 tokens visible to p11tool
+echo "--- Step 5: PKCS#11 tokens (via p11tool) ---"
+p11tool --provider=/usr/lib/x86_64-linux-gnu/pkcs11/libtpm2_pkcs11.so --list-tokens 2>&1 || true
+echo ""
+
+# 6. Check what the PKCS#11 URI looks like in cert_config
+echo "--- Step 6: cert_config.json (PKCS#11 URI) ---"
+if [ -f test1/cert_config.json ]; then
+  cat test1/cert_config.json
 else
-  echo "ECP not found — skipping"
+  echo "(no cert_config.json — checking for ecp_meta.json)"
+  cat test1/ecp_meta.json 2>/dev/null || echo "(no ecp_meta.json either)"
 fi
+echo ""
+
+# 7. Try ECP directly
+echo "--- Step 7: Testing ECP ---"
+if [ -d "ecp" ]; then
+  echo "ECP binary found at ./ecp/"
+  ls -la ecp/
+  echo ""
+
+  # Create a minimal adc.json pointing to cert_config
+  if [ -f test1/cert_config.json ]; then
+    echo "Creating adc.json pointing to cert_config.json..."
+    cat > test_adc.json <<ADCEOF
+{
+  "type": "external_account",
+  "credential_source": {
+    "certificate": {
+      "use_default_provider": false,
+      "certificate_config_location": "$(pwd)/test1/cert_config.json"
+    }
+  }
+}
+ADCEOF
+    echo "adc.json contents:"
+    cat test_adc.json
+    echo ""
+
+    echo "Running ECP with GOOGLE_APPLICATION_CREDENTIALS=test_adc.json..."
+    GOOGLE_APPLICATION_CREDENTIALS="$(pwd)/test_adc.json" ./ecp/ecp 2>&1 || echo "(ECP exited with rc=$?)"
+  else
+    echo "No cert_config.json to point ECP at — skipping ECP test"
+  fi
+else
+  echo "ECP not found in ./ecp/ — skipping"
+  echo "Contents of current dir:"
+  ls -la
+fi
+echo ""
+
+echo "--- Step 8: TPM persistent handles ---"
+tpm2_getcap handles-persistent 2>/dev/null || echo "(none)"
+
+exit $RC
