@@ -1,0 +1,5 @@
+{
+  "runner": "hardware-tpm",
+  "install_wif_bunker": true,
+  "setup_tpm": true
+}

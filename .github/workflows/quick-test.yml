@@ -15,12 +15,9 @@ on:
           - 'macos-15'
           - 'windows-2025'
       script:
-        description: 'Bash script to run (multi-line OK)'
-        required: true
+        description: 'Bash script to run (overrides quick-test-script.sh)'
+        required: false
         type: string
-        default: |
-          echo "Hello from $(hostname) / $(uname -a)"
-          python3 --version
       install_wif_bunker:
         description: 'Install wif-bunker and dependencies into a venv'
         required: false
@@ -31,23 +28,84 @@ on:
         required: false
         type: boolean
         default: true
+  push:
+    branches: [main]
+    paths:
+      - '.github/quick-test-config.json'
+      - '.github/quick-test-script.sh'
 
 permissions:
   contents: read
   id-token: write
 
 jobs:
+  # ── Read config from file (push-triggered) or inputs (dispatch) ──
+  config:
+    name: "Load config"
+    runs-on: ubuntu-latest
+    outputs:
+      runner: ${{ steps.cfg.outputs.runner }}
+      install_wif_bunker: ${{ steps.cfg.outputs.install_wif_bunker }}
+      setup_tpm: ${{ steps.cfg.outputs.setup_tpm }}
+      script: ${{ steps.cfg.outputs.script }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: "Parse config"
+        id: cfg
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "runner=${{ inputs.runner }}" >> "$GITHUB_OUTPUT"
+            echo "install_wif_bunker=${{ inputs.install_wif_bunker }}" >> "$GITHUB_OUTPUT"
+            echo "setup_tpm=${{ inputs.setup_tpm }}" >> "$GITHUB_OUTPUT"
+            if [ -n "${{ inputs.script }}" ]; then
+              # Use dispatch script input
+              {
+                echo 'script<<SCRIPT_EOF'
+                echo '${{ inputs.script }}'
+                echo 'SCRIPT_EOF'
+              } >> "$GITHUB_OUTPUT"
+            else
+              # Fall back to script file
+              {
+                echo 'script<<SCRIPT_EOF'
+                cat .github/quick-test-script.sh
+                echo 'SCRIPT_EOF'
+              } >> "$GITHUB_OUTPUT"
+            fi
+          else
+            # Push-triggered: read from config file + script file
+            echo "runner=$(jq -r '.runner' .github/quick-test-config.json)" >> "$GITHUB_OUTPUT"
+            echo "install_wif_bunker=$(jq -r '.install_wif_bunker' .github/quick-test-config.json)" >> "$GITHUB_OUTPUT"
+            echo "setup_tpm=$(jq -r '.setup_tpm' .github/quick-test-config.json)" >> "$GITHUB_OUTPUT"
+            {
+              echo 'script<<SCRIPT_EOF'
+              cat .github/quick-test-script.sh
+              echo 'SCRIPT_EOF'
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "=== Config ==="
+          echo "Runner: $(jq -r '.runner' .github/quick-test-config.json 2>/dev/null || echo '${{ inputs.runner }}')"
+          echo "Install: $(jq -r '.install_wif_bunker' .github/quick-test-config.json 2>/dev/null || echo '${{ inputs.install_wif_bunker }}')"
+          echo "TPM Setup: $(jq -r '.setup_tpm' .github/quick-test-config.json 2>/dev/null || echo '${{ inputs.setup_tpm }}')"
+          echo ""
+          echo "=== Script ==="
+          cat .github/quick-test-script.sh 2>/dev/null || echo "(using dispatch input)"
+
   quick-test:
-    name: "Quick Test (${{ inputs.runner }})"
+    name: "Quick Test (${{ needs.config.outputs.runner }})"
+    needs: config
     runs-on: >-
       ${{
-        inputs.runner == 'hardware-tpm' && fromJSON('["self-hosted", "Linux", "X64", "tpm"]') ||
-        inputs.runner == 'yubikey'      && fromJSON('["self-hosted", "Linux", "X64", "yk"]') ||
-        inputs.runner
+        needs.config.outputs.runner == 'hardware-tpm' && fromJSON('["self-hosted", "Linux", "X64", "tpm"]') ||
+        needs.config.outputs.runner == 'yubikey'      && fromJSON('["self-hosted", "Linux", "X64", "yk"]') ||
+        needs.config.outputs.runner
       }}
     environment: >-
       ${{
-        (inputs.runner == 'hardware-tpm' || inputs.runner == 'yubikey') && 'tpm-hardware' || ''
+        (needs.config.outputs.runner == 'hardware-tpm' || needs.config.outputs.runner == 'yubikey') && 'tpm-hardware' || ''
       }}
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -55,26 +113,29 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # ── GCP Auth (needed for WIF operations) ──
+      # ── GCP Auth ──
       - id: auth
-        if: inputs.install_wif_bunker
+        if: needs.config.outputs.install_wif_bunker == 'true'
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
 
-      - if: inputs.install_wif_bunker && inputs.runner != 'hardware-tpm' && inputs.runner != 'yubikey'
+      - if: >-
+          needs.config.outputs.install_wif_bunker == 'true' &&
+          needs.config.outputs.runner != 'hardware-tpm' &&
+          needs.config.outputs.runner != 'yubikey'
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
       # ── Python setup (GH-hosted only) ──
-      - if: inputs.runner != 'hardware-tpm' && inputs.runner != 'yubikey'
+      - if: needs.config.outputs.runner != 'hardware-tpm' && needs.config.outputs.runner != 'yubikey'
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.x'
 
       # ── Install wif-bunker ──
       - name: "Install wif-bunker"
-        if: inputs.install_wif_bunker
+        if: needs.config.outputs.install_wif_bunker == 'true'
         shell: bash
         run: |
           python3 -m venv .venv
@@ -83,9 +144,17 @@ jobs:
           pip install --upgrade pip
           pip install .
 
+      # ── Download ECP ──
+      - name: "Download ECP"
+        if: needs.config.outputs.install_wif_bunker == 'true'
+        shell: bash
+        run: python get_ecp.py
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
       # ── TPM Reset (hardware-tpm only) ──
       - name: "Reset TPM to clean state"
-        if: inputs.setup_tpm && inputs.runner == 'hardware-tpm'
+        if: needs.config.outputs.setup_tpm == 'true' && needs.config.outputs.runner == 'hardware-tpm'
         shell: bash
         run: |
           echo "=== TPM Info ==="
@@ -114,7 +183,7 @@ jobs:
           echo "=== Verify PKCS#11 store ==="
           ls -la "$HOME/.tpm2_pkcs11/"
 
-      # ── Diagnostics: always dump environment ──
+      # ── Diagnostics: dump environment ──
       - name: "Environment dump"
         shell: bash
         run: |
@@ -133,28 +202,18 @@ jobs:
             echo "=== TPM ==="
             tpm2_getcap properties-fixed 2>/dev/null | grep -E "(TPM2_PT_MANUFACTURER|TPM2_PT_FIRMWARE)" || true
             echo ""
-
             echo "=== TPM Persistent Handles ==="
             tpm2_getcap handles-persistent 2>/dev/null || echo "(none)"
             echo ""
-
             echo "=== PKCS#11 Store ==="
             echo "TPM2_PKCS11_STORE=${TPM2_PKCS11_STORE:-'(not set)'}"
             ls -la "$HOME/.tpm2_pkcs11/" 2>/dev/null || echo "(not found)"
             echo ""
-
             echo "=== PKCS#11 Tokens ==="
             pkcs11-tool --module /usr/lib/x86_64-linux-gnu/pkcs11/libtpm2_pkcs11.so -T 2>&1 || true
-            echo ""
           fi
 
-          if [ -f "adc.json" ]; then
-            echo "=== adc.json ==="
-            cat adc.json
-            echo ""
-          fi
-
-      # ── Run the user's script ──
+      # ── Run the script ──
       - name: "Run script"
         shell: bash
         run: |
@@ -167,7 +226,7 @@ jobs:
             export TPM2_PKCS11_STORE="$HOME/.tpm2_pkcs11"
           fi
 
-          ${{ inputs.script }}
+          ${{ needs.config.outputs.script }}
 
       # ── Post-run diagnostics ──
       - name: "Post-run diagnostics"
@@ -181,7 +240,6 @@ jobs:
             echo ""
             echo "=== TPM Persistent Handles (post-run) ==="
             tpm2_getcap handles-persistent 2>/dev/null || echo "(none)"
-
             echo ""
             echo "=== PKCS#11 Store (post-run) ==="
             ls -la "$HOME/.tpm2_pkcs11/" 2>/dev/null || echo "(not found)"
@@ -195,7 +253,7 @@ jobs:
 
       # ── Cleanup (self-hosted only) ──
       - name: "Cleanup"
-        if: always() && (inputs.runner == 'hardware-tpm' || inputs.runner == 'yubikey')
+        if: always() && (needs.config.outputs.runner == 'hardware-tpm' || needs.config.outputs.runner == 'yubikey')
         shell: bash
         run: |
           HANDLES=$(tpm2_getcap handles-persistent 2>/dev/null | grep -oP '0x[0-9A-Fa-f]+' || true)
