@@ -118,7 +118,7 @@ jobs:
             else
               echo "  Creating runner project: $PROJECT_ID"
               gcloud projects create "$PROJECT_ID" \
-                --name="CI Runner: ${RUNNER_ID}" \
+                --name="CI Runner ${RUNNER_ID}" \
                 --folder="$RUNNER_FOLDER_ID"
 
               # Enable APIs
@@ -133,7 +133,7 @@ jobs:
               # Create runner SA
               gcloud iam service-accounts create "$SA_NAME" \
                 --project="$PROJECT_ID" \
-                --display-name="CI Runner: ${RUNNER_ID}"
+                --display-name="CI Runner ${RUNNER_ID}"
 
               # SA is owner of its own project
               gcloud projects add-iam-policy-binding "$PROJECT_ID" \
