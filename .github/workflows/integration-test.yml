@@ -156,15 +156,7 @@ jobs:
             echo "Installing cryptography wheel: $WHEEL_URL"
             pip install "$WHEEL_URL"
           fi
-          if [ "${{ matrix.use_yubikey }}" = "true" ]; then
-            pip install ".[yubikey]"
-          else
-            pip install .
-          fi
-          # Install tpm2-pytss on Linux where libtss2-dev is available
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            pip install ".[tpm]" 2>/dev/null || echo "tpm2-pytss not installed (libtss2-dev missing)"
-          fi
+          pip install .
 
       # ── Generate unique project ID for this job ──
       - name: Set project ID
