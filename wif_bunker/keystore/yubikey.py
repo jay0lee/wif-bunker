@@ -137,6 +137,9 @@ def generate_cert_yubikey(config: WorkloadConfig) -> CertificateBundle:
             raise RuntimeError(f"YubiKey with serial {config.yubikey_serial} not found.")
     else:
         target_dev, target_info = devices[0]
+        # Write back auto-detected serial so downstream steps
+        # (e.g. build_ecp_pkcs11_config) can find the credential file.
+        config.yubikey_serial = target_info.serial
 
     # 2. Firmware validation
     if target_info.version < (4, 3, 0):
