@@ -58,8 +58,8 @@ fn provider_registers_and_creates_pkey() {
     let pkey_ctx = unsafe {
         openssl_sys::EVP_PKEY_CTX_new_from_name(
             std::ptr::null_mut(),
-            c"hardmtls-key".as_ptr(),
-            c"provider=hardmtls".as_ptr(),
+            c"RSA".as_ptr(),
+            c"provider=hardmtls,hardmtls.sign=yes".as_ptr(),
         )
     };
     eprintln!("  EVP_PKEY_CTX: {pkey_ctx:?}");

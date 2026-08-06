@@ -84,8 +84,22 @@ pub unsafe fn configure_ssl_context(
         ));
     }
 
+    // ── Detect the cert's public key type ──────────────────────────────
+    let pub_key = x509
+        .public_key()
+        .map_err(|e| HardmtlsError::SslError(format!("failed to get public key: {e}")))?;
+    let key_type_name = if pub_key.rsa().is_ok() {
+        c"RSA"
+    } else if pub_key.ec_key().is_ok() {
+        c"EC"
+    } else {
+        return Err(HardmtlsError::SslError(
+            "unsupported key type in certificate".into(),
+        ));
+    };
+
     // ── Create custom EVP_PKEY via our provider ────────────────────────
-    let pkey = unsafe { create_provider_pkey(sign_func) }?;
+    let pkey = unsafe { create_provider_pkey(sign_func, key_type_name) }?;
 
     // SAFETY: ssl_ctx and pkey are valid.
     let rc = unsafe { openssl_sys::SSL_CTX_use_PrivateKey(ssl_ctx, pkey) };
@@ -115,21 +129,23 @@ pub unsafe fn configure_ssl_context(
 #[allow(unsafe_code)]
 unsafe fn create_provider_pkey(
     sign_func: SignCallback,
+    key_type: &std::ffi::CStr,
 ) -> Result<*mut openssl_sys::EVP_PKEY, HardmtlsError> {
     use crate::provider_ffi::{HARDMTLS_PARAM_SIGN_FUNC, OSSL_PARAM_OCTET_STRING};
 
     // Step 1: Create EVP_PKEY_CTX targeting our provider's keymgmt.
     let pkey_ctx = unsafe {
         openssl_sys::EVP_PKEY_CTX_new_from_name(
-            std::ptr::null_mut(),          // default lib ctx
-            c"hardmtls-key".as_ptr(),      // our keymgmt name
-            c"provider=hardmtls".as_ptr(), // target our provider
+            std::ptr::null_mut(),                            // default lib ctx
+            key_type.as_ptr(),                               // keymgmt name (RSA or EC)
+            c"provider=hardmtls,hardmtls.sign=yes".as_ptr(), // target our provider
         )
     };
     if pkey_ctx.is_null() {
-        return Err(HardmtlsError::SslError(
-            "EVP_PKEY_CTX_new_from_name failed for hardmtls-key".into(),
-        ));
+        return Err(HardmtlsError::SslError(format!(
+            "EVP_PKEY_CTX_new_from_name failed for {}",
+            key_type.to_str().unwrap_or("unknown")
+        )));
     }
 
     // Step 2: Initialize for fromdata import.
@@ -179,7 +195,7 @@ unsafe fn create_provider_pkey(
 
     if rc != 1 || pkey.is_null() {
         return Err(HardmtlsError::SslError(
-            "EVP_PKEY_fromdata failed for hardmtls-key".into(),
+            "EVP_PKEY_fromdata failed for provider key".into(),
         ));
     }
 
@@ -276,70 +292,65 @@ mod tests {
         assert!(matches!(result, Err(HardmtlsError::SslError(_))));
     }
 
-    /// Generate a self-signed certificate for testing.
+    /// Pre-built self-signed RSA-2048 test certificate.
+    ///
+    /// Using a static cert avoids calling `X509Builder::sign()` at test time,
+    /// which would race with our provider registration (our "RSA" signature
+    /// can shadow the default provider's RSA when tests run in parallel).
+    const TEST_CERT_PEM: &str = concat!(
+        "-----BEGIN CERTIFICATE-----\n",
+        "MIIDETCCAfmgAwIBAgIUFDaTqlJgmNiBlPEEvPqNKwgUxWQwDQYJKoZIhvcNAQEL\n",
+        "BQAwGDEWMBQGA1UEAwwNaGFyZG10bHMtdGVzdDAeFw0yNjA4MDYyMjA3MTBaFw0y\n",
+        "NzA4MDYyMjA3MTBaMBgxFjAUBgNVBAMMDWhhcmRtdGxzLXRlc3QwggEiMA0GCSqG\n",
+        "SIb3DQEBAQUAA4IBDwAwggEKAoIBAQCtBhNOrhRW+4h6U5rNZQLonJH7tvnveVx2\n",
+        "O5OcpyrgN2oYO8HL8s3rAVpLbRBNRhvanpPOUCiDLtnRmaHrPNp8nkYY91sVWuJ0\n",
+        "xiAOCalYr3ACEd/QHm68tfbJ95IhaTMCvnqua0qgkVEV7g9aGpiH10mUEyJwStQj\n",
+        "1fRct+fd/gzR3y8t/qRSW3194V3aFPHohJqgSbfBr92cWejtt//AY3P7RRxVLydI\n",
+        "N1x+ieM0+7hVnaOCE3awfGm9HkuEmszrtnI2TwYMydRO8XqnqYxbqXkVifsmwP0/\n",
+        "ayEeyQzA0RWCpre2wKhZ7q3fVlfHT2nqMiIZIxG8bB66JhL+S7txAgMBAAGjUzBR\n",
+        "MB0GA1UdDgQWBBTyljdFNus9F+d7nvjUXeCG5ruRnTAfBgNVHSMEGDAWgBTyljdF\n",
+        "Nus9F+d7nvjUXeCG5ruRnTAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUA\n",
+        "A4IBAQCsENFgTzGR7llldn1QL1ylmoWH0RlTT9UaQC96oKRm8Spm3NhqVV74z7tv\n",
+        "D11eT0RBQf8UTuLpFzh/roxxP+ufMuI0ONbc+Z+VyaghVyuxDdfva9RrsbqM4xQ9\n",
+        "a+mZ3DvpT8Oi7lSO0GRGkTOp126xUaiezwcsIXKV7VjSt0sFQ8M3YKAC+349ciH0\n",
+        "/av838WXgjCtbINWpPe5qkYGe+MfOjYDpscmriVsEWTHP24dZH/a9weyUafVk+CR\n",
+        "RdTkKtUVdksz/m/lhC5C5Nrn7HSP7eZR5D5XT2iOg0sScVilkZmpYkDIS0GtTRKH\n",
+        "PFTtIEW55maMi5P5ByF1IXHil/Zk\n",
+        "-----END CERTIFICATE-----\n",
+    );
+
+    /// Get the test certificate PEM as a C string.
     fn generate_test_cert_pem() -> std::ffi::CString {
-        use openssl::asn1::Asn1Time;
-        use openssl::hash::MessageDigest;
-        use openssl::pkey::PKey;
-        use openssl::rsa::Rsa;
-        use openssl::x509::{X509Builder, X509NameBuilder};
-
-        let rsa = Rsa::generate(2048).unwrap();
-        let pkey = PKey::from_rsa(rsa).unwrap();
-
-        let mut name = X509NameBuilder::new().unwrap();
-        name.append_entry_by_text("CN", "hardmtls-test").unwrap();
-        let name = name.build();
-
-        let mut builder = X509Builder::new().unwrap();
-        builder.set_version(2).unwrap();
-        builder.set_subject_name(&name).unwrap();
-        builder.set_issuer_name(&name).unwrap();
-        builder.set_pubkey(&pkey).unwrap();
-        builder
-            .set_not_before(&Asn1Time::days_from_now(0).unwrap())
-            .unwrap();
-        builder
-            .set_not_after(&Asn1Time::days_from_now(365).unwrap())
-            .unwrap();
-        builder.sign(&pkey, MessageDigest::sha256()).unwrap();
-
-        let cert = builder.build();
-        let pem = cert.to_pem().unwrap();
-        std::ffi::CString::new(pem).unwrap()
+        std::ffi::CString::new(TEST_CERT_PEM).unwrap()
     }
 
     #[test]
-    fn end_to_end_cert_and_pkey_creation() {
-        // This test exercises the provider pipeline:
-        // 1. Register the provider
-        // 2. Generate a self-signed cert
-        // 3. Create a custom EVP_PKEY via the provider
-        // 4. Verify both are valid
-        //
-        // Note: SSL_CTX_use_PrivateKey currently fails because our custom key
-        // type doesn't export standard key params. This requires implementing
-        // keymgmt_export and/or keymgmt_match so SSL_CTX can verify the key
-        // matches the certificate. This is the next step.
+    fn end_to_end_configure_ssl_context() {
+        // Full pipeline test:
+        // 1. Create a real SSL_CTX
+        // 2. Generate a self-signed RSA cert
+        // 3. Call configure_ssl_context → register provider + load cert +
+        //    create provider EVP_PKEY + SSL_CTX_use_PrivateKey
 
-        // Register the provider.
-        crate::provider::register_provider().unwrap();
+        // Create a real SSL_CTX.
+        let method = openssl::ssl::SslMethod::tls();
+        let ssl_ctx_builder = openssl::ssl::SslContext::builder(method).unwrap();
+        let ssl_ctx = ssl_ctx_builder.build();
 
-        // Generate test cert and verify it parses.
+        // Generate test cert.
         let cert_pem = generate_test_cert_pem();
-        let cert = openssl::x509::X509::from_pem(cert_pem.to_bytes()).unwrap();
-        assert!(cert.subject_name().entries().count() > 0);
 
-        // Create a custom EVP_PKEY via the provider.
+        // Call configure_ssl_context — this is the function Python will call.
         #[allow(unsafe_code)]
-        let pkey = unsafe { super::create_provider_pkey(dummy_sign) }.unwrap();
-        assert!(!pkey.is_null());
+        let result = unsafe {
+            configure_ssl_context(
+                dummy_sign,
+                cert_pem.as_ptr(),
+                ssl_ctx.as_ptr().cast::<c_void>(),
+            )
+        };
 
-        // Clean up.
-        #[allow(unsafe_code)]
-        unsafe {
-            openssl_sys::EVP_PKEY_free(pkey);
-        }
+        assert!(result.is_ok(), "configure_ssl_context failed: {result:?}");
     }
 
     #[test]
@@ -349,7 +360,7 @@ mod tests {
 
         // Create a custom EVP_PKEY.
         #[allow(unsafe_code)]
-        let result = unsafe { super::create_provider_pkey(dummy_sign) };
+        let result = unsafe { super::create_provider_pkey(dummy_sign, c"RSA") };
 
         assert!(result.is_ok(), "create_provider_pkey failed: {result:?}");
 

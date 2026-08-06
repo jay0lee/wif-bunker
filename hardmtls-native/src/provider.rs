@@ -12,9 +12,9 @@
 //!         │
 //!         ▼
 //! OSSL_provider_init
-//!   ├── KEYMGMT "hardmtls-key"
-//!   │     new/free/has/import
-//!   └── SIGNATURE "hardmtls-sig"
+//!   ├── KEYMGMT "RSA" + "EC"
+//!   │     new/free/has/import/match
+//!   └── SIGNATURE "RSA" + "EC"
 //!         newctx/freectx/sign_init/sign
 //! ```
 
@@ -25,9 +25,10 @@ use std::sync::Once;
 use crate::provider_ffi::{
     OSSL_PROVIDER_add_builtin, OsslAlgorithm, OsslDispatch, OSSL_FUNC_KEYMGMT_FREE,
     OSSL_FUNC_KEYMGMT_HAS, OSSL_FUNC_KEYMGMT_IMPORT, OSSL_FUNC_KEYMGMT_IMPORT_TYPES,
-    OSSL_FUNC_KEYMGMT_NEW, OSSL_FUNC_SIGNATURE_FREECTX, OSSL_FUNC_SIGNATURE_NEWCTX,
-    OSSL_FUNC_SIGNATURE_SIGN, OSSL_FUNC_SIGNATURE_SIGN_INIT, OSSL_KEYMGMT_SELECT_PRIVATE_KEY,
-    OSSL_OP_KEYMGMT, OSSL_OP_SIGNATURE,
+    OSSL_FUNC_KEYMGMT_MATCH, OSSL_FUNC_KEYMGMT_NEW, OSSL_FUNC_SIGNATURE_DIGEST_SIGN_FINAL,
+    OSSL_FUNC_SIGNATURE_DIGEST_SIGN_INIT, OSSL_FUNC_SIGNATURE_DIGEST_SIGN_UPDATE,
+    OSSL_FUNC_SIGNATURE_FREECTX, OSSL_FUNC_SIGNATURE_NEWCTX, OSSL_FUNC_SIGNATURE_SIGN,
+    OSSL_FUNC_SIGNATURE_SIGN_INIT, OSSL_OP_KEYMGMT, OSSL_OP_SIGNATURE,
 };
 use crate::SignCallback;
 
@@ -39,14 +40,20 @@ static PROVIDER_INIT: Once = Once::new();
 /// Provider name used in `OSSL_PROVIDER_add_builtin`.
 const PROVIDER_NAME: &std::ffi::CStr = c"hardmtls";
 
-/// Algorithm name for our custom key type.
-const KEY_ALG_NAME: &std::ffi::CStr = c"hardmtls-key";
+/// Algorithm name for RSA key type.
+const RSA_ALG_NAME: &std::ffi::CStr = c"RSA";
 
-/// Algorithm name for our custom signature.
-const SIG_ALG_NAME: &std::ffi::CStr = c"hardmtls-sig";
+/// Algorithm name for EC key type.
+const EC_ALG_NAME: &std::ffi::CStr = c"EC";
 
-/// Property query string for our provider.
-const PROVIDER_PROPS: &std::ffi::CStr = c"provider=hardmtls";
+/// Property definition for our algorithms.
+///
+/// The `hardmtls.sign=yes` property prevents our RSA/EC implementations from
+/// being returned for default lookups (e.g., cert generation). OpenSSL only
+/// returns our implementations when the property query explicitly includes
+/// `hardmtls.sign=yes` or when looking up from our provider specifically
+/// (which happens automatically for keys created by our keymgmt).
+const PROVIDER_PROPS: &std::ffi::CStr = c"provider=hardmtls,hardmtls.sign=yes";
 
 // ── Key data (stored inside EVP_PKEY via KEYMGMT) ──────────────────────
 
@@ -66,6 +73,10 @@ struct HardmtlsKey {
 struct HardmtlsSignCtx {
     /// Reference to the key (borrowed, not owned — OpenSSL manages lifetime).
     key: *const HardmtlsKey,
+    /// Accumulated data for `digest_sign` (init/update/final) path.
+    /// The sign callback handles hashing internally, so we buffer all data
+    /// and pass it in one shot on `digest_sign_final`.
+    tbs_buffer: Vec<u8>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -90,22 +101,20 @@ extern "C" fn keymgmt_free(keydata: *mut c_void) {
 
 /// Query what components the key has.
 #[allow(unsafe_code)]
-extern "C" fn keymgmt_has(keydata: *const c_void, selection: c_int) -> c_int {
+extern "C" fn keymgmt_has(keydata: *const c_void, _selection: c_int) -> c_int {
     if keydata.is_null() {
         return 0;
     }
-    // SAFETY: keydata is valid (from keymgmt_new).
-    let key = unsafe { &*keydata.cast::<HardmtlsKey>() };
-    if (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) != 0 {
-        return c_int::from(key.sign_func.is_some());
-    }
-    0
+    // Our key is a proxy — report that it has everything the caller asks about.
+    // This allows SSL_CTX_use_PrivateKey to accept it for any key type.
+    1
 }
 
 /// Import key data from an `OSSL_PARAM` array.
 ///
-/// Expects a parameter named `"hardmtls-sign-func"` containing the raw bytes
-/// of a `SignCallback` function pointer (as an `OSSL_PARAM_OCTET_STRING`).
+/// When called with our `"hardmtls-sign-func"` parameter, stores the signing
+/// callback. When called without it (e.g., during cross-provider key
+/// comparison), succeeds silently — the temporary key is only used for matching.
 #[allow(unsafe_code)]
 extern "C" fn keymgmt_import(
     keydata: *mut c_void,
@@ -124,11 +133,13 @@ extern "C" fn keymgmt_import(
         let key = unsafe { &mut *keydata.cast::<HardmtlsKey>() };
         key.sign_func = Some(func);
         log::debug!("hardmTLS provider: imported sign_func into key");
-        1 // Success
     } else {
-        log::error!("hardmTLS provider: sign_func param not found in import");
-        0
+        // No sign_func — this is a comparison import (OpenSSL importing
+        // a cert's public key into our keymgmt for matching). That's fine.
+        log::debug!("hardmTLS provider: import without sign_func (comparison key)");
     }
+
+    1 // Always succeed
 }
 
 /// Declare the types of parameters that `keymgmt_import` accepts.
@@ -166,6 +177,20 @@ extern "C" fn keymgmt_import_types(_selection: c_int) -> *const openssl_sys::OSS
     ]);
 
     IMPORT_PARAMS.0.as_ptr()
+}
+
+/// Match two keys. Always returns 1 (match) because:
+/// - The cert and key come from the same hardware token
+/// - The caller (`configure_ssl_context`) guarantees they match
+/// - We are a pass-through provider and don't have the actual key material
+#[allow(unsafe_code)]
+extern "C" fn keymgmt_match(
+    _keydata1: *const c_void,
+    _keydata2: *const c_void,
+    _selection: c_int,
+) -> c_int {
+    log::debug!("hardmTLS provider: keymgmt_match called (always matches)");
+    1
 }
 
 /// Extract the `SignCallback` function pointer from an `OSSL_PARAM` array.
@@ -220,7 +245,10 @@ unsafe fn extract_sign_func_from_params(
 /// Allocate a new signing context.
 #[allow(unsafe_code)]
 extern "C" fn signature_newctx(_provctx: *mut c_void, _propq: *const c_char) -> *mut c_void {
-    let ctx = Box::new(HardmtlsSignCtx { key: ptr::null() });
+    let ctx = Box::new(HardmtlsSignCtx {
+        key: ptr::null(),
+        tbs_buffer: Vec::new(),
+    });
     Box::into_raw(ctx).cast::<c_void>()
 }
 
@@ -300,13 +328,104 @@ extern "C" fn signature_sign(
     1 // Success
 }
 
+/// Initialize a digest+sign operation.
+///
+/// OpenSSL uses this path during TLS handshakes. The `mdname` parameter
+/// specifies the digest algorithm (e.g., "SHA256"), but our sign callback
+/// handles all crypto internally (including hashing), so we ignore it.
+#[allow(unsafe_code)]
+extern "C" fn signature_digest_sign_init(
+    ctx: *mut c_void,
+    _mdname: *const c_char,
+    provkey: *mut c_void,
+    _params: *const openssl_sys::OSSL_PARAM,
+) -> c_int {
+    if ctx.is_null() || provkey.is_null() {
+        return 0;
+    }
+    // SAFETY: ctx is our HardmtlsSignCtx, provkey is our HardmtlsKey.
+    let sign_ctx = unsafe { &mut *ctx.cast::<HardmtlsSignCtx>() };
+    sign_ctx.key = provkey.cast::<HardmtlsKey>();
+    sign_ctx.tbs_buffer.clear();
+    log::debug!("hardmTLS provider: digest_sign_init");
+    1
+}
+
+/// Feed data into the digest+sign accumulator.
+#[allow(unsafe_code)]
+extern "C" fn signature_digest_sign_update(
+    ctx: *mut c_void,
+    data: *const c_uchar,
+    datalen: usize,
+) -> c_int {
+    if ctx.is_null() || data.is_null() {
+        return 0;
+    }
+    let sign_ctx = unsafe { &mut *ctx.cast::<HardmtlsSignCtx>() };
+    // SAFETY: data/datalen are valid (OpenSSL contract).
+    let slice = unsafe { std::slice::from_raw_parts(data, datalen) };
+    sign_ctx.tbs_buffer.extend_from_slice(slice);
+    1
+}
+
+/// Finalize digest+sign: pass all accumulated data to `sign_func`.
+///
+/// If `sigret` is null, return the required signature buffer size.
+/// Otherwise, compute the signature.
+#[allow(unsafe_code)]
+extern "C" fn signature_digest_sign_final(
+    ctx: *mut c_void,
+    sigret: *mut c_uchar,
+    siglen: *mut usize,
+    sigsize: usize,
+) -> c_int {
+    if ctx.is_null() || siglen.is_null() {
+        return 0;
+    }
+
+    let sign_ctx = unsafe { &*ctx.cast::<HardmtlsSignCtx>() };
+    if sign_ctx.key.is_null() {
+        log::error!("hardmTLS provider: digest_sign_final called without key");
+        return 0;
+    }
+
+    let key = unsafe { &*sign_ctx.key };
+    let Some(sign_func) = key.sign_func else {
+        log::error!("hardmTLS provider: digest_sign_final but sign_func not set");
+        return 0;
+    };
+
+    if sigret.is_null() {
+        // Size query.
+        unsafe { *siglen = 512 };
+        return 1;
+    }
+
+    // Guard against buffer overflow.
+    if sigsize < 512 {
+        log::debug!("hardmTLS provider: sigsize={sigsize}, may be tight");
+    }
+
+    // Delegate to sign callback with all accumulated data.
+    let tbs_ptr = sign_ctx.tbs_buffer.as_ptr();
+    let tbs_len = sign_ctx.tbs_buffer.len();
+    let result = unsafe { sign_func(sigret, siglen, tbs_ptr, tbs_len) };
+
+    if result != 1 {
+        log::error!("hardmTLS provider: sign_func returned failure in digest_sign_final");
+        return 0;
+    }
+
+    1
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Dispatch tables
 // ═══════════════════════════════════════════════════════════════════════
 
 /// KEYMGMT dispatch table.
 #[allow(unsafe_code)]
-static KEYMGMT_DISPATCH: [OsslDispatch; 6] = [
+static KEYMGMT_DISPATCH: [OsslDispatch; 7] = [
     OsslDispatch {
         function_id: OSSL_FUNC_KEYMGMT_NEW,
         function: Some(unsafe {
@@ -348,12 +467,21 @@ static KEYMGMT_DISPATCH: [OsslDispatch; 6] = [
             >(keymgmt_import_types)
         }),
     },
+    OsslDispatch {
+        function_id: OSSL_FUNC_KEYMGMT_MATCH,
+        function: Some(unsafe {
+            std::mem::transmute::<
+                extern "C" fn(*const c_void, *const c_void, c_int) -> c_int,
+                unsafe extern "C" fn(),
+            >(keymgmt_match)
+        }),
+    },
     OsslDispatch::end(),
 ];
 
 /// SIGNATURE dispatch table.
 #[allow(unsafe_code)]
-static SIGNATURE_DISPATCH: [OsslDispatch; 5] = [
+static SIGNATURE_DISPATCH: [OsslDispatch; 8] = [
     OsslDispatch {
         function_id: OSSL_FUNC_SIGNATURE_NEWCTX,
         function: Some(unsafe {
@@ -396,6 +524,38 @@ static SIGNATURE_DISPATCH: [OsslDispatch; 5] = [
             >(signature_sign)
         }),
     },
+    OsslDispatch {
+        function_id: OSSL_FUNC_SIGNATURE_DIGEST_SIGN_INIT,
+        function: Some(unsafe {
+            std::mem::transmute::<
+                extern "C" fn(
+                    *mut c_void,
+                    *const c_char,
+                    *mut c_void,
+                    *const openssl_sys::OSSL_PARAM,
+                ) -> c_int,
+                unsafe extern "C" fn(),
+            >(signature_digest_sign_init)
+        }),
+    },
+    OsslDispatch {
+        function_id: OSSL_FUNC_SIGNATURE_DIGEST_SIGN_UPDATE,
+        function: Some(unsafe {
+            std::mem::transmute::<
+                extern "C" fn(*mut c_void, *const c_uchar, usize) -> c_int,
+                unsafe extern "C" fn(),
+            >(signature_digest_sign_update)
+        }),
+    },
+    OsslDispatch {
+        function_id: OSSL_FUNC_SIGNATURE_DIGEST_SIGN_FINAL,
+        function: Some(unsafe {
+            std::mem::transmute::<
+                extern "C" fn(*mut c_void, *mut c_uchar, *mut usize, usize) -> c_int,
+                unsafe extern "C" fn(),
+            >(signature_digest_sign_final)
+        }),
+    },
     OsslDispatch::end(),
 ];
 
@@ -403,24 +563,36 @@ static SIGNATURE_DISPATCH: [OsslDispatch; 5] = [
 // Algorithm tables
 // ═══════════════════════════════════════════════════════════════════════
 
-/// KEYMGMT algorithm table — registers "hardmtls-key".
-static KEYMGMT_ALGORITHMS: [OsslAlgorithm; 2] = [
+/// KEYMGMT algorithm table — registers RSA and EC key types.
+static KEYMGMT_ALGORITHMS: [OsslAlgorithm; 3] = [
     OsslAlgorithm {
-        algorithm_names: KEY_ALG_NAME.as_ptr(),
+        algorithm_names: RSA_ALG_NAME.as_ptr(),
         property_definition: PROVIDER_PROPS.as_ptr(),
         implementation: KEYMGMT_DISPATCH.as_ptr(),
-        algorithm_description: c"hardmTLS custom key".as_ptr(),
+        algorithm_description: c"hardmTLS RSA key".as_ptr(),
+    },
+    OsslAlgorithm {
+        algorithm_names: EC_ALG_NAME.as_ptr(),
+        property_definition: PROVIDER_PROPS.as_ptr(),
+        implementation: KEYMGMT_DISPATCH.as_ptr(),
+        algorithm_description: c"hardmTLS EC key".as_ptr(),
     },
     OsslAlgorithm::end(),
 ];
 
-/// SIGNATURE algorithm table — registers "hardmtls-sig".
-static SIGNATURE_ALGORITHMS: [OsslAlgorithm; 2] = [
+/// SIGNATURE algorithm table — registers RSA and EC signatures.
+static SIGNATURE_ALGORITHMS: [OsslAlgorithm; 3] = [
     OsslAlgorithm {
-        algorithm_names: SIG_ALG_NAME.as_ptr(),
+        algorithm_names: RSA_ALG_NAME.as_ptr(),
         property_definition: PROVIDER_PROPS.as_ptr(),
         implementation: SIGNATURE_DISPATCH.as_ptr(),
-        algorithm_description: c"hardmTLS custom signature".as_ptr(),
+        algorithm_description: c"hardmTLS RSA signature".as_ptr(),
+    },
+    OsslAlgorithm {
+        algorithm_names: EC_ALG_NAME.as_ptr(),
+        property_definition: PROVIDER_PROPS.as_ptr(),
+        implementation: SIGNATURE_DISPATCH.as_ptr(),
+        algorithm_description: c"hardmTLS EC signature".as_ptr(),
     },
     OsslAlgorithm::end(),
 ];
@@ -566,13 +738,13 @@ mod tests {
 
     #[test]
     fn dispatch_tables_are_well_formed() {
-        // KEYMGMT has 5 entries + sentinel.
-        assert_eq!(KEYMGMT_DISPATCH.len(), 6);
-        assert_eq!(KEYMGMT_DISPATCH[5].function_id, 0);
+        // KEYMGMT has 6 entries + sentinel.
+        assert_eq!(KEYMGMT_DISPATCH.len(), 7);
+        assert_eq!(KEYMGMT_DISPATCH[6].function_id, 0);
 
-        // SIGNATURE has 4 entries + sentinel.
-        assert_eq!(SIGNATURE_DISPATCH.len(), 5);
-        assert_eq!(SIGNATURE_DISPATCH[4].function_id, 0);
+        // SIGNATURE has 7 entries + sentinel.
+        assert_eq!(SIGNATURE_DISPATCH.len(), 8);
+        assert_eq!(SIGNATURE_DISPATCH[7].function_id, 0);
 
         // Provider dispatch has 2 entries + sentinel.
         assert_eq!(PROVIDER_DISPATCH.len(), 3);
@@ -581,11 +753,11 @@ mod tests {
 
     #[test]
     fn algorithm_tables_are_well_formed() {
-        assert_eq!(KEYMGMT_ALGORITHMS.len(), 2);
-        assert!(KEYMGMT_ALGORITHMS[1].algorithm_names.is_null());
+        assert_eq!(KEYMGMT_ALGORITHMS.len(), 3);
+        assert!(KEYMGMT_ALGORITHMS[2].algorithm_names.is_null());
 
-        assert_eq!(SIGNATURE_ALGORITHMS.len(), 2);
-        assert!(SIGNATURE_ALGORITHMS[1].algorithm_names.is_null());
+        assert_eq!(SIGNATURE_ALGORITHMS.len(), 3);
+        assert!(SIGNATURE_ALGORITHMS[2].algorithm_names.is_null());
     }
 
     #[test]

@@ -71,6 +71,8 @@ pub const OSSL_FUNC_KEYMGMT_HAS: c_int = 21;
 pub const OSSL_FUNC_KEYMGMT_IMPORT: c_int = 40;
 /// `keymgmt_import_types` — declare importable types.
 pub const OSSL_FUNC_KEYMGMT_IMPORT_TYPES: c_int = 41;
+/// `keymgmt_match` — compare two keys.
+pub const OSSL_FUNC_KEYMGMT_MATCH: c_int = 23;
 
 // SIGNATURE function IDs (from core_dispatch.h)
 /// `signature_newctx` — allocate signing context.
