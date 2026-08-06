@@ -29,45 +29,23 @@ logger = logging.getLogger(__name__)
 def _resolve_tpm2_ptool() -> list[str]:
     """Resolve a working tpm2_ptool command.
 
-    On Ubuntu 26.04, the system wrapper at /usr/bin/tpm2_ptool is broken:
-    the easy_install entry-point hardcodes a version that doesn't match the
-    installed Python package.  We detect this by running ``tpm2_ptool version``
-    (not ``--help`` — the wrapper may succeed for ``--help`` but crash on
-    actual subcommands) and, if it fails, fall back to invoking the module
-    directly via ``python3 -m tpm2_pkcs11.tpm2_ptool``.
-    """
-    ptool_path = shutil.which("tpm2_ptool")
-    if ptool_path:
-        try:
-            # Probe with a real subcommand, not --help.
-            # The Ubuntu wrapper can pass --help but crash on actual
-            # commands due to entry_point version mismatch.
-            probe = subprocess.run(
-                ["tpm2_ptool", "listprimaries"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if probe.returncode == 0:
-                return ["tpm2_ptool"]
-        except (subprocess.TimeoutExpired, OSError):
-            pass
-        # Binary exists but is broken — check stderr for entry_point crash
-        logger.debug(
-            "tpm2_ptool wrapper is broken (likely Ubuntu packaging bug), "
-            "falling back to python3 -m tpm2_pkcs11.tpm2_ptool"
-        )
+    Prefers invoking the Python module directly (``python3 -m
+    tpm2_pkcs11.tpm2_ptool``) because the system wrapper at
+    ``/usr/bin/tpm2_ptool`` is broken on some Ubuntu versions
+    (easy_install entry-point hardcodes a stale package version).
 
-    # Fall back to invoking the Python module directly.
-    # Try multiple Python paths: sys.executable may be a venv Python
-    # that doesn't have tpm2_pkcs11 installed (it's a system package).
-    python_candidates = []
-    if sys.executable:
+    Uses the system Python (``/usr/bin/python3``), not ``sys.executable``,
+    because ``tpm2_pkcs11`` is a system package that is not available
+    inside virtualenvs.
+    """
+    # 1. Preferred path: invoke the module via system Python.
+    #    This bypasses the broken wrapper entirely.
+    python_candidates = ["/usr/bin/python3"]
+    which_python = shutil.which("python3")
+    if which_python and which_python not in python_candidates:
+        python_candidates.append(which_python)
+    if sys.executable and sys.executable not in python_candidates:
         python_candidates.append(sys.executable)
-    # Always try system Python paths — venv Python won't have tpm2_pkcs11
-    for sys_python in ["/usr/bin/python3", shutil.which("python3")]:
-        if sys_python and sys_python not in python_candidates:
-            python_candidates.append(sys_python)
 
     for python in python_candidates:
         try:
@@ -83,12 +61,27 @@ def _resolve_tpm2_ptool() -> list[str]:
         except (subprocess.TimeoutExpired, OSError):
             pass
 
+    # 2. Fallback: try the system wrapper (works on some distros).
+    ptool_path = shutil.which("tpm2_ptool")
+    if ptool_path:
+        try:
+            probe = subprocess.run(
+                ["tpm2_ptool", "listprimaries"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if probe.returncode == 0:
+                return ["tpm2_ptool"]
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        logger.debug("tpm2_ptool wrapper exists at %s but is not working", ptool_path)
+
     raise RuntimeError(
         "tpm2_ptool is not working.\n"
         "\n"
-        "  The system wrapper may be broken (Ubuntu packaging bug).\n"
-        "  Install: sudo apt install libtpm2-pkcs11-1 "
-        "libtpm2-pkcs11-tools python3-tpm2-pkcs11-tools"
+        "  Neither the system wrapper nor the Python module could be loaded.\n"
+        "  Verify tpm2_pkcs11 is installed and accessible to the system Python."
     )
 
 
@@ -222,7 +215,7 @@ def get_supported_algorithms_linux() -> list[str]:
 
     tpm2_testparms = shutil.which("tpm2_testparms")
     if not tpm2_testparms:
-        raise RuntimeError("tpm2_testparms not found.\n  Install tpm2-tools: sudo apt install tpm2-tools")
+        raise RuntimeError("tpm2_testparms not found.\n  Ensure tpm2-tools is installed and on PATH.")
 
     supported = []
     for algo_name, algo_info in _KEY_ALGORITHMS.items():
@@ -545,11 +538,5 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
             ) from exc
         # Fallback: include the raw error with the failing command.
         raise RuntimeError(
-            f"Linux TPM operation failed (command: {cmd_name}, "
-            f"exit code: {exc.returncode}).\n"
-            f"  stderr: {stderr[:500]}\n"
-            "\n"
-            "  Ensure libtpm2-pkcs11-tools and gnutls-bin are installed:\n"
-            "    sudo apt install libtpm2-pkcs11-1 libtpm2-pkcs11-tools "
-            "python3-tpm2-pkcs11-tools gnutls-bin opensc"
+            f"Linux TPM operation failed (command: {cmd_name}, exit code: {exc.returncode}).\n  stderr: {stderr[:500]}"
         ) from exc
