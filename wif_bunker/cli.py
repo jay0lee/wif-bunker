@@ -383,16 +383,41 @@ def _main_impl() -> None:
         cert_bundle = generate_os_keystore_cert(config)
 
         # On Windows + YubiKey: the Smart Card Minidriver needs a fresh
-        # card insertion to discover the new cert.  Prompt the user to
-        # re-insert, then verify it appears in the Windows cert store.
+        # card insertion to discover the new cert.  Auto-detect the
+        # removal and reinsertion rather than requiring manual input.
         if sys.platform == "win32" and config.use_yubikey:
             import subprocess as _sp
             import time as _time
+            from ykman.device import list_all_devices as _list_yk
+
             logger.info("")
-            logger.info("    Windows requires a YubiKey re-insertion for the Smart Card")
-            logger.info("    Minidriver to discover the new certificate.")
-            input("    Please REMOVE and RE-INSERT the YubiKey, then press Enter...")
-            _time.sleep(2)  # Give Windows time to enumerate the card
+            logger.info("    Waiting for YubiKey to be removed...")
+            logger.info("    (Windows needs a re-insertion to discover the new certificate)")
+
+            # Wait for YubiKey to disappear (up to 30s)
+            _deadline = _time.monotonic() + 30
+            while _time.monotonic() < _deadline:
+                if not _list_yk():
+                    break
+                _time.sleep(0.5)
+            else:
+                logger.warning("    Timed out waiting for YubiKey removal — continuing anyway")
+
+            if not _list_yk():
+                logger.info("    YubiKey removed. Please re-insert it now...")
+
+                # Wait for YubiKey to reappear (up to 30s)
+                _deadline = _time.monotonic() + 30
+                while _time.monotonic() < _deadline:
+                    if _list_yk():
+                        logger.info("    YubiKey detected!")
+                        break
+                    _time.sleep(0.5)
+                else:
+                    logger.warning("    Timed out waiting for YubiKey — continuing anyway")
+
+            # Give the minidriver time to initialize and enumerate the card
+            _time.sleep(3)
             _sp.run(["certutil", "-pulse"], capture_output=True, timeout=10)
 
             _check = _sp.run(
