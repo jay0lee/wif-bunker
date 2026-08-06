@@ -1,182 +1,116 @@
-# Linux TPM Keystore — Developer Guide
+# TPM PKCS#11 Operations on Linux: Reference Guide
 
-## Overview
+This document serves as a reference for developers performing PKCS#11 TPM key operations on Linux systems. It focuses on the architectural concepts, practical implementation details, required libraries, and prominently features common pitfalls and "dead ends" to avoid.
 
-On Linux, workload keys are stored in the TPM via the **tpm2-pkcs11** PKCS#11
-middleware.  The `python-pkcs11` library (pip-installed) talks directly to
-`libtpm2_pkcs11.so` via the standard PKCS#11 C API.  No CLI tools (tpm2_ptool,
-certtool, etc.) are used — all operations happen through library calls.
+## 1. Architecture
 
+The Linux TPM stack is layered, translating hardware operations into high-level PKCS#11 API calls.
 
-## Architecture
+*   **Hardware/Kernel**: The physical or emulated TPM hardware is exposed via the kernel at `/dev/tpmrm0` (TPM Resource Manager).
+*   **TSS Layer**: The `tpm2-tss` library provides the TCG Software Stack (TSS) implementation.
+*   **PKCS#11 Bridge**: `libtpm2_pkcs11.so` bridges the standard PKCS#11 API to the TSS layer.
+*   **Concepts Mapping**:
+    *   **Tokens** map to TPM **Primary Keys**.
+    *   **Objects** map to TPM **Child Keys** derived from those primary keys.
 
-```
-wif-bunker (Python)
-    └── python-pkcs11 (pip)
-            └── libtpm2_pkcs11.so (system)
-                    └── TPM 2.0 hardware
-```
+## 2. How to Do Things
 
-**System requirement:** `libtpm2_pkcs11.so` must be installed.  This is the
-PKCS#11 shared library that bridges PKCS#11 operations to the TPM hardware.
+### PKCS#11 Library Discovery
 
-**Discovery order** for the `.so` path:
-1. `TPM2_PKCS11_MODULE` environment variable (user override)
-2. `p11-kit list-modules` output (desktop Linux standard)
-3. Well-known paths: Debian/Ubuntu, Fedora/RHEL, Arch Linux
+`libtpm2_pkcs11.so` is the crucial shared library bridging the PKCS#11 standard and the TPM.
+Discovery mechanisms include:
+*   Environment Variable: `TPM2_PKCS11_MODULE`
+*   `p11-kit` configuration.
+*   Well-known paths which vary by distribution:
+    *   **Debian/Ubuntu**: `/usr/lib/x86_64-linux-gnu/pkcs11/libtpm2_pkcs11.so`
+    *   **Fedora/RHEL**: `/usr/lib64/pkcs11/libtpm2_pkcs11.so`
+    *   **Arch Linux**: `/usr/lib/pkcs11/libtpm2_pkcs11.so`
 
+### Token Management
 
-## Key Creation Flow
+*   **Initialization**: Use `C_InitToken` to initialize a slot and create a token.
+*   **Identification**: Tokens are identified by their string label.
+*   **Storage**: The `TPM2_PKCS11_STORE` environment variable defines the directory for the SQLite database holding token metadata.
 
-### Step 1: Check Hardware Capability
+### Key Generation
 
-The TPM's supported algorithms are queried via PKCS#11 slot mechanisms:
+Keys generated via this interface are created persistently (`CKA_TOKEN=True`).
 
-```python
-import pkcs11
+*   **Elliptic Curve (EC)**: Use mechanism `CKM_EC_KEY_PAIR_GEN`. Provide `CKA_EC_PARAMS` containing the ASN.1 OID for the target curve.
+*   **RSA**: Use mechanism `CKM_RSA_PKCS_KEY_PAIR_GEN`. Provide `CKA_MODULUS_BITS` (e.g., 2048).
 
-lib = pkcs11.lib("/path/to/libtpm2_pkcs11.so")
-slot = lib.get_slots()[0]
-mechs = slot.get_mechanisms()
-# Mechanism.ECDSA → es256/es384
-# Mechanism.RSA_PKCS → rsa2048/rsa3072/rsa4096
-```
+### Public Key Extraction
 
-**Gotcha:** Many firmware TPMs (Intel PTT, AMD fTPM) only support P-256.
-P-384 and RSA-4096 may be rejected.
+Extracting public key material requires parsing PKCS#11 attributes.
 
-### Step 2: Environment Setup
+*   **EC Keys** (`CKA_EC_POINT`): Returns a DER-encoded OCTET STRING that wraps the uncompressed point.
+    *   *P-256*: Outer DER `04 41`, followed by `04` `<32 bytes X>` `<32 bytes Y>`.
+    *   *P-384*: Outer DER `04 61`, followed by `04` `<48 bytes X>` `<48 bytes Y>`.
+*   **RSA Keys**: Extract `CKA_MODULUS` and `CKA_PUBLIC_EXPONENT`.
 
-```bash
-export TPM2_PKCS11_STORE=~/.tpm2_pkcs11
-```
+### Certificate Import
 
-**This is mandatory.** Without it, operations fall back to `/etc/tpm2_pkcs11`
-which requires root.
+To import a certificate and link it to a key pair:
+*   Use `C_CreateObject` with class `CKO_CERTIFICATE` and type `CKC_X_509`.
+*   Pass the DER-encoded certificate as `CKA_VALUE`.
+*   **Crucial**: The `CKA_ID` of the certificate object must exactly match the `CKA_ID` of the associated key pair.
 
-### Step 3: Cleanup Old Objects (SAFE)
+### Algorithm Probing
 
-The code only destroys objects in our token (`bunker-wif`), never
-wipes the store or evicts unknown persistent handles.
+To determine what cryptographic algorithms the underlying TPM supports:
+*   Call `C_GetMechanismList` on the initialized slot.
+*   `CKM_ECDSA` indicates Elliptic Curve support.
+*   `CKM_RSA_PKCS` indicates RSA support.
 
-```python
-token = lib.get_token(token_label="bunker-wif")
-with token.open(user_pin=pin, rw=True) as session:
-    for obj in session.get_objects():
-        obj.destroy()
-```
+## 3. Python Libraries
 
-> **⚠️ CRITICAL: TPM Citizenship**
->
-> In production, other applications (disk encryption, Secure Boot, VPN keys)
-> may have their own tokens and persistent handles.  **Never** wipe the store
-> directory or evict handles you don't own.  Only destroy objects with our label.
+### `python-pkcs11` (pip)
 
-### Step 4: Token Init and Key Generation
+*   A pure Python wrapper for PKCS#11. Works with any compliant `.so` library.
+*   Load the module: `pkcs11.lib('/path/to/libtpm2_pkcs11.so')`.
+*   Ideal for session management, key generation, and reading attributes.
 
-```python
-# Find or create our token
-token = lib.get_token(token_label="bunker-wif")
-# or: slot.init_token(pin, "bunker-wif")
+### `tpm2-pytss` (pip)
 
-with token.open(user_pin=pin, rw=True) as session:
-    # Generate key pair — stays in TPM, never exportable
-    pub, priv = session.generate_keypair(
-        KeyType.EC,
-        mechanism=Mechanism.EC_KEY_PAIR_GEN,
-        store=True,
-        label=workload_cn,
-        attrs={Attribute.EC_PARAMS: encode_named_curve_parameters("secp256r1")},
-    )
-```
+*   *Requires `libtss2-dev` system packages.*
+*   Direct Python bindings for the TPM2 TSS (ESAPI/FAPI).
+*   Operates at a lower level than PKCS#11, issuing raw TPM commands.
+*   **Necessary for attestation operations**, such as `Certify` and credential activation.
 
-### Step 5: Extract Public Key and Sign Certificate
+## 4. Dead Ends — What Didn't Work
 
-The public key is extracted via PKCS#11 attributes, then used with
-`cryptography` to create a CA-signed workload certificate:
+> [!WARNING]
+> The following approaches were attempted but failed or proved unreliable. Avoid using these methods for programmatic interaction.
 
-```python
-# Extract EC point from PKCS#11
-ec_point = pub[Attribute.EC_POINT]
-# Convert to cryptography public key
-crypto_pub = EllipticCurvePublicKey.from_encoded_point(SECP256R1(), raw_point)
-# Serialize as PEM and pass to _create_ca_and_sign()
-pub_pem = crypto_pub.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
-```
+### `tpm2_ptool` Python Entry-Point Broken (Ubuntu 24.04+)
+*   **Issue**: The Ubuntu/Debian package installs `tpm2_ptool` via `setuptools` `entry_points`. On newer distributions, version mismatches break this wrapper.
+*   **Workaround**: Running `python3 -m tpm2_pkcs11.tpm2_ptool` circumvents the entry-point issue, but leads directly to the SQLite schema mismatch problem below.
 
-### Step 6: Import Signed Certificate
+### SQLite Schema Mismatch (`tpm2_ptool` vs `libtpm2_pkcs11.so`)
+*   **Issue**: `tpm2_ptool` (Python) and `libtpm2_pkcs11.so` (C) have conflicting definitions of the SQLite database schema. If you use `tpm2_ptool` to create the store, the C library will fail to read it, throwing `CKR_OPERATION_NOT_INITIALIZED` or "no such table: schema".
+*   **Solution**: **Never use `tpm2_ptool` for initialization.** Let the C library create the database automatically when it is first used.
+*   **Best Practice**: Use `python-pkcs11` to call `C_InitToken`, which delegates the DB creation safely to the C library.
 
-```python
-# Convert PEM → DER
-workload_der = x509.load_pem_x509_certificate(pem).public_bytes(Encoding.DER)
+### `certtool` + PKCS#11 URIs (GnuTLS)
+*   **Issue**: Attempting to generate self-signed certs using `certtool --generate-self-signed --load-privkey 'pkcs11:token=...;object=...;type=private;pin-value=...'` is extremely fragile. The URI syntax must be exact, and `GNUTLS_PIN` must be set to avoid interactive prompts.
+*   **Solution**: Replaced this entirely by extracting the public key via PKCS#11 attributes directly in Python and generating the certificate programmatically.
 
-session.create_object(
-    {
-        Attribute.CLASS: ObjectClass.CERTIFICATE,
-        Attribute.CERTIFICATE_TYPE: CertificateType.X_509,
-        Attribute.LABEL: workload_cn,
-        Attribute.VALUE: workload_der,
-        Attribute.TOKEN: True,
-        Attribute.ID: pub[Attribute.ID],  # Links cert to key
-    }
-)
-```
+### `pkcs11-tool` / `p11tool`
+*   **Issue**: Commands like `pkcs11-tool --module /path/to/libtpm2_pkcs11.so -T` are useful for ad-hoc debugging but are poor choices for programmatic access. Parsing standard output is brittle.
+*   **Solution**: Replaced by using `python-pkcs11` to perform slot and mechanism queries directly in code.
 
+## 5. Permission Requirements
 
-## Algorithm Mapping
+*   The user executing the application must have read/write access to `/dev/tpmrm0`.
+*   Typically, this requires adding the user to the `tss` group: `sudo usermod -aG tss <username>`
+*   When using a software TPM (e.g., `swtpm` on port 2321), set the environment variable: `TPM2TOOLS_TCTI=mssim:host=127.0.0.1,port=2321`.
 
-| Config Name | PKCS#11 Key Type | PKCS#11 Mechanism | Notes |
-|---|---|---|---|
-| `es256` | EC (secp256r1) | `CKM_ECDSA` | Most widely supported |
-| `es384` | EC (secp384r1) | `CKM_ECDSA` | Some firmware TPMs reject |
-| `rsa2048` | RSA 2048-bit | `CKM_RSA_PKCS` | Universally supported |
-| `rsa3072` | RSA 3072-bit | `CKM_RSA_PKCS` | Most TPMs support |
-| `rsa4096` | RSA 4096-bit | `CKM_RSA_PKCS` | Many TPMs reject |
+## 6. Error Reference
 
-
-## Platform Quirks and Gotchas
-
-### 1. Permission Requirements
-
-The user must have R/W access to `/dev/tpmrm0`:
-```bash
-sudo usermod -aG tss <username>
-# Log out and back in
-```
-
-### 2. TCTI Configuration
-
-If the Resource Manager isn't at the default path, set:
-```bash
-export TPM2TOOLS_TCTI="device:/dev/tpmrm0"
-# or for swtpm:
-export TPM2TOOLS_TCTI="swtpm:host=localhost,port=2321"
-```
-
-### 3. PKCS#11 Library Path Override
-
-If `libtpm2_pkcs11.so` is in a non-standard location:
-```bash
-export TPM2_PKCS11_MODULE=/path/to/libtpm2_pkcs11.so
-```
-
-### 4. EC Point DER Encoding
-
-`libtpm2_pkcs11.so` returns `EC_POINT` as a DER-encoded `OCTET STRING`
-wrapping the uncompressed point.  The outer DER wrapper (2 bytes) must be
-stripped before passing to `cryptography`:
-```
-DER: 04 41 04 <32 bytes x> <32 bytes y>   (P-256)
-DER: 04 61 04 <48 bytes x> <48 bytes y>   (P-384)
-```
-
-
-## Error Reference
-
-| Error | Meaning | Fix |
-|---|---|---|
-| `CKR_DEVICE_ERROR` | TPM not responding | Check `/dev/tpmrm0`, set `TPM2TOOLS_TCTI` |
-| `CKR_PIN_INCORRECT` | Token PIN mismatch | `rm -rf ~/.tpm2_pkcs11 && wif-bunker --cert-only` |
-| `CKR_TOKEN_NOT_RECOGNIZED` | Store corruption | `rm -rf ~/.tpm2_pkcs11 && wif-bunker --cert-only` |
-| `No available PKCS#11 slot` | All slots occupied | Check store integrity |
-| `Could not find libtpm2_pkcs11.so` | Library not installed | Install `libtpm2-pkcs11-1` or set `TPM2_PKCS11_MODULE` |
+| Error Code | Meaning | Resolution |
+| :--- | :--- | :--- |
+| `CKR_DEVICE_ERROR` | TPM is not responding. | Check permissions and availability of `/dev/tpmrm0`. |
+| `CKR_PIN_INCORRECT` | The provided Token PIN is wrong. | Re-initialize the token with the correct PIN. |
+| `CKR_TOKEN_NOT_RECOGNIZED` | SQLite store is corrupted. | Wipe the store directory (`~/.tpm2_pkcs11` or `$TPM2_PKCS11_STORE`). |
+| `CKR_OPERATION_NOT_INITIALIZED` | SQLite schema mismatch. | DB was likely created by the wrong tool (e.g., `tpm2_ptool`). Wipe it and let the C library recreate it. |
+| `TPM_RC_NV_SPACE` (`0x14b`) | TPM Non-Volatile storage is full. | Evict old persistent handles using `tpm2_evictcontrol`. |

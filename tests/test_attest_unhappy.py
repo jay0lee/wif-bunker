@@ -193,12 +193,11 @@ class TestAttestationWithSelfSignedCert:
         assert tpm_check is not None
         assert tpm_check.passed is False
 
-    @patch("wif_bunker.attestation.linux.require_commands")
-    @patch("wif_bunker.attestation.linux.subprocess.run")
+    @patch("wif_bunker.attestation.linux._get_esapi")
     @patch("sys.platform", "linux")
-    def test_linux_no_tpm_device_fails(self, mock_run, _mock_req):
-        """On Linux, when /dev/tpmrm0 doesn't exist, TPM check fails."""
-        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="No TPM")
+    def test_linux_no_tpm_device_fails(self, mock_get_esapi):
+        """On Linux, when TPM is not accessible, attestation fails."""
+        mock_get_esapi.side_effect = RuntimeError("No TPM device found")
         config = WorkloadConfig()
         config.workload_cn = "fake-workload"
 
