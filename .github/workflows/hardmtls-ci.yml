@@ -1,0 +1,49 @@
+name: hardmTLS CI
+
+on:
+  push:
+    paths:
+      - 'hardmtls-native/**'
+  pull_request:
+    paths:
+      - 'hardmtls-native/**'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      
+      - name: Install OpenSSL (Windows)
+        if: runner.os == 'Windows'
+        run: choco install openssl -y
+      
+      - name: Formatting
+        working-directory: hardmtls-native
+        run: cargo fmt --all -- --check
+      
+      - name: Linting
+        working-directory: hardmtls-native
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      
+      - name: Tests
+        working-directory: hardmtls-native
+        run: cargo test --all-features
+      
+      - name: Documentation
+        working-directory: hardmtls-native
+        run: cargo doc --no-deps
