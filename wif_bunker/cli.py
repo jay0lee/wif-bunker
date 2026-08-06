@@ -382,6 +382,32 @@ def _main_impl() -> None:
         logger.info("=== 3) Generating Hardware-Backed Certificate ===")
         cert_bundle = generate_os_keystore_cert(config)
 
+        # On Windows + YubiKey: verify the cert is visible in the Windows
+        # Certificate Store (via the Smart Card Minidriver).  If it's not,
+        # ECP won't be able to use it for mTLS and all subsequent steps
+        # would be wasted.
+        if sys.platform == "win32" and config.use_yubikey:
+            import subprocess as _sp
+            _check = _sp.run(
+                ["powershell", "-Command",
+                 "Get-ChildItem Cert:\\CurrentUser\\My"
+                 f" | Where-Object {{ $_.Issuer -match '{cert_bundle.issuer_cn}' }}"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if not _check.stdout.strip():
+                logger.error(
+                    "❌ YubiKey certificate was generated, but it is NOT visible\n"
+                    "   in the Windows Certificate Store.\n\n"
+                    "   The YubiKey Smart Card Minidriver is required for ECP\n"
+                    "   to access YubiKey certificates on Windows.\n\n"
+                    "   Install it:\n"
+                    "     1. Download from:\n"
+                    "        https://www.yubico.com/support/download/smart-card-drivers-tools/\n"
+                    "     2. Run the installer and re-insert the YubiKey\n"
+                    "     3. Re-run wif-bunker\n"
+                )
+                raise SystemExit(1)
+
         # --- Step 4: SA + WIF Creation (or reuse) ---
         use_sa = not args.no_service_account
         sa_email = args.use_service_account  # None if not provided
