@@ -23,45 +23,227 @@ on:
         required: true
       SANDBOX_FOLDER_ID:
         required: true
-
-# Only allow one integration test at a time to avoid project name collisions
-concurrency:
-  group: wif-bunker-integration
-  cancel-in-progress: true
+      WIF_POOL_NAME:
+        required: true
 
 permissions:
   contents: read
   id-token: write  # Required for OIDC token exchange with GCP
 
 jobs:
+  # ──────────────────────────────────────────────────────────────────────
+  # Bootstrap: ensure per-runner GCP projects exist
+  # ──────────────────────────────────────────────────────────────────────
+  bootstrap:
+    name: Bootstrap Runner Infrastructure
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: wif-ci-bootstrap
+      cancel-in-progress: false
+    outputs:
+      runner_map: ${{ steps.setup.outputs.runner_map }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - id: setup
+        name: Ensure per-runner projects and folders
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SANDBOX_FOLDER="${{ secrets.SANDBOX_FOLDER_ID }}"
+          WIF_POOL="${{ secrets.WIF_POOL_NAME }}"
+          GH_REPO="${{ github.repository }}"
+
+          # Runner IDs — MUST match matrix.runner_id values exactly
+          RUNNERS="linux-swtpm macos windows nuc8-tpm nuc8-yk"
+
+          declare -A RUNNER_SA
+          declare -A RUNNER_TESTS_FOLDER
+
+          # ── Get existing child folders of sandbox ──
+          EXISTING_FOLDERS=$(gcloud resource-manager folders list \
+            --folder="$SANDBOX_FOLDER" \
+            --format="csv[no-heading](displayName,name)" 2>/dev/null || true)
+
+          for RUNNER_ID in $RUNNERS; do
+            PROJECT_ID="wif-ci-${RUNNER_ID}"
+            SA_NAME="ci-runner"
+            SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+
+            # ── Find or create runner folder ──
+            RUNNER_FOLDER_ID=$(echo "$EXISTING_FOLDERS" | \
+              grep "^${RUNNER_ID}," | head -1 | cut -d',' -f2 | \
+              sed 's|folders/||')
+
+            if [ -n "$RUNNER_FOLDER_ID" ]; then
+              echo "✓ Runner folder exists: ${RUNNER_ID}/ (${RUNNER_FOLDER_ID})"
+            else
+              echo "Creating runner folder: ${RUNNER_ID}/"
+              RUNNER_FOLDER_ID=$(gcloud resource-manager folders create \
+                --display-name="$RUNNER_ID" \
+                --folder="$SANDBOX_FOLDER" \
+                --format="value(name)" | sed 's|folders/||')
+              echo "  Created folder: $RUNNER_FOLDER_ID"
+            fi
+
+            # ── Find or create tests/ subfolder ──
+            TESTS_FOLDER_ID=$(gcloud resource-manager folders list \
+              --folder="$RUNNER_FOLDER_ID" \
+              --filter="displayName=tests" \
+              --format="value(name)" 2>/dev/null | head -1 | sed 's|folders/||')
+
+            if [ -n "$TESTS_FOLDER_ID" ]; then
+              echo "  ✓ Tests folder exists: ${RUNNER_ID}/tests/ (${TESTS_FOLDER_ID})"
+            else
+              echo "  Creating tests folder: ${RUNNER_ID}/tests/"
+              TESTS_FOLDER_ID=$(gcloud resource-manager folders create \
+                --display-name="tests" \
+                --folder="$RUNNER_FOLDER_ID" \
+                --format="value(name)" | sed 's|folders/||')
+              echo "  Created tests folder: $TESTS_FOLDER_ID"
+            fi
+
+            # ── Find or create runner project ──
+            if gcloud projects describe "$PROJECT_ID" --format="value(lifecycleState)" 2>/dev/null | grep -q ACTIVE; then
+              echo "  ✓ Runner project exists: $PROJECT_ID"
+            else
+              echo "  Creating runner project: $PROJECT_ID"
+              gcloud projects create "$PROJECT_ID" \
+                --name="CI Runner: ${RUNNER_ID}" \
+                --folder="$RUNNER_FOLDER_ID"
+
+              # Enable APIs
+              gcloud services enable \
+                iam.googleapis.com \
+                cloudresourcemanager.googleapis.com \
+                serviceusage.googleapis.com \
+                sts.googleapis.com \
+                iamcredentials.googleapis.com \
+                --project="$PROJECT_ID"
+
+              # Create runner SA
+              gcloud iam service-accounts create "$SA_NAME" \
+                --project="$PROJECT_ID" \
+                --display-name="CI Runner: ${RUNNER_ID}"
+
+              # SA is owner of its own project
+              gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+                --member="serviceAccount:${SA_EMAIL}" \
+                --role="roles/owner"
+
+              # SA can create/manage test projects in its own tests/ folder
+              for ROLE in \
+                roles/resourcemanager.projectCreator \
+                roles/resourcemanager.projectDeleter \
+                roles/browser \
+                roles/serviceusage.serviceUsageAdmin; do
+                gcloud resource-manager folders add-iam-policy-binding "$TESTS_FOLDER_ID" \
+                  --member="serviceAccount:${SA_EMAIL}" \
+                  --role="$ROLE" \
+                  --condition=None
+              done
+
+              # Allow GHA OIDC to impersonate this SA
+              gcloud iam service-accounts add-iam-policy-binding "${SA_EMAIL}" \
+                --project="$PROJECT_ID" \
+                --role="roles/iam.workloadIdentityUser" \
+                --member="principalSet://iam.googleapis.com/${WIF_POOL}/attribute.repository/${GH_REPO}"
+
+              echo "  ✓ Created: $PROJECT_ID → $SA_EMAIL"
+            fi
+
+            RUNNER_SA[$RUNNER_ID]="$SA_EMAIL"
+            RUNNER_TESTS_FOLDER[$RUNNER_ID]="$TESTS_FOLDER_ID"
+          done
+
+          # ── Cleanup orphaned runner folders ──
+          while IFS=',' read -r display_name folder_path; do
+            [ -z "$display_name" ] && continue
+            # Skip non-runner entries (e.g. the host project won't have a folder entry)
+            if ! echo "$RUNNERS" | grep -qw "$display_name"; then
+              ORPHAN_ID=$(echo "$folder_path" | sed 's|folders/||')
+              echo "🗑 Cleaning up orphaned runner folder: $display_name/ ($ORPHAN_ID)"
+
+              # Delete test projects inside tests/ subfolder
+              CHILD_FOLDERS=$(gcloud resource-manager folders list \
+                --folder="$ORPHAN_ID" --format="value(name)" 2>/dev/null || true)
+              for cf in $CHILD_FOLDERS; do
+                CF_ID=$(echo "$cf" | sed 's|folders/||')
+                CF_PROJECTS=$(gcloud projects list \
+                  --filter="parent.id=$CF_ID AND parent.type=folder" \
+                  --format="value(projectId)" 2>/dev/null || true)
+                for proj in $CF_PROJECTS; do
+                  echo "    Deleting test project: $proj"
+                  gcloud projects delete "$proj" --quiet 2>/dev/null || true
+                done
+                gcloud resource-manager folders delete "$cf" 2>/dev/null || true
+              done
+
+              # Delete runner project
+              ORPHAN_PROJECT="wif-ci-${display_name}"
+              gcloud projects delete "$ORPHAN_PROJECT" --quiet 2>/dev/null || true
+
+              # Delete runner folder
+              gcloud resource-manager folders delete "folders/$ORPHAN_ID" 2>/dev/null || true
+            fi
+          done <<< "$EXISTING_FOLDERS"
+
+          # ── Output runner map as JSON ──
+          JSON="{"
+          FIRST=true
+          for RUNNER_ID in $RUNNERS; do
+            $FIRST || JSON+=","
+            JSON+="\"${RUNNER_ID}\":{\"sa\":\"${RUNNER_SA[$RUNNER_ID]}\",\"tests_folder\":\"${RUNNER_TESTS_FOLDER[$RUNNER_ID]}\"}"
+            FIRST=false
+          done
+          JSON+="}"
+          echo "runner_map=${JSON}" >> "$GITHUB_OUTPUT"
+          echo "Runner map:"
+          echo "$JSON" | python3 -m json.tool 2>/dev/null || echo "$JSON"
+
   integration-test:
+    needs: bootstrap
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-24.04
             name: Linux x64 (24.04)
+            runner_id: linux-swtpm
             soft_key_flag: ""
             artifact_name: wif-bunker-linux-x86_64
             expected_algos: "es256 es384 rsa2048 rsa3072"
           - os: macos-15
             name: macOS ARM64 (Apple Silicon)
+            runner_id: macos
             soft_key_flag: ""
             artifact_name: wif-bunker-macos-arm64
             expected_algos: "es256 es384"
           - os: windows-2025
             name: Windows x64
+            runner_id: windows
             soft_key_flag: "--soft-key"
             artifact_name: wif-bunker-windows-x86_64
             expected_algos: "es256 es384 rsa2048 rsa3072 rsa4096"
           - name: Hardware TPM (NUC8)
             runs_on: '["self-hosted", "Linux", "X64", "tpm"]'
+            runner_id: nuc8-tpm
             soft_key_flag: ""
             artifact_name: wif-bunker-linux-x86_64
             self_hosted: true
             expected_algos: "es256 rsa2048"
           - name: YubiKey (NUC8)
             runs_on: '["self-hosted", "Linux", "X64", "yk"]'
+            runner_id: nuc8-yk
             soft_key_flag: ""
             artifact_name: wif-bunker-linux-x86_64
             self_hosted: true
@@ -72,8 +254,13 @@ jobs:
     runs-on: ${{ matrix.runs_on && fromJSON(matrix.runs_on) || matrix.os }}
     name: ${{ matrix.name }}
     environment: ${{ matrix.self_hosted && 'tpm-hardware' || '' }}
+    concurrency:
+      group: wif-ci-${{ matrix.runner_id }}
+      cancel-in-progress: true
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RUNNER_SA: ${{ fromJSON(needs.bootstrap.outputs.runner_map)[matrix.runner_id].sa }}
+      TESTS_FOLDER: ${{ fromJSON(needs.bootstrap.outputs.runner_map)[matrix.runner_id].tests_folder }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -83,7 +270,7 @@ jobs:
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
-          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          service_account: ${{ fromJSON(needs.bootstrap.outputs.runner_map)[matrix.runner_id].sa }}
 
       - if: ${{ !matrix.self_hosted }}
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
@@ -178,7 +365,7 @@ jobs:
           python minimal-adc.py | tee /tmp/adc_baseline.txt
 
           # Confirm we see the expected CI service account
-          GHA_SA="${{ secrets.WIF_SERVICE_ACCOUNT }}"
+          GHA_SA="$RUNNER_SA"
           if grep -q "$GHA_SA" /tmp/adc_baseline.txt; then
             echo "✓ Baseline ADC working as CI SA: $GHA_SA"
           else
@@ -191,12 +378,11 @@ jobs:
         shell: bash
         run: |
           echo "=== Cleaning up stale test projects ==="
-          FOLDER_ID="${{ secrets.SANDBOX_FOLDER_ID }}"
+          FOLDER_ID="$TESTS_FOLDER"
 
-          # List all active projects in the sandbox folder with wif-ci- prefix
-          # Exclude the host project (wif-ci-host-*)
+          # List all active projects in this runner's tests/ folder
           PROJECTS=$(gcloud projects list \
-            --filter="parent.id=$FOLDER_ID AND parent.type=folder AND projectId:wif-ci- AND NOT projectId:wif-ci-host- AND lifecycleState=ACTIVE" \
+            --filter="parent.id=$FOLDER_ID AND parent.type=folder AND lifecycleState=ACTIVE" \
             --format="value(projectId,createTime)" \
             --sort-by=createTime 2>/dev/null || true)
 
@@ -516,7 +702,7 @@ jobs:
           ${{ inputs.wif_bunker_cmd || 'python -m wif_bunker' }} \
             --use-adc \
             --create-project="${{ steps.config.outputs.project_id }}" \
-            --folder="${{ secrets.SANDBOX_FOLDER_ID }}" \
+            --folder="$TESTS_FOLDER" \
             ${{ matrix.soft_key_flag }} $YUBIKEY_FLAGS
 
       # ── Step 3: WIF Bunker reuse run (detects existing resources) ──
@@ -551,7 +737,7 @@ jobs:
           # Validate we're NOT accidentally using the GHA CI service account
           echo ""
           echo "=== CI Validation ==="
-          GHA_SA="${{ secrets.WIF_SERVICE_ACCOUNT }}"
+          GHA_SA="$RUNNER_SA"
           if grep -q "$GHA_SA" /tmp/adc_output.txt; then
             echo "✗ FAIL: Using GHA CI service account, not bunker creds!"
             exit 1
@@ -593,7 +779,7 @@ jobs:
           # Validate we're NOT accidentally using the GHA CI service account
           echo ""
           echo "=== CI Validation ==="
-          GHA_SA="${{ secrets.WIF_SERVICE_ACCOUNT }}"
+          GHA_SA="$RUNNER_SA"
           if grep -q "$GHA_SA" /tmp/adc_output_nosa.txt; then
             echo "✗ FAIL: Using GHA CI service account, not bunker creds!"
             exit 1
@@ -665,5 +851,6 @@ jobs:
           | **Project** | \`${{ steps.config.outputs.project_id }}\` |
           | **Soft Key** | \`${{ matrix.soft_key_flag || 'no (hardware/swtpm)' }}\` |
           | **YubiKey** | \`${{ steps.yubikey.outputs.serial || 'n/a' }}\` |
+          | **Runner SA** | \`${{ env.RUNNER_SA }}\` |
 
           EOF
