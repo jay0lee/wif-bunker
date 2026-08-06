@@ -1,6 +1,14 @@
 """YubiKey PIV attestation module.
 
 Provides verification of hardware residency using YubiKey PIV attestation.
+
+.. ai-note::
+   IMPORTANT FOR AI AGENTS: Before reading, editing, or debugging this file,
+   you MUST read docs/attestation-yubikey.md in the repository root.
+   That document covers the PIV attestation flow, certificate chain structure
+   (legacy vs new 5.7.4+ chains), Yubico OID extensions, import vs generate
+   detection, and firmware version gates.  If you make changes to this file,
+   update docs/attestation-yubikey.md to match.
 """
 
 from __future__ import annotations

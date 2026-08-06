@@ -1,4 +1,14 @@
-"""macOS Secure Enclave keystore: CryptoTokenKit key generation and cert management."""
+"""macOS Secure Enclave keystore: CryptoTokenKit key generation and cert management.
+
+.. ai-note::
+   IMPORTANT FOR AI AGENTS: Before reading, editing, or debugging this file,
+   you MUST read docs/keystore-macos.md in the repository root.
+   That document covers the sc_auth command flow, Secure Enclave algorithm
+   limitations (ECC only, no RSA), CSR filename appending gotcha, CTK
+   registration delay, VM limitations, and macOS 15+ requirement.
+   Attestation is NOT possible on macOS — see docs/attestation-macos.md.
+   If you make changes to this file, update docs/keystore-macos.md to match.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,13 @@
-"""YubiKey keystore: PIV key generation and certificate management."""
+"""YubiKey keystore: PIV key generation and certificate management.
+
+.. ai-note::
+   IMPORTANT FOR AI AGENTS: Before reading, editing, or debugging this file,
+   you MUST read docs/keystore-yubikey.md in the repository root.
+   That document covers the PIV security initialization sequence (PIN/PUK/
+   management key), generate_key parameters, slot mapping, firmware version
+   gates, PKCS#11 library discovery, and the import-vs-generate distinction.
+   If you make changes to this file, update docs/keystore-yubikey.md to match.
+"""
 
 from __future__ import annotations
 

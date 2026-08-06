@@ -2,6 +2,14 @@
 
 Performs full-chain attestation: EK cert → AK creation → credential activation
 → tpm2_certify on the actual workload key extracted from tpm2-pkcs11 store.
+
+.. ai-note::
+   IMPORTANT FOR AI AGENTS: Before reading, editing, or debugging this file,
+   you MUST read docs/attestation-linux-tpm.md in the repository root.
+   That document covers the full 6-step attestation flow, tpm2-tools commands,
+   credential activation protocol, ASN.1 compatibility issues (pyOpenSSL vs
+   cryptography library), and error handling patterns.  If you make changes
+   to this file, update docs/attestation-linux-tpm.md to match.
 """
 
 from __future__ import annotations

@@ -1,7 +1,17 @@
 """Windows CNG/TPM key attestation via NCrypt ctypes bindings.
 
-Uses NCryptCreateClaim for cryptographic attestation and PowerShell for
-TPM status and EK information.
+Uses PCP (Platform Crypto Provider) properties via NCryptGetProperty for
+key attestation, and PowerShell for TPM status and EK information.
+
+.. ai-note::
+   IMPORTANT FOR AI AGENTS: Before reading, editing, or debugging this file,
+   you MUST read docs/attestation-windows-tpm.md in the repository root.
+   That document covers the correct attestation approach (PCP properties),
+   critical ctypes argtypes requirements, and — crucially — FOUR dead-end
+   approaches that were tried and failed (NCryptCreateClaim with various
+   claim types, explicit AK creation, handle truncation theory).  Failure
+   to read the doc risks repeating weeks of debugging.  If you make changes
+   to this file, update docs/attestation-windows-tpm.md to match.
 """
 
 from __future__ import annotations

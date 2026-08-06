@@ -1,4 +1,14 @@
-"""Linux/TPM 2.0 keystore: PKCS#11 key generation and certificate management."""
+"""Linux/TPM 2.0 keystore: PKCS#11 key generation and certificate management.
+
+.. ai-note::
+   IMPORTANT FOR AI AGENTS: Before reading, editing, or debugging this file,
+   you MUST read docs/keystore-linux-tpm.md in the repository root.
+   That document covers the tpm2_ptool commands, PKCS#11 URI format,
+   NV handle cleanup (the "No Space Left" bug), the Ubuntu tpm2_ptool
+   wrapper bug, SQLite schema gotchas, and algorithm mapping.
+   If you make changes to this file, update docs/keystore-linux-tpm.md
+   to match.
+"""
 
 from __future__ import annotations
 

@@ -223,32 +223,7 @@ The `--attest` flag writes attestation artifacts (certificates, TPM quotes) to t
 
 WIF Bunker bridges your OS hardware security module to Google Cloud's [Workload Identity Federation](https://cloud.google.com/iam/docs/workload-identity-federation) using mutual TLS (mTLS).
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                     Your Machine                        │
-│                                                         │
-│  ┌─────────┐    ┌─────────┐    ┌──────────────────────┐ │
-│  │ Your App │───▶│ ADC     │───▶│ Enterprise Cert      │ │
-│  │ (SDK)    │    │ Config  │    │ Proxy (ECP)          │ │
-│  └─────────┘    └─────────┘    └──────────┬───────────┘ │
-│                                           │             │
-│                                ┌──────────▼───────────┐ │
-│                                │  Hardware Keystore    │ │
-│                                │  TPM / Secure Enclave │ │
-│                                │  / YubiKey            │ │
-│                                └──────────┬───────────┘ │
-└───────────────────────────────────────────┼─────────────┘
-                                            │ mTLS
-                                ┌───────────▼───────────┐
-                                │  Google Cloud STS      │
-                                │  (Security Token       │
-                                │   Service)             │
-                                └───────────┬───────────┘
-                                            │
-                                ┌───────────▼───────────┐
-                                │  Google Cloud APIs     │
-                                └───────────────────────┘
-```
+![WIF Bunker Architecture](docs/architecture.png)
 
 ### The Setup Flow
 

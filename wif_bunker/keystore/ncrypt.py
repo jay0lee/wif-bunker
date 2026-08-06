@@ -22,6 +22,15 @@ How ctypes works (for future maintainers):
   (like ncrypt.dll) at runtime.  No C compiler is needed — these DLLs ship
   with every Windows installation.  Think of it as calling a function in a
   shared library, similar to how Python's ``ssl`` module calls libssl.
+
+.. ai-note::
+   IMPORTANT FOR AI AGENTS: Before reading, editing, or debugging this file,
+   you MUST read docs/keystore-windows-cng.md in the repository root.
+   That document covers the CNG key creation flow, CngKey parameters,
+   certificate store import/binding, PCP_KEY_USAGE_POLICY gotchas,
+   ctypes argtypes requirements, and the crypt32 pointer truncation bug.
+   If you make changes to this file, update docs/keystore-windows-cng.md
+   to match.
 """
 
 from __future__ import annotations

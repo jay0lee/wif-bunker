@@ -1,4 +1,13 @@
-"""Attestation result dataclasses shared across all platform implementations."""
+"""Attestation result dataclasses shared across all platform implementations.
+
+.. ai-note::
+   IMPORTANT FOR AI AGENTS: Before reading, editing, or debugging this file,
+   you MUST read docs/attestation-overview.md in the repository root.
+   That document covers the shared data model, EK chain verification logic,
+   AIA chasing, ASN.1 compatibility (pyOpenSSL vs cryptography), and the
+   trust chain architecture.  If you make changes to this file, update
+   docs/attestation-overview.md to match.
+"""
 
 from __future__ import annotations
 
