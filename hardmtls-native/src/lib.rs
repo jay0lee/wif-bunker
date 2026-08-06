@@ -25,6 +25,8 @@ pub mod backends;
 pub mod config;
 pub mod dispatch;
 pub mod error;
+pub mod provider;
+pub mod provider_ffi;
 pub mod ssl_ctx;
 
 use std::ffi::{c_char, c_int, c_uchar, c_void};
