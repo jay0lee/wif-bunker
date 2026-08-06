@@ -384,29 +384,29 @@ def _main_impl() -> None:
 
         # On Windows + YubiKey: the Smart Card Minidriver needs a fresh
         # card insertion to discover the new cert.  Auto-detect the
-        # removal and reinsertion rather than requiring manual input.
+        # removal and reinsertion, with a manual fallback.
         if sys.platform == "win32" and config.use_yubikey:
             import subprocess as _sp
             import time as _time
             from ykman.device import list_all_devices as _list_yk
 
             logger.info("")
-            logger.info("    Waiting for YubiKey to be removed...")
-            logger.info("    (Windows needs a re-insertion to discover the new certificate)")
+            logger.info("    ⚡ Please remove the YubiKey from USB and re-insert it.")
+            logger.info("      (Windows needs this to discover the new certificate)")
+            logger.info("")
 
-            # Wait for YubiKey to disappear (up to 30s)
-            _deadline = _time.monotonic() + 30
+            # Phase 1: Wait for removal (auto-detect, 15s timeout)
+            _removed = False
+            _deadline = _time.monotonic() + 15
             while _time.monotonic() < _deadline:
                 if not _list_yk():
+                    _removed = True
                     break
                 _time.sleep(0.5)
-            else:
-                logger.warning("    Timed out waiting for YubiKey removal — continuing anyway")
 
-            if not _list_yk():
-                logger.info("    YubiKey removed. Please re-insert it now...")
-
-                # Wait for YubiKey to reappear (up to 30s)
+            if _removed:
+                logger.info("    YubiKey removed — waiting for re-insertion...")
+                # Phase 2: Wait for reinsertion (30s timeout)
                 _deadline = _time.monotonic() + 30
                 while _time.monotonic() < _deadline:
                     if _list_yk():
@@ -414,7 +414,10 @@ def _main_impl() -> None:
                         break
                     _time.sleep(0.5)
                 else:
-                    logger.warning("    Timed out waiting for YubiKey — continuing anyway")
+                    logger.warning("    Timed out waiting for YubiKey re-insertion")
+            else:
+                # Auto-detect timed out — ask manually
+                input("    >> Remove and re-insert the YubiKey, then press Enter: ")
 
             # Give the minidriver time to initialize and enumerate the card
             _time.sleep(3)
