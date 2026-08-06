@@ -135,7 +135,13 @@ jobs:
       - name: Create venv and install dependencies
         shell: bash
         run: |
-          python3 -m venv .venv
+          # Self-hosted runners need --system-site-packages so the venv
+          # can access system packages like tpm2_pkcs11 (tpm2_ptool).
+          VENV_FLAGS=""
+          if [ "${{ matrix.self_hosted }}" = "true" ]; then
+            VENV_FLAGS="--system-site-packages"
+          fi
+          python3 -m venv $VENV_FLAGS .venv
           if [ -d ".venv/Scripts" ]; then
             source .venv/Scripts/activate
             echo "$PWD/.venv/Scripts" >> "$GITHUB_PATH"
@@ -240,6 +246,17 @@ jobs:
           # they may use different SQLite schema versions.  If
           # tpm2_ptool creates the DB, the C library gets:
           #   "no such table: schema" → CKR_OPERATION_NOT_INITIALIZED
+
+          # 0. Fix broken tpm2_ptool wrapper (Ubuntu entry_point bug)
+          if ! tpm2_ptool listprimaries 2>/dev/null; then
+            echo "tpm2_ptool wrapper is broken — creating a working one"
+            sudo tee /usr/local/bin/tpm2_ptool > /dev/null << 'WRAPPER'
+          #!/bin/bash
+          exec /usr/bin/python3 -m tpm2_pkcs11.tpm2_ptool "$@"
+          WRAPPER
+            sudo chmod +x /usr/local/bin/tpm2_ptool
+            echo "Fixed. Testing: $(tpm2_ptool listprimaries 2>&1 | head -1)"
+          fi
 
           # 1. Evict ALL persistent handles
           HANDLES=$(tpm2_getcap handles-persistent 2>/dev/null | grep -oP '0x[0-9A-Fa-f]+' || true)

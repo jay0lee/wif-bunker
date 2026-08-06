@@ -16,7 +16,6 @@ import logging
 import os
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 from wif_bunker.cert import _create_ca_and_sign
@@ -29,39 +28,10 @@ logger = logging.getLogger(__name__)
 def _resolve_tpm2_ptool() -> list[str]:
     """Resolve a working tpm2_ptool command.
 
-    Prefers invoking the Python module directly (``python3 -m
-    tpm2_pkcs11.tpm2_ptool``) because the system wrapper at
-    ``/usr/bin/tpm2_ptool`` is broken on some Ubuntu versions
-    (easy_install entry-point hardcodes a stale package version).
-
-    Uses the system Python (``/usr/bin/python3``), not ``sys.executable``,
-    because ``tpm2_pkcs11`` is a system package that is not available
-    inside virtualenvs.
+    ``tpm2_ptool`` is a system CLI tool installed via the OS package manager
+    (e.g. ``python3-tpm2-pkcs11-tools`` on Ubuntu).  We call it via subprocess
+    just like ``certtool``, ``pkcs11-tool``, and other system tools.
     """
-    # 1. Preferred path: invoke the module via system Python.
-    #    This bypasses the broken wrapper entirely.
-    python_candidates = ["/usr/bin/python3"]
-    which_python = shutil.which("python3")
-    if which_python and which_python not in python_candidates:
-        python_candidates.append(which_python)
-    if sys.executable and sys.executable not in python_candidates:
-        python_candidates.append(sys.executable)
-
-    for python in python_candidates:
-        try:
-            probe = subprocess.run(
-                [python, "-m", "tpm2_pkcs11.tpm2_ptool", "listprimaries"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if probe.returncode == 0:
-                logger.debug("    Using tpm2_ptool via: %s -m tpm2_pkcs11.tpm2_ptool", python)
-                return [python, "-m", "tpm2_pkcs11.tpm2_ptool"]
-        except (subprocess.TimeoutExpired, OSError):
-            pass
-
-    # 2. Fallback: try the system wrapper (works on some distros).
     ptool_path = shutil.which("tpm2_ptool")
     if ptool_path:
         try:
@@ -73,15 +43,21 @@ def _resolve_tpm2_ptool() -> list[str]:
             )
             if probe.returncode == 0:
                 return ["tpm2_ptool"]
-        except (subprocess.TimeoutExpired, OSError):
-            pass
-        logger.debug("tpm2_ptool wrapper exists at %s but is not working", ptool_path)
+            # Wrapper exists but doesn't work — log stderr for diagnostics
+            logger.debug(
+                "tpm2_ptool returned exit code %d: %s",
+                probe.returncode,
+                probe.stderr.strip()[:200],
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            logger.debug("tpm2_ptool probe failed: %s", exc)
 
     raise RuntimeError(
         "tpm2_ptool is not working.\n"
         "\n"
-        "  Neither the system wrapper nor the Python module could be loaded.\n"
-        "  Verify tpm2_pkcs11 is installed and accessible to the system Python."
+        "  tpm2_ptool is required to manage TPM PKCS#11 tokens.\n"
+        "  Verify it is installed and functional:\n"
+        "    tpm2_ptool listprimaries"
     )
 
 
