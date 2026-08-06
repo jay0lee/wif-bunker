@@ -29,6 +29,7 @@ cryptoki = "0.7.0"
 
 # Error handling
 thiserror = "2"
+foreign-types-shared = "0.1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # NCrypt/CNG FFI for Windows TPM

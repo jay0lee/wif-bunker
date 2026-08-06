@@ -243,6 +243,7 @@ dependencies = [
  "core-foundation",
  "cryptoki",
  "env_logger",
+ "foreign-types-shared",
  "log",
  "openssl",
  "openssl-sys",
