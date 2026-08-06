@@ -299,20 +299,26 @@ class GCPClient:
 
         Retries on:
           - HTTP 403 (IAM propagation delay after project/API setup)
+          - HTTP 404 (newly created resource not yet visible)
           - ConnectionError / ConnectionResetError (transient network)
           - google.auth TransportError (STS/mTLS handshake reset)
         """
+        # Extract a human-readable API name from the URL for log messages
+        # e.g. "POST iam.googleapis.com/.../serviceAccounts"
+        api_label = url.split("//")[-1] if "//" in url else url
         for attempt in range(max_attempts):
             try:
                 return self.api_call(method, url, json_payload)
             except requests.exceptions.HTTPError as exc:
-                if exc.response is not None and exc.response.status_code == 403 and attempt < max_attempts - 1:
+                if exc.response is not None and exc.response.status_code in (403, 404) and attempt < max_attempts - 1:
                     sleep_time = min(2**attempt, MAX_BACKOFF_SECONDS)
                     logger.info(
-                        "    Waiting for IAM propagation (%d/%d), %ds...",
+                        "    Waiting for IAM/resource propagation (%d/%d), %ds... [%s %s]",
                         attempt + 1,
                         max_attempts,
                         sleep_time,
+                        method,
+                        api_label,
                     )
                     time.sleep(sleep_time)
                     continue
@@ -321,11 +327,13 @@ class GCPClient:
                 if attempt < max_attempts - 1:
                     sleep_time = min(2**attempt, MAX_BACKOFF_SECONDS)
                     logger.warning(
-                        "    Transient connection error (%d/%d), retrying in %ds: %s",
+                        "    Transient connection error (%d/%d), retrying in %ds: %s [%s %s]",
                         attempt + 1,
                         max_attempts,
                         sleep_time,
                         exc,
+                        method,
+                        api_label,
                     )
                     time.sleep(sleep_time)
                     continue
@@ -350,16 +358,32 @@ class GCPClient:
 
     def wait_for_wif_resource(self, url: str, max_attempts: int = API_RETRY_ATTEMPTS) -> dict:
         """Polls a WIF resource until it reaches ACTIVE state."""
+        api_label = url.split("//")[-1] if "//" in url else url
         for attempt in range(max_attempts):
-            data = self.api_call("GET", url)
+            try:
+                data = self.api_call("GET", url)
+            except requests.exceptions.HTTPError as exc:
+                if exc.response is not None and exc.response.status_code == 404 and attempt < max_attempts - 1:
+                    sleep_time = min(2**attempt, MAX_BACKOFF_SECONDS)
+                    logger.debug(
+                        "WIF resource not found yet (attempt %d/%d), sleeping %ds [GET %s]",
+                        attempt + 1,
+                        max_attempts,
+                        sleep_time,
+                        api_label,
+                    )
+                    time.sleep(sleep_time)
+                    continue
+                raise
             if data and data.get("state") == "ACTIVE":
                 return data
             sleep_time = min(2**attempt, MAX_BACKOFF_SECONDS)
             logger.debug(
-                "WIF resource not ACTIVE yet (attempt %d/%d), sleeping %ds",
+                "WIF resource not ACTIVE yet (attempt %d/%d), sleeping %ds [GET %s]",
                 attempt + 1,
                 max_attempts,
                 sleep_time,
+                api_label,
             )
             time.sleep(sleep_time)
         raise TimeoutError(f"WIF resource at {url} did not become ACTIVE within {max_attempts} attempts")

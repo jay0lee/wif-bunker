@@ -558,10 +558,14 @@ def main() -> None:
     except requests.exceptions.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "?"
         body = exc.response.text if exc.response is not None else str(exc)
+        request_info = ""
+        if exc.request is not None:
+            request_info = f"\n    {exc.request.method} {exc.request.url}"
         logger.error(
-            "%s GCP API call failed (HTTP %s).\n%s",
+            "%s GCP API call failed (HTTP %s).%s\n%s",
             SYM_FAIL,
             status,
+            request_info,
             body,
         )
         sys.exit(1)
