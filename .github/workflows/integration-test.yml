@@ -82,7 +82,7 @@ jobs:
             # ── Find or create runner folder ──
             RUNNER_FOLDER_ID=$(echo "$EXISTING_FOLDERS" | \
               grep "^${RUNNER_ID}," | head -1 | cut -d',' -f2 | \
-              sed 's|folders/||')
+              sed 's|folders/||' || true)
 
             if [ -n "$RUNNER_FOLDER_ID" ]; then
               echo "✓ Runner folder exists: ${RUNNER_ID}/ (${RUNNER_FOLDER_ID})"
@@ -99,7 +99,7 @@ jobs:
             TESTS_FOLDER_ID=$(gcloud resource-manager folders list \
               --folder="$RUNNER_FOLDER_ID" \
               --filter="displayName=tests" \
-              --format="value(name)" 2>/dev/null | head -1 | sed 's|folders/||')
+              --format="value(name)" 2>/dev/null | head -1 | sed 's|folders/||' || true)
 
             if [ -n "$TESTS_FOLDER_ID" ]; then
               echo "  ✓ Tests folder exists: ${RUNNER_ID}/tests/ (${TESTS_FOLDER_ID})"
