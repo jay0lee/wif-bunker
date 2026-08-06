@@ -1,0 +1,204 @@
+name: Quick Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: 'Runner to target'
+        required: true
+        type: choice
+        options:
+          - 'hardware-tpm'
+          - 'yubikey'
+          - 'ubuntu-24.04'
+          - 'ubuntu-26.04'
+          - 'macos-15'
+          - 'windows-2025'
+      script:
+        description: 'Bash script to run (multi-line OK)'
+        required: true
+        type: string
+        default: |
+          echo "Hello from $(hostname) / $(uname -a)"
+          python3 --version
+      install_wif_bunker:
+        description: 'Install wif-bunker and dependencies into a venv'
+        required: false
+        type: boolean
+        default: true
+      setup_tpm:
+        description: 'Reset TPM to clean state (hardware-tpm only)'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  quick-test:
+    name: "Quick Test (${{ inputs.runner }})"
+    runs-on: >-
+      ${{
+        inputs.runner == 'hardware-tpm' && fromJSON('["self-hosted", "Linux", "X64", "tpm"]') ||
+        inputs.runner == 'yubikey'      && fromJSON('["self-hosted", "Linux", "X64", "yk"]') ||
+        inputs.runner
+      }}
+    environment: >-
+      ${{
+        (inputs.runner == 'hardware-tpm' || inputs.runner == 'yubikey') && 'tpm-hardware' || ''
+      }}
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # ── GCP Auth (needed for WIF operations) ──
+      - id: auth
+        if: inputs.install_wif_bunker
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - if: inputs.install_wif_bunker && inputs.runner != 'hardware-tpm' && inputs.runner != 'yubikey'
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      # ── Python setup (GH-hosted only) ──
+      - if: inputs.runner != 'hardware-tpm' && inputs.runner != 'yubikey'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.x'
+
+      # ── Install wif-bunker ──
+      - name: "Install wif-bunker"
+        if: inputs.install_wif_bunker
+        shell: bash
+        run: |
+          python3 -m venv .venv
+          source .venv/bin/activate || . .venv/Scripts/activate 2>/dev/null
+          echo "$VIRTUAL_ENV/bin" >> "$GITHUB_PATH"
+          pip install --upgrade pip
+          pip install .
+
+      # ── TPM Reset (hardware-tpm only) ──
+      - name: "Reset TPM to clean state"
+        if: inputs.setup_tpm && inputs.runner == 'hardware-tpm'
+        shell: bash
+        run: |
+          echo "=== TPM Info ==="
+          tpm2_getcap properties-fixed 2>/dev/null | head -20 || echo "(tpm2_getcap failed)"
+
+          echo ""
+          echo "=== Evicting persistent handles ==="
+          HANDLES=$(tpm2_getcap handles-persistent 2>/dev/null | grep -oP '0x[0-9A-Fa-f]+' || true)
+          for h in $HANDLES; do
+            echo "  Evicting $h"
+            tpm2_evictcontrol -c "$h" 2>/dev/null || true
+          done
+          [ -n "$HANDLES" ] && echo "Evicted $(echo "$HANDLES" | wc -w) handle(s)." || echo "No stale handles."
+
+          echo ""
+          echo "=== Resetting PKCS#11 store ==="
+          rm -rf "$HOME/.tpm2_pkcs11"
+          mkdir -p "$HOME/.tpm2_pkcs11"
+          export TPM2_PKCS11_STORE="$HOME/.tpm2_pkcs11"
+
+          echo ""
+          echo "=== Bootstrap DB via C library ==="
+          pkcs11-tool --module /usr/lib/x86_64-linux-gnu/pkcs11/libtpm2_pkcs11.so -T 2>&1 || true
+
+          echo ""
+          echo "=== Verify PKCS#11 store ==="
+          ls -la "$HOME/.tpm2_pkcs11/"
+
+      # ── Diagnostics: always dump environment ──
+      - name: "Environment dump"
+        shell: bash
+        run: |
+          echo "=== System ==="
+          echo "Hostname: $(hostname)"
+          echo "OS: $(uname -a)"
+          echo "User: $(whoami)"
+          echo ""
+
+          echo "=== Python ==="
+          which python3 && python3 --version
+          which pip && pip --version 2>/dev/null || true
+          echo ""
+
+          if command -v tpm2_getcap &>/dev/null; then
+            echo "=== TPM ==="
+            tpm2_getcap properties-fixed 2>/dev/null | grep -E "(TPM2_PT_MANUFACTURER|TPM2_PT_FIRMWARE)" || true
+            echo ""
+
+            echo "=== TPM Persistent Handles ==="
+            tpm2_getcap handles-persistent 2>/dev/null || echo "(none)"
+            echo ""
+
+            echo "=== PKCS#11 Store ==="
+            echo "TPM2_PKCS11_STORE=${TPM2_PKCS11_STORE:-'(not set)'}"
+            ls -la "$HOME/.tpm2_pkcs11/" 2>/dev/null || echo "(not found)"
+            echo ""
+
+            echo "=== PKCS#11 Tokens ==="
+            pkcs11-tool --module /usr/lib/x86_64-linux-gnu/pkcs11/libtpm2_pkcs11.so -T 2>&1 || true
+            echo ""
+          fi
+
+          if [ -f "adc.json" ]; then
+            echo "=== adc.json ==="
+            cat adc.json
+            echo ""
+          fi
+
+      # ── Run the user's script ──
+      - name: "Run script"
+        shell: bash
+        run: |
+          # Activate venv if it exists
+          if [ -d ".venv" ]; then
+            source .venv/bin/activate || . .venv/Scripts/activate 2>/dev/null
+          fi
+          # Set TPM env for self-hosted
+          if command -v tpm2_getcap &>/dev/null; then
+            export TPM2_PKCS11_STORE="$HOME/.tpm2_pkcs11"
+          fi
+
+          ${{ inputs.script }}
+
+      # ── Post-run diagnostics ──
+      - name: "Post-run diagnostics"
+        if: always()
+        shell: bash
+        run: |
+          echo "=== Generated files ==="
+          find . -maxdepth 2 -name "*.pem" -o -name "*.json" -o -name "*.log" 2>/dev/null | sort || true
+
+          if command -v tpm2_getcap &>/dev/null; then
+            echo ""
+            echo "=== TPM Persistent Handles (post-run) ==="
+            tpm2_getcap handles-persistent 2>/dev/null || echo "(none)"
+
+            echo ""
+            echo "=== PKCS#11 Store (post-run) ==="
+            ls -la "$HOME/.tpm2_pkcs11/" 2>/dev/null || echo "(not found)"
+          fi
+
+          if [ -f "adc.json" ]; then
+            echo ""
+            echo "=== adc.json (post-run) ==="
+            cat adc.json
+          fi
+
+      # ── Cleanup (self-hosted only) ──
+      - name: "Cleanup"
+        if: always() && (inputs.runner == 'hardware-tpm' || inputs.runner == 'yubikey')
+        shell: bash
+        run: |
+          HANDLES=$(tpm2_getcap handles-persistent 2>/dev/null | grep -oP '0x[0-9A-Fa-f]+' || true)
+          for h in $HANDLES; do tpm2_evictcontrol -c "$h" 2>/dev/null || true; done
+          rm -rf "$HOME/.tpm2_pkcs11"
+          rm -f adc.json bunker-workload-*.pem
