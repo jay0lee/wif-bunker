@@ -223,7 +223,13 @@ def generate_cert_yubikey(config: WorkloadConfig) -> CertificateBundle:
         touch_policy = getattr(TOUCH_POLICY, touch_str, TOUCH_POLICY.NEVER)
 
         logger.info(f"Generating {config.key_algorithm} key in slot {slot_str}...")
-        pub_key = piv.generate_key(slot, key_type, pin_policy=PIN_POLICY.ONCE, touch_policy=touch_policy)
+        # On Windows, ECP/tls_offload calls NCrypt with NCRYPT_SILENT_FLAG
+        # which suppresses the PIN dialog — PIN_POLICY.ONCE would cause
+        # signing to fail.  Use NEVER on Windows (matches TPM security
+        # model: no PIN for signing, physical possession required).
+        # On Linux/macOS, PKCS#11 supports user_pin so ONCE works.
+        _pin_policy = PIN_POLICY.NEVER if sys.platform == "win32" else PIN_POLICY.ONCE
+        pub_key = piv.generate_key(slot, key_type, pin_policy=_pin_policy, touch_policy=touch_policy)
 
         # 6. Public key export
         pub_key_pem = pub_key.public_bytes(
