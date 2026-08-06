@@ -342,9 +342,10 @@ def _main_impl() -> None:
     # instead of failing 10+ minutes into the setup.
     preflight_check_write_access(Path.cwd())
 
-    # Pre-flight: if using YubiKey, verify the PKCS#11 library exists
-    # before spending minutes on GCP project/IAM setup.
-    if config.use_yubikey:
+    # Pre-flight: if using YubiKey on Linux/macOS, verify the PKCS#11
+    # library exists before spending minutes on GCP project/IAM setup.
+    # On Windows, ECP uses NCrypt (via YubiKey Smart Card Minidriver).
+    if config.use_yubikey and sys.platform != "win32":
         from wif_bunker.keystore.yubikey import find_pkcs11_library
         try:
             find_pkcs11_library()

@@ -255,12 +255,24 @@ def build_certificate_config(
         workload_cert_path, trust_chain_path).
     """
     if config.use_yubikey:
-        from wif_bunker.keystore.yubikey import build_ecp_pkcs11_config
+        if sys.platform == "win32":
+            # On Windows, ECP uses NCrypt/CNG — not PKCS#11.
+            # The YubiKey Smart Card Minidriver makes PIV certs visible
+            # in the Windows Certificate Store, so we use windows_store.
+            cert_configs = {
+                "windows_store": {
+                    "store": "MY",
+                    "provider": "current_user",
+                    "issuer": cert_bundle.issuer_cn,
+                },
+            }
+        else:
+            from wif_bunker.keystore.yubikey import build_ecp_pkcs11_config
 
-        cert_configs = build_ecp_pkcs11_config(
-            serial=config.yubikey_serial,
-            workload_cn=config.workload_cn,
-        )
+            cert_configs = build_ecp_pkcs11_config(
+                serial=config.yubikey_serial,
+                workload_cn=config.workload_cn,
+            )
     elif sys.platform == "win32":
         cert_configs = {
             "windows_store": {

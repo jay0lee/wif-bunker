@@ -285,10 +285,11 @@ def find_pkcs11_library() -> str:
         hint = (
             "The YubiKey PKCS#11 library (libykcs11.dll) is required for mTLS.\n"
             "\n"
-            "  Install the Yubico PIV Tool:\n"
-            "    1. Download the .msi installer from:\n"
-            "       https://developers.yubico.com/yubico-piv-tool/Releases/\n"
-            "    2. Run the installer (adds libykcs11.dll to Program Files)\n"
+            "  Note: On Windows, ECP uses the Windows Certificate Store via NCrypt.\n"
+            "  Install the YubiKey Smart Card Minidriver instead:\n"
+            "    1. Download from:\n"
+            "       https://www.yubico.com/support/download/smart-card-drivers-tools/\n"
+            "    2. Run the installer and re-insert the YubiKey\n"
             "    3. Re-run wif-bunker\n"
         )
     elif sys.platform.startswith("darwin"):
