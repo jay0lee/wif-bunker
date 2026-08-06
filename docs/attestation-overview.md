@@ -48,30 +48,32 @@ All platforms follow the same trust model:
 ```python
 @dataclass
 class AttestationArtifact:
-    filename: str           # e.g., "ek_certificate.pem"
-    content: str | bytes    # PEM text or binary blob
-    description: str        # Human-readable explanation
-    is_binary: bool = False # True for binary artifacts
+    filename: str  # e.g., "ek_certificate.pem"
+    content: str | bytes  # PEM text or binary blob
+    description: str  # Human-readable explanation
+    is_binary: bool = False  # True for binary artifacts
+
 
 @dataclass
 class AttestationCheck:
-    name: str               # e.g., "TPM status"
-    passed: bool            # True if check succeeded
-    detail: str             # Detailed explanation
+    name: str  # e.g., "TPM status"
+    passed: bool  # True if check succeeded
+    detail: str  # Detailed explanation
+
 
 @dataclass
 class AttestationReport:
-    platform: str           # "windows-cng", "linux-tpm2", "yubikey"
-    supported: bool         # Can this platform do attestation?
-    hardware_type: str      # "CNG/TPM", "TPM2", "YubiKey"
-    artifacts: list         # Files to write to disk
-    checks: list            # Individual check results
-    summary: str            # Overall verdict message
+    platform: str  # "windows-cng", "linux-tpm2", "yubikey"
+    supported: bool  # Can this platform do attestation?
+    hardware_type: str  # "CNG/TPM", "TPM2", "YubiKey"
+    artifacts: list  # Files to write to disk
+    checks: list  # Individual check results
+    summary: str  # Overall verdict message
     # Optional enrichment:
-    platform_info: dict     # OEM platform certificate details
-    ek_details: dict        # Parsed EK certificate details
-    tpm_info: dict          # TPM/device info dictionary
-    workload_cn: str        # Workload certificate CN
+    platform_info: dict  # OEM platform certificate details
+    ek_details: dict  # Parsed EK certificate details
+    tpm_info: dict  # TPM/device info dictionary
+    workload_cn: str  # Workload certificate CN
 ```
 
 ### Shared Functions

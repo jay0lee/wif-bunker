@@ -37,6 +37,7 @@ Entry point: `attest_yubikey(config: WorkloadConfig)`.
 
 ```python
 from ykman.device import list_all_devices
+
 devices = list_all_devices()
 ```
 
@@ -57,9 +58,10 @@ devices = list_all_devices()
 
 ```python
 from yubikit.piv import PivSession
+
 with device.open_connection(SmartCardConnection) as conn:
     piv = PivSession(conn)
-    attest_cert = piv.attest_key(slot)   # ← THE CORE OPERATION
+    attest_cert = piv.attest_key(slot)  # ← THE CORE OPERATION
 ```
 
 **`piv.attest_key(slot)`** asks the YubiKey to generate a certificate proving:
@@ -158,14 +160,12 @@ On subsequent uses, load from the stored config file.
 ### Key Creation Flow
 
 ```python
-piv.authenticate(mgm_key)      # Management key auth
-piv.verify_pin(pin)             # PIN verification
-pub_key = piv.generate_key(     # Generate on-device (never exportable)
-    slot, key_type,
-    pin_policy=PIN_POLICY.ONCE,
-    touch_policy=touch_policy
+piv.authenticate(mgm_key)  # Management key auth
+piv.verify_pin(pin)  # PIN verification
+pub_key = piv.generate_key(  # Generate on-device (never exportable)
+    slot, key_type, pin_policy=PIN_POLICY.ONCE, touch_policy=touch_policy
 )
-piv.put_certificate(slot, cert) # Import signed cert
+piv.put_certificate(slot, cert)  # Import signed cert
 ```
 
 

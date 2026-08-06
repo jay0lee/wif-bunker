@@ -44,8 +44,9 @@ a `tempfile.TemporaryDirectory`.
 ### Step 0: Prerequisites Check
 
 ```python
-require_commands("tpm2_createek", "tpm2_createak", "tpm2_certify",
-                 "tpm2_nvread", "tpm2_makecredential", "tpm2_activatecredential")
+require_commands(
+    "tpm2_createek", "tpm2_createak", "tpm2_certify", "tpm2_nvread", "tpm2_makecredential", "tpm2_activatecredential"
+)
 ```
 
 Also calls `_get_tpm_info(work_dir)` which runs `tpm2_getcap properties-fixed`

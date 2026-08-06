@@ -15,6 +15,7 @@ use the `yubikit` Python library which communicates over PC/SC (CCID).
 **API:**
 ```python
 from ykman.device import list_all_devices
+
 devices = list_all_devices()
 ```
 
@@ -80,9 +81,9 @@ piv.authenticate(mgm_key)
 piv.verify_pin(pin)
 
 pub_key = piv.generate_key(
-    slot=SLOT.AUTHENTICATION,      # 0x9A
-    key_type=KEY_TYPE.ECCP256,     # Algorithm
-    pin_policy=PIN_POLICY.ONCE,    # PIN required once per session
+    slot=SLOT.AUTHENTICATION,  # 0x9A
+    key_type=KEY_TYPE.ECCP256,  # Algorithm
+    pin_policy=PIN_POLICY.ONCE,  # PIN required once per session
     touch_policy=TOUCH_POLICY.DEFAULT,  # No touch required
 )
 ```
