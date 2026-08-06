@@ -193,9 +193,7 @@ unsafe fn get_cert_pem_impl(
                 )
             })?;
         std::fs::read_to_string(cert_path).map_err(|e| {
-            HardmtlsError::CertificateError(format!(
-                "failed to read cert from {cert_path}: {e}"
-            ))
+            HardmtlsError::CertificateError(format!("failed to read cert from {cert_path}: {e}"))
         })?
     };
     let cert_bytes = cert_pem.as_bytes();
