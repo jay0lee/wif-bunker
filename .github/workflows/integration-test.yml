@@ -431,12 +431,26 @@ jobs:
           for h in $HANDLES; do
             tpm2_evictcontrol -c "$h" 2>/dev/null || true
           done
-          [ -n "$HANDLES" ] && echo "Evicted $(echo "$HANDLES" | wc -w) handle(s)." || echo "No stale handles."
+          [ -n "$HANDLES" ] && echo "Evicted $(echo "$HANDLES" | wc -w) persistent handle(s)." || echo "No stale persistent handles."
 
-          # 2. Wipe and recreate the PKCS#11 store
+          # 2. Clear NV indices used by tpm2-pkcs11 (range 0x01C00000-0x01C0FFFF)
+          NV_INDICES=$(tpm2_getcap handles-nv-index 2>/dev/null | grep -oP '0x[0-9A-Fa-f]+' || true)
+          for idx in $NV_INDICES; do
+            echo "  Removing NV index: $idx"
+            tpm2_nvundefine "$idx" 2>/dev/null || true
+          done
+          [ -n "$NV_INDICES" ] && echo "Cleared $(echo "$NV_INDICES" | wc -w) NV index(es)." || echo "No stale NV indices."
+
+          # 3. Wipe and recreate the PKCS#11 store
           rm -rf "$HOME/.tpm2_pkcs11"
           mkdir -p "$HOME/.tpm2_pkcs11"
           export TPM2_PKCS11_STORE="$HOME/.tpm2_pkcs11"
+
+          # 4. Initialize a fresh tpm2-pkcs11 store if tpm2_ptool is available
+          if command -v tpm2_ptool &>/dev/null; then
+            tpm2_ptool init --path="$HOME/.tpm2_pkcs11" 2>/dev/null || true
+            echo "Initialized fresh tpm2-pkcs11 store."
+          fi
 
           echo "TPM reset complete."
 
