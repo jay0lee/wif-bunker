@@ -223,12 +223,7 @@ def generate_cert_yubikey(config: WorkloadConfig) -> CertificateBundle:
         touch_policy = getattr(TOUCH_POLICY, touch_str, TOUCH_POLICY.NEVER)
 
         logger.info(f"Generating {config.key_algorithm} key in slot {slot_str}...")
-        # PIN_POLICY.NEVER: signing does not require a PIN.  This is
-        # required for automated mTLS — ECP/tls_offload calls NCrypt
-        # silently (no dialog) so PIN_POLICY.ONCE would fail.  Security
-        # still comes from hardware-bound non-exportable keys + physical
-        # possession of the YubiKey.  PIN still protects management ops.
-        pub_key = piv.generate_key(slot, key_type, pin_policy=PIN_POLICY.NEVER, touch_policy=touch_policy)
+        pub_key = piv.generate_key(slot, key_type, pin_policy=PIN_POLICY.ONCE, touch_policy=touch_policy)
 
         # 6. Public key export
         pub_key_pem = pub_key.public_bytes(
