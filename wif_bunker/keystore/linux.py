@@ -339,15 +339,28 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
 
         _evict_bunker_persistent_handles(tpm_store, ptool_cmd, logger)
 
-        # 2. Initialize PKCS#11 store (idempotent — preserves existing DB)
+        # 2. Initialize PKCS#11 store — ONLY if the DB doesn't exist yet.
+        #
+        #    CRITICAL: tpm2_ptool init (Python) creates a SQLite schema that
+        #    may be incompatible with the system libtpm2_pkcs11.so (C library).
+        #    If the DB already exists (created by pkcs11-tool or a previous
+        #    init), re-running init after rmtoken can corrupt/migrate the
+        #    schema, causing "no such table: schema" → CKR_OPERATION_NOT_INITIALIZED.
+        #
+        #    On a second run, rmtoken + evictcontrol is sufficient cleanup;
+        #    the DB file and its schema are preserved for the C library.
         tpm_store.mkdir(parents=True, exist_ok=True)
-        init_result = subprocess.run(
-            [*ptool_cmd, "init"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        logger.debug("    tpm2_ptool init: %s", init_result.stdout.strip())
+        db_file = tpm_store / "tpm2_pkcs11.sqlite3"
+        if not db_file.exists():
+            init_result = subprocess.run(
+                [*ptool_cmd, "init"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            logger.debug("    tpm2_ptool init: %s", init_result.stdout.strip())
+        else:
+            logger.debug("    PKCS#11 store DB exists — skipping tpm2_ptool init to preserve schema.")
 
         token_result = subprocess.run(
             [
