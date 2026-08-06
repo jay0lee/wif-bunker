@@ -135,13 +135,7 @@ jobs:
       - name: Create venv and install dependencies
         shell: bash
         run: |
-          # Self-hosted runners need --system-site-packages so the venv
-          # can access system packages like tpm2_pkcs11 (tpm2_ptool).
-          VENV_FLAGS=""
-          if [ "${{ matrix.self_hosted }}" = "true" ]; then
-            VENV_FLAGS="--system-site-packages"
-          fi
-          python3 -m venv $VENV_FLAGS .venv
+          python3 -m venv .venv
           if [ -d ".venv/Scripts" ]; then
             source .venv/Scripts/activate
             echo "$PWD/.venv/Scripts" >> "$GITHUB_PATH"
@@ -235,28 +229,10 @@ jobs:
 
           echo "Stale cleanup complete."
 
-      # ── Pre-test: reset TPM to a known clean state ──
       - name: "Reset TPM to clean state"
         if: matrix.self_hosted && !matrix.use_yubikey
         run: |
           # CI owns this TPM — nuke everything for a clean slate.
-          #
-          # The store DB must be created by the C library
-          # (libtpm2_pkcs11.so) not by tpm2_ptool (Python), because
-          # they may use different SQLite schema versions.  If
-          # tpm2_ptool creates the DB, the C library gets:
-          #   "no such table: schema" → CKR_OPERATION_NOT_INITIALIZED
-
-          # 0. Fix broken tpm2_ptool wrapper (Ubuntu entry_point bug)
-          if ! tpm2_ptool listprimaries 2>/dev/null; then
-            echo "tpm2_ptool wrapper is broken — creating a working one"
-            sudo tee /usr/local/bin/tpm2_ptool > /dev/null << 'WRAPPER'
-          #!/bin/bash
-          exec /usr/bin/python3 -m tpm2_pkcs11.tpm2_ptool "$@"
-          WRAPPER
-            sudo chmod +x /usr/local/bin/tpm2_ptool
-            echo "Fixed. Testing: $(tpm2_ptool listprimaries 2>&1 | head -1)"
-          fi
 
           # 1. Evict ALL persistent handles
           HANDLES=$(tpm2_getcap handles-persistent 2>/dev/null | grep -oP '0x[0-9A-Fa-f]+' || true)
@@ -269,10 +245,6 @@ jobs:
           rm -rf "$HOME/.tpm2_pkcs11"
           mkdir -p "$HOME/.tpm2_pkcs11"
           export TPM2_PKCS11_STORE="$HOME/.tpm2_pkcs11"
-
-          # 3. Bootstrap: let the C library create the DB with the
-          #    correct schema by loading it through pkcs11-tool.
-          pkcs11-tool --module /usr/lib/x86_64-linux-gnu/pkcs11/libtpm2_pkcs11.so -T 2>/dev/null || true
 
           echo "TPM reset complete."
 

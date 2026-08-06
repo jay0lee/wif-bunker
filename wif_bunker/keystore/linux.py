@@ -1,64 +1,147 @@
 """Linux/TPM 2.0 keystore: PKCS#11 key generation and certificate management.
 
-.. ai-note::
-   IMPORTANT FOR AI AGENTS: Before reading, editing, or debugging this file,
-   you MUST read docs/keystore-linux-tpm.md in the repository root.
-   That document covers the tpm2_ptool commands, PKCS#11 URI format,
-   NV handle cleanup (the "No Space Left" bug), the Ubuntu tpm2_ptool
-   wrapper bug, SQLite schema gotchas, and algorithm mapping.
-   If you make changes to this file, update docs/keystore-linux-tpm.md
-   to match.
+Uses ``python-pkcs11`` to interact with the TPM via ``libtpm2_pkcs11.so``
+directly, eliminating all CLI subprocess calls (tpm2_ptool, certtool,
+pkcs11-tool, p11tool, tpm2_testparms, tpm2_getcap, tpm2_evictcontrol).
+
+The only system requirement is ``libtpm2_pkcs11.so`` — the PKCS#11 shared
+library that bridges PKCS#11 operations to the TPM hardware.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import shutil
-import subprocess
 from pathlib import Path
+
+import pkcs11
+from cryptography import x509 as cx509
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from pkcs11 import Attribute, CertificateType, KeyType, Mechanism, ObjectClass
+from pkcs11.util.ec import encode_named_curve_parameters
 
 from wif_bunker.cert import _create_ca_and_sign
 from wif_bunker.config import CertificateBundle, WorkloadConfig
-from wif_bunker.utils import require_commands, write_secure_file
 
 logger = logging.getLogger(__name__)
 
 
-def _resolve_tpm2_ptool() -> list[str]:
-    """Resolve a working tpm2_ptool command.
+# ── PKCS#11 mechanism → wif-bunker algorithm mapping ──
 
-    ``tpm2_ptool`` is a system CLI tool installed via the OS package manager
-    (e.g. ``python3-tpm2-pkcs11-tools`` on Ubuntu).  We call it via subprocess
-    just like ``certtool``, ``pkcs11-tool``, and other system tools.
+_ALGO_TO_PKCS11 = {
+    "ecc256": {
+        "key_type": KeyType.EC,
+        "params": encode_named_curve_parameters("secp256r1"),
+        "mechanism": Mechanism.ECDSA,
+    },
+    "ecc384": {
+        "key_type": KeyType.EC,
+        "params": encode_named_curve_parameters("secp384r1"),
+        "mechanism": Mechanism.ECDSA,
+    },
+    "rsa2048": {
+        "key_type": KeyType.RSA,
+        "key_length": 2048,
+        "mechanism": Mechanism.RSA_PKCS,
+    },
+    "rsa3072": {
+        "key_type": KeyType.RSA,
+        "key_length": 3072,
+        "mechanism": Mechanism.RSA_PKCS,
+    },
+    "rsa4096": {
+        "key_type": KeyType.RSA,
+        "key_length": 4096,
+        "mechanism": Mechanism.RSA_PKCS,
+    },
+}
+
+
+# ── .so path discovery ──
+
+_PKCS11_LIB_PATHS = [
+    # Debian/Ubuntu x86_64
+    "/usr/lib/x86_64-linux-gnu/pkcs11/libtpm2_pkcs11.so",
+    # Debian/Ubuntu aarch64
+    "/usr/lib/aarch64-linux-gnu/pkcs11/libtpm2_pkcs11.so",
+    # Fedora/RHEL x86_64
+    "/usr/lib64/pkcs11/libtpm2_pkcs11.so",
+    # Arch Linux
+    "/usr/lib/pkcs11/libtpm2_pkcs11.so",
+    # Generic/manual install
+    "/usr/local/lib/pkcs11/libtpm2_pkcs11.so",
+]
+
+
+def _find_pkcs11_lib() -> str:
+    """Discover the path to ``libtpm2_pkcs11.so``.
+
+    Search order:
+      1. ``TPM2_PKCS11_MODULE`` environment variable (user override)
+      2. ``p11-kit list-modules`` output (desktop Linux standard)
+      3. Well-known filesystem paths (Debian, Fedora, Arch, etc.)
+
+    Returns the absolute path to the shared library.
+    Raises RuntimeError if the library cannot be found.
     """
-    ptool_path = shutil.which("tpm2_ptool")
-    if ptool_path:
-        try:
-            probe = subprocess.run(
-                ["tpm2_ptool", "listprimaries"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if probe.returncode == 0:
-                return ["tpm2_ptool"]
-            # Wrapper exists but doesn't work — log stderr for diagnostics
-            logger.debug(
-                "tpm2_ptool returned exit code %d: %s",
-                probe.returncode,
-                probe.stderr.strip()[:200],
-            )
-        except (subprocess.TimeoutExpired, OSError) as exc:
-            logger.debug("tpm2_ptool probe failed: %s", exc)
+    # 1. User override
+    env_path = os.environ.get("TPM2_PKCS11_MODULE")
+    if env_path and Path(env_path).exists():
+        logger.debug("    PKCS#11 module from TPM2_PKCS11_MODULE: %s", env_path)
+        return env_path
+
+    # 2. Ask p11-kit
+    p11kit_path = _query_p11kit()
+    if p11kit_path:
+        logger.debug("    PKCS#11 module from p11-kit: %s", p11kit_path)
+        return p11kit_path
+
+    # 3. Well-known paths
+    for path in _PKCS11_LIB_PATHS:
+        if Path(path).exists():
+            logger.debug("    PKCS#11 module found at: %s", path)
+            return path
 
     raise RuntimeError(
-        "tpm2_ptool is not working.\n"
+        "Could not find libtpm2_pkcs11.so.\n"
         "\n"
-        "  tpm2_ptool is required to manage TPM PKCS#11 tokens.\n"
-        "  Verify it is installed and functional:\n"
-        "    tpm2_ptool listprimaries"
+        "  Set TPM2_PKCS11_MODULE=/path/to/libtpm2_pkcs11.so\n"
+        "  or verify libtpm2-pkcs11 is installed on your system."
     )
+
+
+def _query_p11kit() -> str | None:
+    """Query p11-kit for the tpm2_pkcs11 module path."""
+    import shutil  # pylint: disable=import-outside-toplevel
+    import subprocess  # pylint: disable=import-outside-toplevel
+
+    if not shutil.which("p11-kit"):
+        return None
+
+    try:
+        result = subprocess.run(
+            ["p11-kit", "list-modules"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return None
+
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("module:") and "tpm2" in line.lower():
+                path = line.split(":", 1)[1].strip()
+                if Path(path).exists():
+                    return path
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+    return None
+
+
+# ── TPM availability check ──
 
 
 def _check_tpm_linux() -> None:
@@ -67,15 +150,13 @@ def _check_tpm_linux() -> None:
     Checks for hardware TPM device (/dev/tpmrm0) or software TPM.
     Raises RuntimeError with actionable guidance if no TPM is accessible.
     """
-    # 1. Hardware TPM device node
     tpm_device = Path("/dev/tpmrm0")
     if tpm_device.exists():
         if os.access(tpm_device, os.R_OK | os.W_OK):
-            return  # Hardware TPM available and accessible
+            return
 
-        # Device exists but user can't access it — almost always a group issue
-        import grp
-        import pwd
+        import grp  # pylint: disable=import-outside-toplevel
+        import pwd  # pylint: disable=import-outside-toplevel
 
         username = pwd.getpwuid(os.getuid()).pw_name
         try:
@@ -99,16 +180,15 @@ def _check_tpm_linux() -> None:
             f"    newgrp {device_group}"
         )
 
-    # 2. Check for software TPM (swtpm) via TCTI env or port probe
     if os.environ.get("TPM2TOOLS_TCTI"):
-        return  # User has explicitly configured a TCTI (e.g. swtpm)
+        return
     try:
-        import socket
+        import socket  # pylint: disable=import-outside-toplevel
 
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(1)
             sock.connect(("127.0.0.1", 2321))
-            return  # swtpm is listening on the default port
+            return
     except (OSError, ConnectionRefusedError):
         pass
 
@@ -124,395 +204,284 @@ def _check_tpm_linux() -> None:
     )
 
 
-def _check_tpm_algorithm(algo: str) -> None:
-    """Verify the TPM supports the requested algorithm before key creation.
-
-    Uses ``tpm2_testparms`` to probe the TPM for algorithm support.
-    Raises RuntimeError with a clear message if the algorithm/curve is
-    not supported by the hardware.
-    """
-    # Map tpm2_ptool algorithm names to tpm2_testparms parameter strings
-    testparms_map = _TPM2_TESTPARMS_MAP
-    testparms_arg = testparms_map.get(algo)
-    if not testparms_arg:
-        return  # Unknown algo — let tpm2_ptool handle it
-
-    tpm2_testparms = shutil.which("tpm2_testparms")
-    if not tpm2_testparms:
-        return  # Can't check — proceed and let tpm2_ptool fail naturally
-
-    result = subprocess.run(
-        ["tpm2_testparms", testparms_arg],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        # Build a helpful error message
-        curve_name = {"ecc256": "P-256", "ecc384": "P-384"}.get(algo, algo)
-        supported_info = ""
-        if algo.startswith("ecc"):
-            # Query supported ECC curves for a better message
-            cap_result = subprocess.run(
-                ["tpm2_getcap", "ecc-curves"],
-                capture_output=True,
-                text=True,
-            )
-            if cap_result.returncode == 0 and cap_result.stdout.strip():
-                supported_info = f"\n  Supported ECC curves: {cap_result.stdout.strip()}"
-        raise RuntimeError(
-            f"This TPM does not support {curve_name} ({algo}).{supported_info}\n"
-            f"\n"
-            f"  Many firmware TPMs (Intel PTT, AMD fTPM) only support P-256.\n"
-            f"  Try a different algorithm: --key-algorithm es256"
-        )
-
-
-# Shared mapping between _check_tpm_algorithm and get_supported_algorithms_linux
-_TPM2_TESTPARMS_MAP = {
-    "ecc256": "ecc256:ecdsa",
-    "ecc384": "ecc384:ecdsa",
-    "rsa2048": "rsa2048",
-    "rsa3072": "rsa3072",
-    "rsa4096": "rsa4096",
-}
+# ── Algorithm probing via PKCS#11 mechanisms ──
 
 
 def get_supported_algorithms_linux() -> list[str]:
-    """Probe the TPM for all supported algorithms.
+    """Probe the TPM for all supported algorithms via PKCS#11 mechanisms.
 
     Returns a list of wif-bunker algorithm names (e.g. ``["es256", "rsa2048"]``)
     that the TPM hardware supports.
-
-    Requires ``tpm2_testparms`` to be installed.
     """
     from wif_bunker.config import _KEY_ALGORITHMS  # pylint: disable=import-outside-toplevel
 
     _check_tpm_linux()
 
-    tpm2_testparms = shutil.which("tpm2_testparms")
-    if not tpm2_testparms:
-        raise RuntimeError("tpm2_testparms not found.\n  Ensure tpm2-tools is installed and on PATH.")
+    lib_path = _find_pkcs11_lib()
+    try:
+        lib = pkcs11.lib(lib_path)
+        slots = lib.get_slots(token_present=True)
+        if not slots:
+            slots = lib.get_slots()
+            if not slots:
+                raise RuntimeError(
+                    "No PKCS#11 slots available.\n  Verify libtpm2_pkcs11.so is installed and the TPM is accessible."
+                )
+
+        mechs = slots[0].get_mechanisms()
+    except pkcs11.PKCS11Error as exc:
+        raise RuntimeError(f"Could not query PKCS#11 mechanisms: {exc}") from exc
 
     supported = []
     for algo_name, algo_info in _KEY_ALGORITHMS.items():
         if "linux" not in algo_info["platforms"]:
             continue
         tpm2_algo = algo_info["linux_tpm2"]
-        testparms_arg = _TPM2_TESTPARMS_MAP.get(tpm2_algo)
-        if not testparms_arg:
-            continue
-        result = subprocess.run(
-            ["tpm2_testparms", testparms_arg],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
+        pkcs11_info = _ALGO_TO_PKCS11.get(tpm2_algo)
+        if pkcs11_info and pkcs11_info["mechanism"] in mechs:
             supported.append(algo_name)
+
     return supported
 
 
-def _evict_bunker_persistent_handles(tpm_store: Path, ptool_cmd: list[str], log: logging.Logger) -> None:
-    """Evict only persistent handles owned by our 'bunker-wif' token.
+# ── Token management ──
 
-    tpm2_ptool rmtoken removes the PKCS#11 token from the SQLite store
-    but does NOT evict the TPM primary object from NV storage.  We must
-    clean up our own handles to avoid orphans that cause addprimary to
-    fail on subsequent runs.
+_TOKEN_LABEL = "bunker-wif"
 
-    IMPORTANT: We only evict handles we can prove belong to our token.
-    Other applications (disk encryption, Secure Boot, VPN keys, etc.)
-    may have their own persistent handles — we must never touch those.
+
+def _cleanup_existing_token(lib, pin: str) -> None:
+    """Remove our objects from an existing token. Never touches other tokens.
+
+    Production-safe: only destroys objects in our token (bunker-wif),
+    never wipes the store or evicts unknown persistent handles.
     """
-    import re  # pylint: disable=import-outside-toplevel
-
-    if not tpm_store.exists():
+    try:
+        token = lib.get_token(token_label=_TOKEN_LABEL)
+    except (pkcs11.NoSuchToken, pkcs11.PKCS11Error):
         return
 
-    # 1. Ask tpm2_ptool for our token's primary object handle(s).
-    #    listprimaries shows the esys-tr / persistent handle for each PID.
-    our_handles: list[str] = []
     try:
-        result = subprocess.run(
-            [*ptool_cmd, "listprimaries"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env={**os.environ, "TPM2_PKCS11_STORE": str(tpm_store)},
-        )
-        # Output lines contain handle values like "0x81000001"
-        our_handles = re.findall(r"0x[0-9A-Fa-f]+", result.stdout)
-    except Exception as exc:
-        log.debug("    Could not list primaries from store: %s", exc)
+        with token.open(user_pin=pin, rw=True) as session:
+            for obj in session.get_objects():
+                try:
+                    obj.destroy()
+                    logger.debug("    Destroyed PKCS#11 object: %s", obj)
+                except pkcs11.PKCS11Error as exc:
+                    logger.debug("    Could not destroy object: %s", exc)
+    except pkcs11.PKCS11Error as exc:
+        logger.debug("    Could not open token for cleanup: %s", exc)
 
-    if not our_handles:
-        # Fallback: if the store DB is corrupt or listprimaries fails,
-        # check if there's ONLY one persistent handle in the TPM and
-        # the store directory exists (implying we created it).
-        # If multiple handles exist, we can't tell which is ours — skip.
-        try:
-            cap = subprocess.run(
-                ["tpm2_getcap", "handles-persistent"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            all_handles = re.findall(r"0x[0-9A-Fa-f]+", cap.stdout)
-            if len(all_handles) == 1:
-                our_handles = all_handles
-                log.debug("    Fallback: single persistent handle %s likely ours.", all_handles[0])
-            elif all_handles:
-                log.debug(
-                    "    %d persistent handles found but cannot identify ours — skipping eviction.",
-                    len(all_handles),
-                )
-        except Exception as exc:
-            log.debug("    Could not enumerate persistent handles: %s", exc)
 
-    for h in our_handles:
+def _init_token(lib, pin: str):
+    """Initialize or find our PKCS#11 token.
+
+    If our token exists, returns it. Otherwise finds an uninitialized
+    slot and creates a new token. Never overwrites other tokens.
+    """
+    # 1. Check if our token already exists
+    try:
+        return lib.get_token(token_label=_TOKEN_LABEL)
+    except (pkcs11.NoSuchToken, pkcs11.PKCS11Error):
+        pass
+
+    # 2. Find an uninitialized slot
+    for slot in lib.get_slots():
         try:
-            subprocess.run(
-                ["tpm2_evictcontrol", "-c", h],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            log.debug("    Evicted bunker-wif persistent handle %s.", h)
-        except Exception as exc:
-            log.debug("    Could not evict handle %s: %s", h, exc)
+            slot.get_token()
+            continue  # Slot has a token — don't touch it
+        except (pkcs11.PKCS11Error, pkcs11.TokenNotPresent):
+            pass
+
+        try:
+            token = slot.init_token(pin, _TOKEN_LABEL)
+            logger.debug("    Initialized new PKCS#11 token '%s'", _TOKEN_LABEL)
+            with token.open(so_pin=pin, rw=True) as session:
+                session.init_pin(pin)
+            return token
+        except pkcs11.PKCS11Error as exc:
+            logger.debug("    Could not init token on slot: %s", exc)
+            continue
+
+    raise RuntimeError(
+        "No available PKCS#11 slot for token initialization.\n"
+        "\n"
+        "  All slots are occupied by other tokens.\n"
+        "  Verify the TPM PKCS#11 store is not corrupted."
+    )
+
+
+# ── Public key extraction ──
+
+
+def _extract_public_key_pem(pub_key) -> str:
+    """Extract the public key from a PKCS#11 key object and return as PEM.
+
+    Converts PKCS#11 key attributes into a ``cryptography`` public key
+    object, then serializes to PEM for ``_create_ca_and_sign``.
+    """
+    key_type = pub_key.key_type
+
+    if key_type == KeyType.EC:
+        ec_point = pub_key[Attribute.EC_POINT]
+
+        # EC_POINT is DER-encoded OCTET STRING wrapping the uncompressed point.
+        # DER: 04 <len> 04 <x> <y>  — skip the outer OCTET STRING wrapper.
+        if isinstance(ec_point, (bytes, bytearray)):
+            raw = ec_point
+        else:
+            raw = bytes(ec_point)
+
+        if raw[0] == 0x04 and len(raw) > 2 and raw[2] == 0x04:
+            raw_point = raw[2:]
+        else:
+            raw_point = raw
+
+        if len(raw_point) == 65:  # 1 + 32 + 32 → P-256
+            curve = ec.SECP256R1()
+        elif len(raw_point) == 97:  # 1 + 48 + 48 → P-384
+            curve = ec.SECP384R1()
+        else:
+            raise RuntimeError(f"Unexpected EC point length: {len(raw_point)}")
+
+        crypto_pub = ec.EllipticCurvePublicKey.from_encoded_point(curve, raw_point)
+
+    elif key_type == KeyType.RSA:
+        modulus_bytes = pub_key[Attribute.MODULUS]
+        exponent_bytes = pub_key[Attribute.PUBLIC_EXPONENT]
+        modulus = int.from_bytes(bytes(modulus_bytes), "big")
+        exponent = int.from_bytes(bytes(exponent_bytes), "big")
+        crypto_pub = rsa.RSAPublicNumbers(exponent, modulus).public_key()
+
+    else:
+        raise RuntimeError(f"Unsupported PKCS#11 key type: {key_type}")
+
+    return crypto_pub.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode("utf-8")
+
+
+# ── Main certificate generation ──
 
 
 def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
-    """Generates a TPM 2.0-backed certificate via PKCS#11 toolchain (Ubuntu 24+)."""
-    # Pre-validate all required commands upfront.
-    ptool_cmd = _resolve_tpm2_ptool()
-    require_commands(
-        [
-            ("p11tool", "gnutls-bin", "sudo apt install gnutls-bin"),
-            ("pkcs11-tool", "opensc", "sudo apt install opensc"),
-            ("certtool", "gnutls-bin", "sudo apt install gnutls-bin"),
-        ]
-    )
+    """Generate a TPM 2.0-backed certificate via PKCS#11.
 
-    # Check TPM availability.
+    Uses ``python-pkcs11`` to interact with ``libtpm2_pkcs11.so`` directly.
+    No CLI tools required — all operations happen via the PKCS#11 C API.
+    """
     _check_tpm_linux()
+    lib_path = _find_pkcs11_lib()
 
-    # Verify the requested algorithm is supported by this TPM.
-    tpm_algo = config.key_algo_config["linux_tpm2"]
-    _check_tpm_algorithm(tpm_algo)
+    tpm2_algo = config.key_algo_config["linux_tpm2"]
+    pkcs11_info = _ALGO_TO_PKCS11.get(tpm2_algo)
+    if not pkcs11_info:
+        raise RuntimeError(f"Unsupported algorithm for Linux TPM: {config.key_algorithm}")
 
+    # Set TPM2_PKCS11_STORE — required by libtpm2_pkcs11.so
     tpm_store = Path.home() / ".tpm2_pkcs11"
+    tpm_store.mkdir(parents=True, exist_ok=True)
     os.environ["TPM2_PKCS11_STORE"] = str(tpm_store)
 
     try:
-        # 1. Clean up any previous token + its TPM persistent handles.
-        #    rmtoken removes the logical token from the SQLite store;
-        #    _evict_bunker_persistent_handles evicts the TPM primary.
-        #
-        #    IMPORTANT: We do NOT wipe the store directory (shutil.rmtree).
-        #    The SQLite DB schema is created by the system libtpm2_pkcs11.so
-        #    package.  If we delete it and let tpm2_ptool (Python) recreate
-        #    it, the new DB may have a different schema version, causing
-        #    "no such table: schema" → CKR_OPERATION_NOT_INITIALIZED when
-        #    the C library tries to read it.
-        if tpm_store.exists():
-            subprocess.run(
-                [*ptool_cmd, "rmtoken", "--label=bunker-wif"],
-                capture_output=True,
-                text=True,
-            )  # Ignore errors — token may not exist yet.
+        lib = pkcs11.lib(lib_path)
 
-        _evict_bunker_persistent_handles(tpm_store, ptool_cmd, logger)
+        # 1. Clean up any previous objects in our token
+        _cleanup_existing_token(lib, config.linux_tpm_pin)
 
-        # 2. Initialize PKCS#11 store — ONLY if the DB doesn't exist yet.
-        #
-        #    CRITICAL: tpm2_ptool init (Python) creates a SQLite schema that
-        #    may be incompatible with the system libtpm2_pkcs11.so (C library).
-        #    If the DB already exists (created by pkcs11-tool or a previous
-        #    init), re-running init after rmtoken can corrupt/migrate the
-        #    schema, causing "no such table: schema" → CKR_OPERATION_NOT_INITIALIZED.
-        #
-        #    On a second run, rmtoken + evictcontrol is sufficient cleanup;
-        #    the DB file and its schema are preserved for the C library.
-        tpm_store.mkdir(parents=True, exist_ok=True)
-        db_file = tpm_store / "tpm2_pkcs11.sqlite3"
-        if not db_file.exists():
-            init_result = subprocess.run(
-                [*ptool_cmd, "init"],
-                check=True,
-                capture_output=True,
-                text=True,
+        # 2. Find or initialize our token
+        token = _init_token(lib, config.linux_tpm_pin)
+        logger.debug("    Using PKCS#11 token: %s", token)
+
+        with token.open(user_pin=config.linux_tpm_pin, rw=True) as session:
+            # 3. Generate key pair in the TPM
+            logger.debug("    Generating %s key pair in TPM...", config.key_algorithm)
+
+            if pkcs11_info["key_type"] == KeyType.EC:
+                pub, _priv = session.generate_keypair(
+                    KeyType.EC,
+                    key_length=None,
+                    mechanism=Mechanism.EC_KEY_PAIR_GEN,
+                    store=True,
+                    label=config.workload_cn,
+                    attrs={Attribute.EC_PARAMS: pkcs11_info["params"]},
+                )
+            else:
+                pub, _priv = session.generate_keypair(
+                    KeyType.RSA,
+                    key_length=pkcs11_info["key_length"],
+                    store=True,
+                    label=config.workload_cn,
+                )
+
+            logger.debug("    Key pair generated. Extracting public key...")
+
+            # 4. Extract public key as PEM
+            pub_key_pem = _extract_public_key_pem(pub)
+            logger.debug("    Public key extracted successfully.")
+
+            # 5. Create CA-signed workload cert
+            bundle, workload_pem = _create_ca_and_sign(pub_key_pem, config)
+
+            # 6. Import signed cert into PKCS#11 token
+            workload_cert = cx509.load_pem_x509_certificate(workload_pem.encode())
+            workload_der = workload_cert.public_bytes(serialization.Encoding.DER)
+
+            # Link cert to key via CKA_ID
+            key_id = pub[Attribute.ID]
+
+            session.create_object(
+                {
+                    Attribute.CLASS: ObjectClass.CERTIFICATE,
+                    Attribute.CERTIFICATE_TYPE: CertificateType.X_509,
+                    Attribute.LABEL: config.workload_cn,
+                    Attribute.VALUE: workload_der,
+                    Attribute.TOKEN: True,
+                    Attribute.ID: key_id,
+                }
             )
-            logger.debug("    tpm2_ptool init: %s", init_result.stdout.strip())
-        else:
-            logger.debug("    PKCS#11 store DB exists — skipping tpm2_ptool init to preserve schema.")
 
-        token_result = subprocess.run(
-            [
-                *ptool_cmd,
-                "addtoken",
-                "--pid=1",
-                f"--sopin={config.linux_tpm_pin}",
-                f"--userpin={config.linux_tpm_pin}",
-                "--label=bunker-wif",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        logger.debug("    tpm2_ptool addtoken: %s", token_result.stdout.strip())
-
-        key_result = subprocess.run(
-            [
-                *ptool_cmd,
-                "addkey",
-                f"--algorithm={config.key_algo_config['linux_tpm2']}",
-                "--label=bunker-wif",
-                f"--key-label={config.workload_cn}",
-                f"--userpin={config.linux_tpm_pin}",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        logger.debug("    tpm2_ptool addkey: %s", key_result.stdout.strip())
-
-        # Verify the token is visible via p11-kit before calling certtool
-        try:
-            p11_result = subprocess.run(
-                ["p11tool", "--list-tokens"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            logger.debug("    p11tool --list-tokens:\n%s", p11_result.stdout)
-            if "bunker-wif" not in p11_result.stdout:
-                logger.warning("    Token 'bunker-wif' not visible to p11tool!")
-                # Try listing via pkcs11-tool as fallback diagnostic
-                try:
-                    pkcs11_result = subprocess.run(
-                        ["pkcs11-tool", "--module", "/usr/lib/x86_64-linux-gnu/pkcs11/libtpm2_pkcs11.so", "-T"],
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
-                    )
-                    logger.debug("    pkcs11-tool -T:\n%s", pkcs11_result.stdout)
-                except Exception:
-                    pass
-        except Exception as p11_err:
-            logger.debug("    p11tool check failed: %s", p11_err)
-
-        # 2. Generate a temporary self-signed cert to extract the public key
-        cert_cfg = f'cn = "{config.workload_cn}"\nexpiration_days = 365\ntls_www_client\n'
-        write_secure_file("cert.cfg", cert_cfg)
-
-        # Set GNUTLS_PIN so certtool can access the token without
-        # relying solely on pin-value in the PKCS#11 URI.
-        os.environ["GNUTLS_PIN"] = config.linux_tpm_pin
-
-        pkcs11_uri = (
-            f"pkcs11:token=bunker-wif;object={config.workload_cn};type=private;pin-value={config.linux_tpm_pin}"
-        )
-        subprocess.run(
-            [
-                "certtool",
-                "--generate-self-signed",
-                "--load-privkey",
-                pkcs11_uri,
-                "--template",
-                "cert.cfg",
-                "--outfile",
-                "bunker-workload-selfsigned.pem",
-            ],
-            check=True,
-            capture_output=True,
-        )
-
-        se_pem = Path("bunker-workload-selfsigned.pem").read_text(encoding="utf-8").strip()
-
-        # 3. Create CA-signed workload cert
-        bundle, workload_pem = _create_ca_and_sign(se_pem, config)
-
-        # 4. Write the CA-signed cert and import into PKCS#11 store
-        #    addcert needs --key-id (CKA_ID from addkey) and prompts for PIN.
-        Path("bunker-workload-public.pem").write_text(workload_pem, encoding="utf-8")
-
-        # Extract CKA_ID from addkey output
-        key_id = None
-        for line in key_result.stdout.splitlines():
-            if "CKA_ID" in line and key_id is None:
-                key_id = line.split("'")[1] if "'" in line else line.split()[-1]
-        if not key_id:
-            raise RuntimeError("Could not extract CKA_ID from tpm2_ptool addkey output: " + key_result.stdout)
-        logger.debug("    Using CKA_ID: %s", key_id)
-
-        subprocess.run(
-            [
-                *ptool_cmd,
-                "addcert",
-                "--label=bunker-wif",
-                f"--key-id={key_id}",
-                "bunker-workload-public.pem",
-            ],
-            input=config.linux_tpm_pin + "\n",
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        logger.info("    CA-signed workload cert imported into TPM PKCS#11 store.")
+            logger.info("    CA-signed workload cert imported into TPM PKCS#11 store.")
 
         return bundle
 
-    except subprocess.CalledProcessError as exc:
-        stderr = (exc.stderr or "").strip()
-        cmd_name = exc.cmd[0] if isinstance(exc.cmd, list) else str(exc.cmd)
-        # Parse known error patterns for actionable guidance.
-        if "Could not load tcti" in stderr or "No standard TCTI" in stderr:
-            raise RuntimeError(
-                f"TPM communication failed (command: {cmd_name}).\n"
-                "The TPM tools are installed but cannot connect to a TPM device.\n"
-                "\n"
-                "  Options:\n"
-                "    1. Verify the kernel resource manager exists:\n"
-                "         ls -la /dev/tpmrm0\n"
-                "\n"
-                "    2. For development, start a software TPM:\n"
-                "         swtpm socket --tpmstate dir=/tmp/swtpm --tpm2 "
-                "--server type=tcp,port=2321 --ctrl type=tcp,port=2322 &\n"
-                "         export TPM2TOOLS_TCTI='swtpm:host=127.0.0.1,port=2321'"
-            ) from exc
-        if "timed out" in stderr:
-            raise RuntimeError(
-                f"TPM resource manager timed out (command: {cmd_name}).\n"
-                "The kernel TPM resource manager is not responding.\n"
-                "\n"
-                "  Verify: ls -la /dev/tpmrm0\n"
-                "\n"
-                "  If using a software TPM, set the TCTI environment variable:\n"
-                "    export TPM2TOOLS_TCTI='swtpm:host=127.0.0.1,port=2321'"
-            ) from exc
-        if "/dev/tpmrm0" in stderr or "/dev/tpm0" in stderr:
-            raise RuntimeError(
-                f"No TPM device found (command: {cmd_name}).\n"
-                "The system does not have /dev/tpmrm0 or /dev/tpm0.\n"
-                "\n"
-                "  For development/testing, use a software TPM (swtpm)."
-            ) from exc
-        if "insufficient space" in stderr or "0x14b" in stderr.lower():
-            raise RuntimeError(
-                f"TPM NV storage is full (command: {cmd_name}).\n"
-                "  Previous runs left persistent handles that were not evicted.\n"
-                "\n"
-                "  To fix, evict stale handles:\n"
-                "    # List persistent handles:\n"
-                "    tpm2_getcap handles-persistent\n"
-                "    # Evict each one (use caution — only evict handles you own):\n"
-                "    tpm2_evictcontrol -c 0x81000001\n"
-                "\n"
-                "  Or if using tpm2_pkcs11, remove the token properly:\n"
-                "    export TPM2_PKCS11_STORE=~/.tpm2_pkcs11\n"
-                "    tpm2_ptool rmtoken --label=bunker-wif"
-            ) from exc
-        # Fallback: include the raw error with the failing command.
+    except pkcs11.PKCS11Error as exc:
+        _handle_pkcs11_error(exc)
+        raise  # unreachable but keeps type checker happy
+
+
+def _handle_pkcs11_error(exc: pkcs11.PKCS11Error) -> None:
+    """Convert PKCS#11 errors to actionable RuntimeError messages."""
+    err_str = str(exc)
+
+    if "CKR_TOKEN_NOT_RECOGNIZED" in err_str or "CKR_SLOT_ID_INVALID" in err_str:
         raise RuntimeError(
-            f"Linux TPM operation failed (command: {cmd_name}, exit code: {exc.returncode}).\n  stderr: {stderr[:500]}"
+            "TPM PKCS#11 token not recognized.\n"
+            "\n"
+            "  The PKCS#11 store may be corrupted. Try:\n"
+            "    rm -rf ~/.tpm2_pkcs11 && wif-bunker --cert-only"
         ) from exc
+
+    if "CKR_DEVICE_ERROR" in err_str:
+        raise RuntimeError(
+            "TPM device error.\n"
+            "\n"
+            "  The TPM is not responding. Check:\n"
+            "    ls -la /dev/tpmrm0\n"
+            "\n"
+            "  For development, start a software TPM:\n"
+            "    swtpm socket --tpmstate dir=/tmp/swtpm --tpm2 "
+            "--server type=tcp,port=2321 --ctrl type=tcp,port=2322 &\n"
+            "    export TPM2TOOLS_TCTI='swtpm:host=127.0.0.1,port=2321'"
+        ) from exc
+
+    if "CKR_PIN_INCORRECT" in err_str:
+        raise RuntimeError(
+            "PKCS#11 PIN incorrect.\n"
+            "\n"
+            "  The stored PIN does not match the token. This can happen if\n"
+            "  the token was recreated. Try:\n"
+            "    rm -rf ~/.tpm2_pkcs11 && wif-bunker --cert-only"
+        ) from exc
+
+    raise RuntimeError(f"PKCS#11 operation failed: {exc}") from exc

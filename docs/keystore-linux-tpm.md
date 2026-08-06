@@ -3,24 +3,47 @@
 ## Overview
 
 On Linux, workload keys are stored in the TPM via the **tpm2-pkcs11** PKCS#11
-middleware.  Key creation goes through `tpm2_ptool`, signing uses GnuTLS
-`certtool` with PKCS#11 URIs, and the resulting cert is imported back into the
-PKCS#11 token.
+middleware.  The `python-pkcs11` library (pip-installed) talks directly to
+`libtpm2_pkcs11.so` via the standard PKCS#11 C API.  No CLI tools (tpm2_ptool,
+certtool, etc.) are used — all operations happen through library calls.
+
+
+## Architecture
+
+```
+wif-bunker (Python)
+    └── python-pkcs11 (pip)
+            └── libtpm2_pkcs11.so (system)
+                    └── TPM 2.0 hardware
+```
+
+**System requirement:** `libtpm2_pkcs11.so` must be installed.  This is the
+PKCS#11 shared library that bridges PKCS#11 operations to the TPM hardware.
+
+**Discovery order** for the `.so` path:
+1. `TPM2_PKCS11_MODULE` environment variable (user override)
+2. `p11-kit list-modules` output (desktop Linux standard)
+3. Well-known paths: Debian/Ubuntu, Fedora/RHEL, Arch Linux
 
 
 ## Key Creation Flow
 
 ### Step 1: Check Hardware Capability
 
-**Command:**
-```bash
-tpm2_testparms ecc256:ecdsa     # or rsa2048:rsassa
+The TPM's supported algorithms are queried via PKCS#11 slot mechanisms:
+
+```python
+import pkcs11
+
+lib = pkcs11.lib("/path/to/libtpm2_pkcs11.so")
+slot = lib.get_slots()[0]
+mechs = slot.get_mechanisms()
+# Mechanism.ECDSA → es256/es384
+# Mechanism.RSA_PKCS → rsa2048/rsa3072/rsa4096
 ```
 
-- Returns exit code 0 if the TPM supports the algorithm
-- Returns non-zero if unsupported
-- **Gotcha:** Many firmware TPMs (Intel PTT, AMD fTPM) only support P-256.
-  P-384 and RSA-4096 may be rejected.
+**Gotcha:** Many firmware TPMs (Intel PTT, AMD fTPM) only support P-256.
+P-384 and RSA-4096 may be rejected.
 
 ### Step 2: Environment Setup
 
@@ -31,117 +54,89 @@ export TPM2_PKCS11_STORE=~/.tpm2_pkcs11
 **This is mandatory.** Without it, operations fall back to `/etc/tpm2_pkcs11`
 which requires root.
 
-### Step 3: Cleanup Old Tokens (CRITICAL)
+### Step 3: Cleanup Old Objects (SAFE)
 
-This step has multiple gotchas. Must be done carefully.
+The code only destroys objects in our token (`bunker-wif`), never
+wipes the store or evicts unknown persistent handles.
 
-```bash
-# 1. Remove the logical PKCS#11 token from the SQLite DB
-tpm2_ptool rmtoken --label=bunker-wif
-
-# 2. Find physical TPM NV handles belonging to this token
-tpm2_ptool listprimaries
-
-# 3. Evict each handle from TPM NV storage
-tpm2_evictcontrol -c 0x81000001
+```python
+token = lib.get_token(token_label="bunker-wif")
+with token.open(user_pin=pin, rw=True) as session:
+    for obj in session.get_objects():
+        obj.destroy()
 ```
 
-**Why all three steps:**
-
-| Step | What it does | What it does NOT do |
-|---|---|---|
-| `rmtoken` | Deletes the DB entry | ❌ Does NOT evict NV handles from TPM |
-| `listprimaries` | Finds which NV handles belong to the token | — |
-| `evictcontrol` | Frees TPM NV storage | ❌ Does NOT touch the DB |
-
-> **⚠️ CRITICAL: "No Space Left" Bug**
+> **⚠️ CRITICAL: TPM Citizenship**
 >
-> If you only call `rmtoken` without `evictcontrol`, the TPM NV storage fills
-> up after 2-3 key creations.  Error: `TPM_RC_NV_SPACE` (`0x14b`).
->
-> Recovery: `tpm2_getcap handles-persistent` to list all handles, then
-> `tpm2_evictcontrol -c <handle>` for each.
+> In production, other applications (disk encryption, Secure Boot, VPN keys)
+> may have their own tokens and persistent handles.  **Never** wipe the store
+> directory or evict handles you don't own.  Only destroy objects with our label.
 
-> **⚠️ CRITICAL: Do NOT `rm -rf ~/.tpm2_pkcs11`**
->
-> The Python `tpm2_ptool` tool may recreate the SQLite database with a different
-> schema version than the system C library (`libtpm2_pkcs11.so`) expects.
-> This causes mysterious `CKR_OPERATION_NOT_INITIALIZED` errors.  Always use
-> `rmtoken` instead.
+### Step 4: Token Init and Key Generation
 
-> **⚠️ CRITICAL: Eviction Safety**
->
-> Only evict handles that belong to your token (found via `listprimaries`).
-> Arbitrarily evicting all persistent handles will break the host's Secure Boot,
-> LUKS disk encryption, or VPN keys.
+```python
+# Find or create our token
+token = lib.get_token(token_label="bunker-wif")
+# or: slot.init_token(pin, "bunker-wif")
 
-### Step 4: Create Token and Key
-
-```bash
-# Initialize the PKCS#11 SQLite database
-tpm2_ptool init
-
-# Create a logical token
-tpm2_ptool addtoken --pid=1 --sopin=<pin> --userpin=<pin> --label=bunker-wif
-
-# Generate the TPM key
-tpm2_ptool addkey --algorithm=ecc256:ecdsa --label=bunker-wif \
-    --key-label=<cn> --userpin=<pin>
+with token.open(user_pin=pin, rw=True) as session:
+    # Generate key pair — stays in TPM, never exportable
+    pub, priv = session.generate_keypair(
+        KeyType.EC,
+        mechanism=Mechanism.EC_KEY_PAIR_GEN,
+        store=True,
+        label=workload_cn,
+        attrs={Attribute.EC_PARAMS: encode_named_curve_parameters("secp256r1")},
+    )
 ```
 
-**`addkey` returns a `CKA_ID`** (e.g., `CKA_ID '31323334'`).  This ID is
-essential — it links the key to its certificate in the PKCS#11 store.
+### Step 5: Extract Public Key and Sign Certificate
 
-### Step 5: Sign Certificate via PKCS#11
+The public key is extracted via PKCS#11 attributes, then used with
+`cryptography` to create a CA-signed workload certificate:
 
-```bash
-export GNUTLS_PIN=<pin>
-certtool --generate-self-signed \
-    --load-privkey "pkcs11:token=bunker-wif;object=<cn>;type=private;pin-value=<pin>" \
-    --outfile workload.pem \
-    --template certtool.cfg
+```python
+# Extract EC point from PKCS#11
+ec_point = pub[Attribute.EC_POINT]
+# Convert to cryptography public key
+crypto_pub = EllipticCurvePublicKey.from_encoded_point(SECP256R1(), raw_point)
+# Serialize as PEM and pass to _create_ca_and_sign()
+pub_pem = crypto_pub.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
 ```
-
-**The PKCS#11 URI must be exact:**
-- `token=` must match `--label` from `addtoken`
-- `object=` must match `--key-label` from `addkey`
-- `pin-value=` provides authentication without interactive prompt
-- `GNUTLS_PIN` environment variable prevents `certtool` from hanging
 
 ### Step 6: Import Signed Certificate
 
-```bash
-echo "<pin>" | tpm2_ptool addcert --label=bunker-wif \
-    --key-id=<CKA_ID> workload.pem
-```
+```python
+# Convert PEM → DER
+workload_der = x509.load_pem_x509_certificate(pem).public_bytes(Encoding.DER)
 
-The `--key-id` must be the `CKA_ID` returned from `addkey`.
-The PIN is read from stdin.
+session.create_object(
+    {
+        Attribute.CLASS: ObjectClass.CERTIFICATE,
+        Attribute.CERTIFICATE_TYPE: CertificateType.X_509,
+        Attribute.LABEL: workload_cn,
+        Attribute.VALUE: workload_der,
+        Attribute.TOKEN: True,
+        Attribute.ID: pub[Attribute.ID],  # Links cert to key
+    }
+)
+```
 
 
 ## Algorithm Mapping
 
-| Config Name | tpm2-tools Algorithm | Notes |
-|---|---|---|
-| `es256` | `ecc256:ecdsa` | Most widely supported |
-| `es384` | `ecc384:ecdsa` | Some firmware TPMs reject |
-| `rsa2048` | `rsa2048:rsassa` | Universally supported |
-| `rsa4096` | `rsa4096:rsassa` | Many TPMs reject |
+| Config Name | PKCS#11 Key Type | PKCS#11 Mechanism | Notes |
+|---|---|---|---|
+| `es256` | EC (secp256r1) | `CKM_ECDSA` | Most widely supported |
+| `es384` | EC (secp384r1) | `CKM_ECDSA` | Some firmware TPMs reject |
+| `rsa2048` | RSA 2048-bit | `CKM_RSA_PKCS` | Universally supported |
+| `rsa3072` | RSA 3072-bit | `CKM_RSA_PKCS` | Most TPMs support |
+| `rsa4096` | RSA 4096-bit | `CKM_RSA_PKCS` | Many TPMs reject |
 
 
 ## Platform Quirks and Gotchas
 
-### 1. Ubuntu `tpm2_ptool` Wrapper Bug
-
-On newer Ubuntu (26.04+), the `/usr/bin/tpm2_ptool` wrapper is broken due to
-an `easy_install` entry-point version mismatch.
-
-**Detection:** Run `tpm2_ptool --help` — if it fails, fall back to:
-```bash
-python3 -m tpm2_pkcs11.tpm2_ptool
-```
-
-### 2. Permission Requirements
+### 1. Permission Requirements
 
 The user must have R/W access to `/dev/tpmrm0`:
 ```bash
@@ -149,7 +144,7 @@ sudo usermod -aG tss <username>
 # Log out and back in
 ```
 
-### 3. TCTI Configuration
+### 2. TCTI Configuration
 
 If the Resource Manager isn't at the default path, set:
 ```bash
@@ -158,21 +153,30 @@ export TPM2TOOLS_TCTI="device:/dev/tpmrm0"
 export TPM2TOOLS_TCTI="swtpm:host=localhost,port=2321"
 ```
 
-### 4. PKCS#11 Library Paths
+### 3. PKCS#11 Library Path Override
 
-For mTLS via ECP, the PKCS#11 `.so` library must be found:
+If `libtpm2_pkcs11.so` is in a non-standard location:
+```bash
+export TPM2_PKCS11_MODULE=/path/to/libtpm2_pkcs11.so
+```
 
-| Library | Common Paths |
-|---|---|
-| `libtpm2_pkcs11.so` | `/usr/lib/x86_64-linux-gnu/pkcs11/`, `/usr/lib/pkcs11/` |
+### 4. EC Point DER Encoding
+
+`libtpm2_pkcs11.so` returns `EC_POINT` as a DER-encoded `OCTET STRING`
+wrapping the uncompressed point.  The outer DER wrapper (2 bytes) must be
+stripped before passing to `cryptography`:
+```
+DER: 04 41 04 <32 bytes x> <32 bytes y>   (P-256)
+DER: 04 61 04 <48 bytes x> <48 bytes y>   (P-384)
+```
 
 
 ## Error Reference
 
 | Error | Meaning | Fix |
 |---|---|---|
-| `Could not load tcti` | TPM resource manager not found | Check `/dev/tpmrm0`, set `TPM2TOOLS_TCTI` |
-| `insufficient space` / `0x14b` | TPM NV storage full | Evict old handles with `tpm2_evictcontrol` |
-| `timed out` | Resource Manager frozen | Reboot or restart `tpm2-abrmd` |
-| `CKR_OPERATION_NOT_INITIALIZED` | SQLite schema mismatch | Don't `rm -rf` the DB — use `rmtoken` |
-| `CKA_ID not found` | Key-cert binding mismatch | Ensure `addcert --key-id` matches `addkey` output |
+| `CKR_DEVICE_ERROR` | TPM not responding | Check `/dev/tpmrm0`, set `TPM2TOOLS_TCTI` |
+| `CKR_PIN_INCORRECT` | Token PIN mismatch | `rm -rf ~/.tpm2_pkcs11 && wif-bunker --cert-only` |
+| `CKR_TOKEN_NOT_RECOGNIZED` | Store corruption | `rm -rf ~/.tpm2_pkcs11 && wif-bunker --cert-only` |
+| `No available PKCS#11 slot` | All slots occupied | Check store integrity |
+| `Could not find libtpm2_pkcs11.so` | Library not installed | Install `libtpm2-pkcs11-1` or set `TPM2_PKCS11_MODULE` |

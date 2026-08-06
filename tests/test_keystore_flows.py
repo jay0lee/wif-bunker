@@ -7,10 +7,35 @@ import pytest
 from wif_bunker.config import CertificateBundle, WorkloadConfig
 
 
+def _make_fake_workload_pem():
+    """Create a minimal self-signed PEM cert for test mocking."""
+    import datetime
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(x509.oid.NameOID.COMMON_NAME, "test")]))
+        .issuer_name(x509.Name([x509.NameAttribute(x509.oid.NameOID.COMMON_NAME, "test")]))
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.datetime.now(datetime.UTC))
+        .not_valid_after(datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=1))
+        .sign(key, hashes.SHA256())
+    )
+    from cryptography.hazmat.primitives.serialization import Encoding
+
+    return cert.public_bytes(Encoding.PEM).decode("utf-8")
+
+
 @pytest.fixture
 def config():
     cfg = MagicMock(spec=WorkloadConfig)
     cfg.workload_cn = "test-bunker"
+    cfg.key_algorithm = "es256"
     cfg.key_algo_config = {
         "macos_sc_auth": "secp256r1",
         "linux_tpm2": "ecc256",
@@ -164,31 +189,72 @@ class TestLinuxKeystoreFlow:
             mock_sock_instance.connect.assert_called_with(("127.0.0.1", 2321))
 
     @patch("wif_bunker.keystore.linux.Path.home")
-    @patch("wif_bunker.keystore.linux._resolve_tpm2_ptool", return_value=["tpm2_ptool"])
-    @patch("wif_bunker.keystore.linux.require_commands")
     @patch("wif_bunker.keystore.linux._check_tpm_linux")
-    @patch("wif_bunker.keystore.linux.subprocess.run")
-    @patch("wif_bunker.keystore.linux.write_secure_file")
+    @patch("wif_bunker.keystore.linux._find_pkcs11_lib", return_value="/usr/lib/pkcs11/libtpm2_pkcs11.so")
     @patch("wif_bunker.keystore.linux._create_ca_and_sign")
-    def test_tpm2_ptool_addkey_extracts_id(
-        self, mock_ca, mock_write, mock_run, mock_check, mock_require, mock_resolve, mock_home, config, tmp_path
+    @patch("pkcs11.lib")
+    def test_pkcs11_key_generation_and_cert_import(
+        self, mock_pkcs11_lib, mock_ca, mock_find_lib, mock_check, mock_home, config, tmp_path
     ):
+        """Verify full PKCS#11 flow: key gen → pub key extract → cert import."""
         mock_home.return_value = tmp_path
         import os
-        from pathlib import Path
+
+        from cryptography.hazmat.primitives import serialization
+        from pkcs11 import Attribute, KeyType
 
         from wif_bunker.keystore.linux import _generate_cert_linux
 
-        def side_effect(*args, **kwargs):
-            cmd = args[0]
-            if "addkey" in cmd:
-                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="some output\nCKA_ID '0xABCD'\n")
-            if cmd[0] == "certtool":
-                Path("bunker-workload-selfsigned.pem").write_text("fake pem")
-                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="")
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="")
+        # Mock the PKCS#11 library
+        mock_lib = MagicMock()
+        mock_pkcs11_lib.return_value = mock_lib
 
-        mock_run.side_effect = side_effect
+        # Mock token: exists on first call (cleanup finds it, but no objects)
+        mock_token = MagicMock()
+        mock_lib.get_token.return_value = mock_token
+
+        # Cleanup session: no objects to destroy
+        mock_cleanup_session = MagicMock()
+        mock_cleanup_session.get_objects.return_value = []
+
+        # Generate session with key pair
+        mock_gen_session = MagicMock()
+        mock_pub = MagicMock()
+        mock_priv = MagicMock()
+        mock_gen_session.generate_keypair.return_value = (mock_pub, mock_priv)
+
+        # EC public key attributes (P-256 uncompressed point from a real key)
+        from cryptography.hazmat.primitives.asymmetric import ec as ec_mod
+
+        real_key = ec_mod.generate_private_key(ec_mod.SECP256R1())
+        real_point = real_key.public_key().public_bytes(
+            serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint
+        )
+        # Wrap in DER OCTET STRING like libtpm2_pkcs11 does
+        fake_point = bytes([0x04, len(real_point)]) + real_point
+
+        mock_pub.key_type = KeyType.EC
+        mock_pub.__getitem__ = lambda self, key: {
+            Attribute.EC_POINT: fake_point,
+            Attribute.EC_PARAMS: b"",
+            Attribute.ID: b"\x01\x02\x03",
+        }.get(key, b"")
+
+        # Two token.open calls: cleanup (rw=True), then generate (user_pin, rw=True)
+        call_count = {"n": 0}
+
+        def open_side_effect(**kwargs):
+            ctx = MagicMock()
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                ctx.__enter__ = MagicMock(return_value=mock_cleanup_session)
+            else:
+                ctx.__enter__ = MagicMock(return_value=mock_gen_session)
+            ctx.__exit__ = MagicMock(return_value=False)
+            return ctx
+
+        mock_token.open.side_effect = open_side_effect
+
         mock_ca.return_value = (
             CertificateBundle(
                 trust_anchor_pem="ca",
@@ -197,55 +263,57 @@ class TestLinuxKeystoreFlow:
                 serial_number_hex="01",
                 sha256_fingerprint="sha",
             ),
-            "fake-pem",
+            _make_fake_workload_pem(),
         )
 
         with patch.dict(os.environ, clear=True):
-            _generate_cert_linux(config)
+            result = _generate_cert_linux(config)
 
-        # Verify addcert was called with the extracted key-id
-        addcert_call = [c for c in mock_run.call_args_list if "addcert" in c.args[0]]
-        assert len(addcert_call) > 0
-        assert "--key-id=0xABCD" in addcert_call[0].args[0]
+        assert result.trust_anchor_pem == "ca"
+        mock_gen_session.generate_keypair.assert_called_once()
+        mock_gen_session.create_object.assert_called_once()
 
     @patch("wif_bunker.keystore.linux.Path.home")
-    @patch("wif_bunker.keystore.linux._resolve_tpm2_ptool", return_value=["tpm2_ptool"])
-    @patch("wif_bunker.keystore.linux.require_commands")
     @patch("wif_bunker.keystore.linux._check_tpm_linux")
-    @patch("wif_bunker.keystore.linux.subprocess.run")
-    @patch("wif_bunker.keystore.linux.write_secure_file")
-    @patch("wif_bunker.keystore.linux._create_ca_and_sign")
-    def test_tpm2_ptool_addkey_no_id_raises(
-        self, mock_ca, mock_write, mock_run, mock_check, mock_require, mock_resolve, mock_home, config, tmp_path
+    @patch("wif_bunker.keystore.linux._find_pkcs11_lib", return_value="/usr/lib/pkcs11/libtpm2_pkcs11.so")
+    @patch("pkcs11.lib")
+    def test_pkcs11_device_error_raises_runtime_error(
+        self, mock_pkcs11_lib, mock_find_lib, mock_check, mock_home, config, tmp_path
     ):
+        """PKCS#11 device errors are converted to actionable RuntimeErrors."""
         mock_home.return_value = tmp_path
         import os
-        from pathlib import Path
+
+        import pkcs11 as pkcs11_mod
 
         from wif_bunker.keystore.linux import _generate_cert_linux
 
-        def side_effect(*args, **kwargs):
-            cmd = args[0]
-            if "addkey" in cmd:
-                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="no id here\n")
-            if cmd[0] == "certtool":
-                Path("bunker-workload-selfsigned.pem").write_text("fake pem")
-                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="")
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="")
+        mock_lib = MagicMock()
+        mock_pkcs11_lib.return_value = mock_lib
 
-        mock_run.side_effect = side_effect
-        mock_ca.return_value = (
-            CertificateBundle(
-                trust_anchor_pem="ca",
-                workload_cert_pem="leaf",
-                issuer_cn="issuer",
-                serial_number_hex="01",
-                sha256_fingerprint="sha",
-            ),
-            "fake-pem",
-        )
+        # Token exists but session open fails with device error
+        mock_token = MagicMock()
+        mock_lib.get_token.return_value = mock_token
 
-        with patch.dict(os.environ, clear=True), pytest.raises(RuntimeError, match="Could not extract CKA_ID"):
+        # Cleanup session opens fine, generate session fails
+        call_count = {"n": 0}
+
+        def open_side_effect(**kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                # Cleanup session - fine
+                ctx = MagicMock()
+                mock_session = MagicMock()
+                mock_session.get_objects.return_value = []
+                ctx.__enter__ = MagicMock(return_value=mock_session)
+                ctx.__exit__ = MagicMock(return_value=False)
+                return ctx
+            # Generate session - device error
+            raise pkcs11_mod.PKCS11Error("CKR_DEVICE_ERROR")
+
+        mock_token.open.side_effect = open_side_effect
+
+        with patch.dict(os.environ, clear=True), pytest.raises(RuntimeError, match="TPM device error"):
             _generate_cert_linux(config)
 
 

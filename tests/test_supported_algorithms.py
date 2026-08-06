@@ -1,6 +1,5 @@
 """Tests for the --supported-algorithms feature across all keystores."""
 
-import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -9,16 +8,23 @@ import pytest
 
 
 class TestLinuxSupportedAlgorithms:
-    """Tests for get_supported_algorithms_linux using mocked tpm2_testparms."""
+    """Tests for get_supported_algorithms_linux using mocked PKCS#11 mechanisms."""
 
-    @patch("wif_bunker.keystore.linux.shutil.which", return_value="/usr/bin/tpm2_testparms")
+    @patch("wif_bunker.keystore.linux._find_pkcs11_lib", return_value="/usr/lib/pkcs11/libtpm2_pkcs11.so")
     @patch("wif_bunker.keystore.linux._check_tpm_linux")
-    @patch("wif_bunker.keystore.linux.subprocess.run")
-    def test_all_algorithms_supported(self, mock_run, mock_check_tpm, mock_which):
-        """All tpm2_testparms calls succeed → all Linux algos returned."""
+    @patch("wif_bunker.keystore.linux.pkcs11")
+    def test_all_algorithms_supported(self, mock_pkcs11, mock_check_tpm, mock_find_lib):
+        """All mechanisms present → all Linux algos returned."""
+        from pkcs11 import Mechanism
+
         from wif_bunker.keystore.linux import get_supported_algorithms_linux
 
-        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        mock_lib = MagicMock()
+        mock_pkcs11.lib.return_value = mock_lib
+        mock_pkcs11.PKCS11Error = Exception
+        mock_slot = MagicMock()
+        mock_slot.get_mechanisms.return_value = {Mechanism.ECDSA, Mechanism.RSA_PKCS}
+        mock_lib.get_slots.return_value = [mock_slot]
 
         result = get_supported_algorithms_linux()
         assert "es256" in result
@@ -27,54 +33,62 @@ class TestLinuxSupportedAlgorithms:
         assert "rsa3072" in result
         assert "rsa4096" in result
 
-    @patch("wif_bunker.keystore.linux.shutil.which", return_value="/usr/bin/tpm2_testparms")
+    @patch("wif_bunker.keystore.linux._find_pkcs11_lib", return_value="/usr/lib/pkcs11/libtpm2_pkcs11.so")
     @patch("wif_bunker.keystore.linux._check_tpm_linux")
-    @patch("wif_bunker.keystore.linux.subprocess.run")
-    def test_intel_ptt_no_p384(self, mock_run, mock_check_tpm, mock_which):
-        """Intel PTT: ecc384 probe fails, others pass → es384 excluded."""
+    @patch("wif_bunker.keystore.linux.pkcs11")
+    def test_intel_ptt_no_rsa(self, mock_pkcs11, mock_check_tpm, mock_find_lib):
+        """Intel PTT: only ECDSA mechanism → no RSA algos."""
+        from pkcs11 import Mechanism
+
         from wif_bunker.keystore.linux import get_supported_algorithms_linux
 
-        def side_effect(cmd, **kwargs):
-            # ecc384:ecdsa → fail (curve not supported)
-            if "ecc384:ecdsa" in cmd:
-                return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="curve not supported")
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
-
-        mock_run.side_effect = side_effect
+        mock_lib = MagicMock()
+        mock_pkcs11.lib.return_value = mock_lib
+        mock_pkcs11.PKCS11Error = Exception
+        mock_slot = MagicMock()
+        mock_slot.get_mechanisms.return_value = {Mechanism.ECDSA}
+        mock_lib.get_slots.return_value = [mock_slot]
 
         result = get_supported_algorithms_linux()
         assert "es256" in result
-        assert "es384" not in result
-        assert "rsa2048" in result
-        assert "rsa4096" in result
+        assert "es384" in result
+        assert "rsa2048" not in result
+        assert "rsa4096" not in result
 
-    @patch("wif_bunker.keystore.linux.shutil.which", return_value=None)
+    @patch("wif_bunker.keystore.linux._find_pkcs11_lib", return_value="/usr/lib/pkcs11/libtpm2_pkcs11.so")
     @patch("wif_bunker.keystore.linux._check_tpm_linux")
-    def test_no_tpm2_testparms_raises(self, mock_check_tpm, mock_which):
-        """Missing tpm2_testparms binary raises RuntimeError."""
+    @patch("wif_bunker.keystore.linux.pkcs11")
+    def test_no_slots_raises(self, mock_pkcs11, mock_check_tpm, mock_find_lib):
+        """No PKCS#11 slots → RuntimeError."""
         from wif_bunker.keystore.linux import get_supported_algorithms_linux
 
-        with pytest.raises(RuntimeError, match="tpm2_testparms not found"):
+        mock_lib = MagicMock()
+        mock_pkcs11.lib.return_value = mock_lib
+        mock_pkcs11.PKCS11Error = Exception
+        mock_lib.get_slots.return_value = []
+
+        with pytest.raises(RuntimeError, match="No PKCS#11 slots"):
             get_supported_algorithms_linux()
 
-    @patch("wif_bunker.keystore.linux.shutil.which", return_value="/usr/bin/tpm2_testparms")
+    @patch("wif_bunker.keystore.linux._find_pkcs11_lib", return_value="/usr/lib/pkcs11/libtpm2_pkcs11.so")
     @patch("wif_bunker.keystore.linux._check_tpm_linux")
-    @patch("wif_bunker.keystore.linux.subprocess.run")
-    def test_swtpm_no_rsa4096(self, mock_run, mock_check_tpm, mock_which):
-        """swtpm: rsa4096 probe fails → rsa4096 excluded."""
+    @patch("wif_bunker.keystore.linux.pkcs11")
+    def test_rsa_only_no_ecc(self, mock_pkcs11, mock_check_tpm, mock_find_lib):
+        """RSA-only TPM → no ECC algos."""
+        from pkcs11 import Mechanism
+
         from wif_bunker.keystore.linux import get_supported_algorithms_linux
 
-        def side_effect(cmd, **kwargs):
-            if "rsa4096" in cmd:
-                return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="")
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
-
-        mock_run.side_effect = side_effect
+        mock_lib = MagicMock()
+        mock_pkcs11.lib.return_value = mock_lib
+        mock_pkcs11.PKCS11Error = Exception
+        mock_slot = MagicMock()
+        mock_slot.get_mechanisms.return_value = {Mechanism.RSA_PKCS}
+        mock_lib.get_slots.return_value = [mock_slot]
 
         result = get_supported_algorithms_linux()
-        assert "rsa4096" not in result
-        assert "es256" in result
         assert "rsa2048" in result
+        assert "es256" not in result
 
 
 # ── macOS: get_supported_algorithms_macos ──
