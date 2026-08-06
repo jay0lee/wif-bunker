@@ -24,10 +24,10 @@ use std::sync::Once;
 
 use crate::provider_ffi::{
     OSSL_PROVIDER_add_builtin, OsslAlgorithm, OsslDispatch, OSSL_FUNC_KEYMGMT_FREE,
-    OSSL_FUNC_KEYMGMT_HAS, OSSL_FUNC_KEYMGMT_IMPORT, OSSL_FUNC_KEYMGMT_NEW,
-    OSSL_FUNC_SIGNATURE_FREECTX, OSSL_FUNC_SIGNATURE_NEWCTX, OSSL_FUNC_SIGNATURE_SIGN,
-    OSSL_FUNC_SIGNATURE_SIGN_INIT, OSSL_KEYMGMT_SELECT_PRIVATE_KEY, OSSL_OP_KEYMGMT,
-    OSSL_OP_SIGNATURE,
+    OSSL_FUNC_KEYMGMT_HAS, OSSL_FUNC_KEYMGMT_IMPORT, OSSL_FUNC_KEYMGMT_IMPORT_TYPES,
+    OSSL_FUNC_KEYMGMT_NEW, OSSL_FUNC_SIGNATURE_FREECTX, OSSL_FUNC_SIGNATURE_NEWCTX,
+    OSSL_FUNC_SIGNATURE_SIGN, OSSL_FUNC_SIGNATURE_SIGN_INIT, OSSL_KEYMGMT_SELECT_PRIVATE_KEY,
+    OSSL_OP_KEYMGMT, OSSL_OP_SIGNATURE,
 };
 use crate::SignCallback;
 
@@ -56,7 +56,8 @@ const PROVIDER_PROPS: &std::ffi::CStr = c"provider=hardmtls";
 /// `SignForPython` wrapper.
 struct HardmtlsKey {
     /// The signing callback provided by the caller.
-    sign_func: SignCallback,
+    /// `None` after `keymgmt_new`, populated by `keymgmt_import`.
+    sign_func: Option<SignCallback>,
 }
 
 // ── Signing context (stored by SIGNATURE operations) ───────────────────
@@ -74,16 +75,15 @@ struct HardmtlsSignCtx {
 /// Allocate a new (empty) key. The key is populated later via `import`.
 #[allow(unsafe_code)]
 extern "C" fn keymgmt_new(_provctx: *mut c_void) -> *mut c_void {
-    // We don't allocate here — the key is created in `import`.
-    // Return a non-null sentinel that `import` will replace.
-    ptr::null_mut()
+    let key = Box::new(HardmtlsKey { sign_func: None });
+    Box::into_raw(key).cast::<c_void>()
 }
 
-/// Free a key previously allocated by `import`.
+/// Free a key previously allocated by `keymgmt_new`.
 #[allow(unsafe_code)]
 extern "C" fn keymgmt_free(keydata: *mut c_void) {
     if !keydata.is_null() {
-        // SAFETY: keydata was allocated by Box::into_raw in `keymgmt_import`.
+        // SAFETY: keydata was allocated by Box::into_raw in `keymgmt_new`.
         let _ = unsafe { Box::from_raw(keydata.cast::<HardmtlsKey>()) };
     }
 }
@@ -94,62 +94,122 @@ extern "C" fn keymgmt_has(keydata: *const c_void, selection: c_int) -> c_int {
     if keydata.is_null() {
         return 0;
     }
-    // Our key always has a private component (the sign callback).
+    // SAFETY: keydata is valid (from keymgmt_new).
+    let key = unsafe { &*keydata.cast::<HardmtlsKey>() };
     if (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) != 0 {
-        return 1;
+        return c_int::from(key.sign_func.is_some());
     }
     0
 }
 
-/// Import key data. We expect a raw pointer to a `SignCallback` passed
-/// via an `OSSL_PARAM` with key `"sign_func_ptr"`.
+/// Import key data from an `OSSL_PARAM` array.
+///
+/// Expects a parameter named `"hardmtls-sign-func"` containing the raw bytes
+/// of a `SignCallback` function pointer (as an `OSSL_PARAM_OCTET_STRING`).
 #[allow(unsafe_code)]
 extern "C" fn keymgmt_import(
     keydata: *mut c_void,
     _selection: c_int,
     params: *const openssl_sys::OSSL_PARAM,
 ) -> c_int {
-    if params.is_null() {
+    if keydata.is_null() || params.is_null() {
         return 0;
     }
 
-    // Walk the OSSL_PARAM array to find our custom parameter.
     // SAFETY: params is valid and null-terminated (OpenSSL contract).
     let sign_func = unsafe { extract_sign_func_from_params(params) };
 
-    match sign_func {
-        Some(func) => {
-            let key = Box::new(HardmtlsKey { sign_func: func });
-            // Store the key pointer. Since `keydata` is a *mut from `keymgmt_new`,
-            // we need a way to pass it back. OpenSSL expects us to populate `keydata`.
-            // However, the Provider API passes `keydata` as the return from `keymgmt_new`.
-            // For our case, we store via a global or thread-local.
-            // Actually, OpenSSL's keymgmt_import receives the key object from keymgmt_new
-            // and should populate it in-place. Since we returned null from keymgmt_new,
-            // we need to use a different approach.
-            //
-            // The correct pattern: keymgmt_new returns an allocated but empty struct,
-            // and keymgmt_import fills it in.
-            let _ = (keydata, key);
-            // TODO: This needs proper in-place mutation of the key struct.
-            // For now, mark as not yet implemented.
-            0
-        }
-        None => 0,
+    if let Some(func) = sign_func {
+        // SAFETY: keydata is valid (from keymgmt_new), we have exclusive access.
+        let key = unsafe { &mut *keydata.cast::<HardmtlsKey>() };
+        key.sign_func = Some(func);
+        log::debug!("hardmTLS provider: imported sign_func into key");
+        1 // Success
+    } else {
+        log::error!("hardmTLS provider: sign_func param not found in import");
+        0
     }
 }
 
+/// Declare the types of parameters that `keymgmt_import` accepts.
+///
+/// OpenSSL requires this whenever `keymgmt_import` is provided (the import
+/// function count must be exactly 2: `import` + `import_types`).
+#[allow(unsafe_code)]
+extern "C" fn keymgmt_import_types(_selection: c_int) -> *const openssl_sys::OSSL_PARAM {
+    use crate::provider_ffi::{HARDMTLS_PARAM_SIGN_FUNC, OSSL_PARAM_OCTET_STRING};
+
+    /// Wrapper to allow `OSSL_PARAM` array in a static.
+    struct SyncParams([openssl_sys::OSSL_PARAM; 2]);
+
+    // SAFETY: OSSL_PARAM contains raw pointers that point to static data
+    // (CStr literals and null). These are immutable and valid for 'static.
+    #[allow(unsafe_code)]
+    unsafe impl Sync for SyncParams {}
+
+    static IMPORT_PARAMS: SyncParams = SyncParams([
+        openssl_sys::OSSL_PARAM {
+            key: HARDMTLS_PARAM_SIGN_FUNC.as_ptr(),
+            data_type: OSSL_PARAM_OCTET_STRING,
+            data: std::ptr::null_mut(),
+            data_size: std::mem::size_of::<SignCallback>(),
+            return_size: 0,
+        },
+        // Sentinel.
+        openssl_sys::OSSL_PARAM {
+            key: std::ptr::null(),
+            data_type: 0,
+            data: std::ptr::null_mut(),
+            data_size: 0,
+            return_size: 0,
+        },
+    ]);
+
+    IMPORT_PARAMS.0.as_ptr()
+}
+
 /// Extract the `SignCallback` function pointer from an `OSSL_PARAM` array.
+///
+/// Walks the array looking for a parameter named `"hardmtls-sign-func"` with
+/// type `OSSL_PARAM_OCTET_STRING` and size `sizeof(SignCallback)`.
 ///
 /// # Safety
 ///
 /// `params` must be a valid, null-terminated `OSSL_PARAM` array.
 #[allow(unsafe_code)]
 unsafe fn extract_sign_func_from_params(
-    _params: *const openssl_sys::OSSL_PARAM,
+    params: *const openssl_sys::OSSL_PARAM,
 ) -> Option<SignCallback> {
-    // TODO: Walk OSSL_PARAM array looking for "sign_func_ptr" key.
-    // The value will be a pointer-sized octet string containing the fn pointer.
+    use crate::provider_ffi::{HARDMTLS_PARAM_SIGN_FUNC, OSSL_PARAM_OCTET_STRING};
+
+    let target_key = HARDMTLS_PARAM_SIGN_FUNC.to_bytes();
+    let expected_size = std::mem::size_of::<SignCallback>();
+
+    // Walk the param array. It's terminated by an entry with key == NULL.
+    let mut i = 0;
+    loop {
+        // SAFETY: params is valid and null-terminated.
+        let param = unsafe { &*params.add(i) };
+        if param.key.is_null() {
+            break;
+        }
+
+        // SAFETY: key is a valid C string (OpenSSL contract).
+        let key_bytes = unsafe { std::ffi::CStr::from_ptr(param.key) }.to_bytes();
+
+        if key_bytes == target_key
+            && param.data_type == OSSL_PARAM_OCTET_STRING
+            && param.data_size == expected_size
+            && !param.data.is_null()
+        {
+            // SAFETY: data points to `expected_size` bytes containing a SignCallback.
+            let func: SignCallback = unsafe { std::ptr::read(param.data.cast::<SignCallback>()) };
+            return Some(func);
+        }
+
+        i += 1;
+    }
+
     None
 }
 
@@ -215,6 +275,10 @@ extern "C" fn signature_sign(
 
     // SAFETY: key was set in sign_init.
     let key = unsafe { &*sign_ctx.key };
+    let Some(sign_func) = key.sign_func else {
+        log::error!("hardmTLS provider: sign called but sign_func not set");
+        return 0;
+    };
 
     if sigret.is_null() {
         // Size query — return a generous maximum.
@@ -226,7 +290,7 @@ extern "C" fn signature_sign(
 
     // Delegate to the sign callback.
     // SAFETY: sign_func, sigret, siglen, tbs are all valid pointers.
-    let result = unsafe { (key.sign_func)(sigret, siglen, tbs, tbslen) };
+    let result = unsafe { sign_func(sigret, siglen, tbs, tbslen) };
 
     if result != 1 {
         log::error!("hardmTLS provider: sign_func returned failure");
@@ -242,7 +306,7 @@ extern "C" fn signature_sign(
 
 /// KEYMGMT dispatch table.
 #[allow(unsafe_code)]
-static KEYMGMT_DISPATCH: [OsslDispatch; 5] = [
+static KEYMGMT_DISPATCH: [OsslDispatch; 6] = [
     OsslDispatch {
         function_id: OSSL_FUNC_KEYMGMT_NEW,
         function: Some(unsafe {
@@ -273,6 +337,15 @@ static KEYMGMT_DISPATCH: [OsslDispatch; 5] = [
                 extern "C" fn(*mut c_void, c_int, *const openssl_sys::OSSL_PARAM) -> c_int,
                 unsafe extern "C" fn(),
             >(keymgmt_import)
+        }),
+    },
+    OsslDispatch {
+        function_id: OSSL_FUNC_KEYMGMT_IMPORT_TYPES,
+        function: Some(unsafe {
+            std::mem::transmute::<
+                extern "C" fn(c_int) -> *const openssl_sys::OSSL_PARAM,
+                unsafe extern "C" fn(),
+            >(keymgmt_import_types)
         }),
     },
     OsslDispatch::end(),
@@ -377,9 +450,9 @@ extern "C" fn provider_teardown(_provctx: *mut c_void) {
 }
 
 /// Function ID for `query_operation` in the provider dispatch table.
-const OSSL_FUNC_PROVIDER_QUERY_OPERATION: c_int = 2;
+const OSSL_FUNC_PROVIDER_QUERY_OPERATION: c_int = 1027;
 /// Function ID for `teardown` in the provider dispatch table.
-const OSSL_FUNC_PROVIDER_TEARDOWN: c_int = 1;
+const OSSL_FUNC_PROVIDER_TEARDOWN: c_int = 1024;
 
 /// Provider-level dispatch table (returned from `OSSL_provider_init`).
 #[allow(unsafe_code)]
@@ -465,9 +538,23 @@ pub fn register_provider() -> Result<(), crate::error::HardmtlsError> {
             result = Err(crate::error::HardmtlsError::SslError(
                 "OSSL_PROVIDER_load failed for hardmtls".into(),
             ));
+            return;
         }
 
-        log::info!("hardmTLS: OpenSSL provider registered and loaded");
+        // Also load the default provider. When any provider is explicitly loaded,
+        // OpenSSL stops auto-loading the default provider. Without this, standard
+        // algorithms (ciphers, digests, RSA, etc.) become unavailable, breaking
+        // SSL_CTX_new and normal TLS operations.
+        let default_prov =
+            unsafe { openssl_sys::OSSL_PROVIDER_load(ptr::null_mut(), c"default".as_ptr()) };
+        if default_prov.is_null() {
+            result = Err(crate::error::HardmtlsError::SslError(
+                "OSSL_PROVIDER_load failed for default provider".into(),
+            ));
+            return;
+        }
+
+        log::info!("hardmTLS: OpenSSL provider registered and loaded (with default)");
     });
 
     result
@@ -479,9 +566,9 @@ mod tests {
 
     #[test]
     fn dispatch_tables_are_well_formed() {
-        // KEYMGMT has 4 entries + sentinel.
-        assert_eq!(KEYMGMT_DISPATCH.len(), 5);
-        assert_eq!(KEYMGMT_DISPATCH[4].function_id, 0);
+        // KEYMGMT has 5 entries + sentinel.
+        assert_eq!(KEYMGMT_DISPATCH.len(), 6);
+        assert_eq!(KEYMGMT_DISPATCH[5].function_id, 0);
 
         // SIGNATURE has 4 entries + sentinel.
         assert_eq!(SIGNATURE_DISPATCH.len(), 5);

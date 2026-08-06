@@ -9,7 +9,7 @@ license = "Apache-2.0"
 # (e.g., `cargo install hardmtls`), the separation should be straightforward.
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # Config parsing

@@ -53,45 +53,53 @@ pub type OsslProviderInitFn = unsafe extern "C" fn(
 ) -> c_int;
 
 // ── OpenSSL constants for Provider operations ──────────────────────────
+// Values from: openssl/core_dispatch.h (OpenSSL 3.6.3)
 
 /// Operation ID for key management.
 pub const OSSL_OP_KEYMGMT: c_int = 10;
 /// Operation ID for signature.
-pub const OSSL_OP_SIGNATURE: c_int = 11;
+pub const OSSL_OP_SIGNATURE: c_int = 12; // Not 11!
 
-// KEYMGMT function IDs
+// KEYMGMT function IDs (from core_dispatch.h)
 /// `keymgmt_new` — allocate a new key.
 pub const OSSL_FUNC_KEYMGMT_NEW: c_int = 1;
 /// `keymgmt_free` — free a key.
-pub const OSSL_FUNC_KEYMGMT_FREE: c_int = 8;
+pub const OSSL_FUNC_KEYMGMT_FREE: c_int = 10;
 /// `keymgmt_has` — query what parts the key has.
-pub const OSSL_FUNC_KEYMGMT_HAS: c_int = 4;
+pub const OSSL_FUNC_KEYMGMT_HAS: c_int = 21;
 /// `keymgmt_import` — import key data.
-pub const OSSL_FUNC_KEYMGMT_IMPORT: c_int = 20;
+pub const OSSL_FUNC_KEYMGMT_IMPORT: c_int = 40;
 /// `keymgmt_import_types` — declare importable types.
-pub const OSSL_FUNC_KEYMGMT_IMPORT_TYPES: c_int = 21;
+pub const OSSL_FUNC_KEYMGMT_IMPORT_TYPES: c_int = 41;
 
-// SIGNATURE function IDs
+// SIGNATURE function IDs (from core_dispatch.h)
 /// `signature_newctx` — allocate signing context.
 pub const OSSL_FUNC_SIGNATURE_NEWCTX: c_int = 1;
 /// `signature_freectx` — free signing context.
-pub const OSSL_FUNC_SIGNATURE_FREECTX: c_int = 8;
+pub const OSSL_FUNC_SIGNATURE_FREECTX: c_int = 16;
 /// `signature_sign_init` — initialize signing.
-pub const OSSL_FUNC_SIGNATURE_SIGN_INIT: c_int = 3;
+pub const OSSL_FUNC_SIGNATURE_SIGN_INIT: c_int = 2;
 /// `signature_sign` — produce signature.
-pub const OSSL_FUNC_SIGNATURE_SIGN: c_int = 4;
+pub const OSSL_FUNC_SIGNATURE_SIGN: c_int = 3;
 /// `signature_digest_sign_init` — init digest+sign.
-pub const OSSL_FUNC_SIGNATURE_DIGEST_SIGN_INIT: c_int = 7;
+pub const OSSL_FUNC_SIGNATURE_DIGEST_SIGN_INIT: c_int = 8;
 /// `signature_digest_sign_update` — feed data.
-pub const OSSL_FUNC_SIGNATURE_DIGEST_SIGN_UPDATE: c_int = 8;
+pub const OSSL_FUNC_SIGNATURE_DIGEST_SIGN_UPDATE: c_int = 9;
 /// `signature_digest_sign_final` — finalize digest+sign.
-pub const OSSL_FUNC_SIGNATURE_DIGEST_SIGN_FINAL: c_int = 9;
+pub const OSSL_FUNC_SIGNATURE_DIGEST_SIGN_FINAL: c_int = 10;
 
 // Key selection bits
 /// The key has a private component.
 pub const OSSL_KEYMGMT_SELECT_PRIVATE_KEY: c_int = 0x01;
 /// The key has a public component.
 pub const OSSL_KEYMGMT_SELECT_PUBLIC_KEY: c_int = 0x02;
+
+// OSSL_PARAM data types
+/// Octet string (arbitrary binary data).
+pub const OSSL_PARAM_OCTET_STRING: u32 = 5;
+
+/// Custom parameter key for passing the sign callback function pointer.
+pub const HARDMTLS_PARAM_SIGN_FUNC: &std::ffi::CStr = c"hardmtls-sign-func";
 
 // ── FFI declarations ───────────────────────────────────────────────────
 
@@ -165,6 +173,6 @@ mod tests {
     #[test]
     fn constants_are_correct() {
         assert_eq!(OSSL_OP_KEYMGMT, 10);
-        assert_eq!(OSSL_OP_SIGNATURE, 11);
+        assert_eq!(OSSL_OP_SIGNATURE, 12);
     }
 }
