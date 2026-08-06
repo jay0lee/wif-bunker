@@ -31,15 +31,19 @@ def _resolve_tpm2_ptool() -> list[str]:
 
     On Ubuntu 26.04, the system wrapper at /usr/bin/tpm2_ptool is broken:
     the easy_install entry-point hardcodes a version that doesn't match the
-    installed Python package.  We detect this by running ``tpm2_ptool --help``
-    and, if it fails with an importlib/entry_point error, fall back to
-    invoking the module directly via ``python3 -m tpm2_pkcs11.tpm2_ptool``.
+    installed Python package.  We detect this by running ``tpm2_ptool version``
+    (not ``--help`` — the wrapper may succeed for ``--help`` but crash on
+    actual subcommands) and, if it fails, fall back to invoking the module
+    directly via ``python3 -m tpm2_pkcs11.tpm2_ptool``.
     """
     ptool_path = shutil.which("tpm2_ptool")
     if ptool_path:
         try:
+            # Probe with a real subcommand, not --help.
+            # The Ubuntu wrapper can pass --help but crash on actual
+            # commands due to entry_point version mismatch.
             probe = subprocess.run(
-                ["tpm2_ptool", "--help"],
+                ["tpm2_ptool", "listprimaries"],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -54,19 +58,30 @@ def _resolve_tpm2_ptool() -> list[str]:
             "falling back to python3 -m tpm2_pkcs11.tpm2_ptool"
         )
 
-    # Fall back to invoking the Python module directly
-    python = sys.executable or shutil.which("python3") or "python3"
-    try:
-        probe = subprocess.run(
-            [python, "-m", "tpm2_pkcs11.tpm2_ptool", "--help"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if probe.returncode == 0:
-            return [python, "-m", "tpm2_pkcs11.tpm2_ptool"]
-    except (subprocess.TimeoutExpired, OSError):
-        pass
+    # Fall back to invoking the Python module directly.
+    # Try multiple Python paths: sys.executable may be a venv Python
+    # that doesn't have tpm2_pkcs11 installed (it's a system package).
+    python_candidates = []
+    if sys.executable:
+        python_candidates.append(sys.executable)
+    # Always try system Python paths — venv Python won't have tpm2_pkcs11
+    for sys_python in ["/usr/bin/python3", shutil.which("python3")]:
+        if sys_python and sys_python not in python_candidates:
+            python_candidates.append(sys_python)
+
+    for python in python_candidates:
+        try:
+            probe = subprocess.run(
+                [python, "-m", "tpm2_pkcs11.tpm2_ptool", "listprimaries"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if probe.returncode == 0:
+                logger.debug("    Using tpm2_ptool via: %s -m tpm2_pkcs11.tpm2_ptool", python)
+                return [python, "-m", "tpm2_pkcs11.tpm2_ptool"]
+        except (subprocess.TimeoutExpired, OSError):
+            pass
 
     raise RuntimeError(
         "tpm2_ptool is not working.\n"
