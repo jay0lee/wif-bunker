@@ -175,8 +175,29 @@ unsafe fn get_cert_pem_impl(
     cert_holder_len: c_int,
 ) -> Result<c_int, HardmtlsError> {
     let config = load_config(config_path)?;
-    let backend = select_backend(&config)?;
-    let cert_pem = backend.certificate_pem()?;
+
+    // Try the signing backend first (e.g., PKCS#11 can retrieve the cert).
+    // Fall back to reading from cert_configs.workload.cert_path on disk.
+    let cert_pem = if let Ok(backend) = select_backend(&config) {
+        backend.certificate_pem()?
+    } else {
+        // No signing backend — try reading the cert from the workload config.
+        let cert_path = config
+            .cert_configs
+            .workload
+            .as_ref()
+            .map(|w| &w.cert_path)
+            .ok_or_else(|| {
+                HardmtlsError::CertificateError(
+                    "no backend available and no workload.cert_path configured".into(),
+                )
+            })?;
+        std::fs::read_to_string(cert_path).map_err(|e| {
+            HardmtlsError::CertificateError(format!(
+                "failed to read cert from {cert_path}: {e}"
+            ))
+        })?
+    };
     let cert_bytes = cert_pem.as_bytes();
 
     if cert_holder.is_null() {
