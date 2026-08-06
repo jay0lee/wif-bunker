@@ -46,29 +46,161 @@ point to the same `hardmtls` binary. Downstream apps (`gcloud`, `terraform`,
 any Google SDK) load it transparently via google-auth. Zero changes required
 in downstream consumers.
 
-### 100% Test Coverage from Day 1
+### Code Quality from Day 1
 
 > [!IMPORTANT]
-> Every module ships with tests. No code merges without 100% line
-> coverage. Tests are not a follow-up task — they are part of each
-> module's LoE estimate.
+> Every module ships with tests, docs, and clean lints. CI fails on
+> any violation. These are not follow-up tasks — they are part of
+> each module's LoE estimate.
 
-**Enforcement:**
-- `cargo-tarpaulin` or `cargo-llvm-cov` in CI, fail build below 100%
-- `#[cfg(test)]` module in every `.rs` file
-- Integration tests in `tests/` directory
+#### Formatting: `rustfmt`
+
+Zero-config, zero-debate formatting. CI rejects unformatted code.
+
+```toml
+# rustfmt.toml
+edition = "2021"
+max_width = 100
+use_field_init_shorthand = true
+```
+
+```bash
+# CI check (fails on diff)
+cargo fmt --all -- --check
+```
+
+#### Linting: `clippy`
+
+All warnings are errors. Pedantic lints enabled for Rustacean-grade code.
+
+```toml
+# Cargo.toml or .clippy.toml
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Selectively allow where justified (must have comment explaining why)
+module_name_repetitions = "allow"
+```
+
+```rust
+// lib.rs — project-wide lint configuration
+#![deny(clippy::all)]
+#![warn(clippy::pedantic)]
+#![deny(warnings)]
+```
+
+```bash
+# CI check (fails on any warning)
+cargo clippy --all-targets --all-features -- -D warnings
+```
+
+#### Documentation: `#![deny(missing_docs)]`
+
+Every public type, function, and module must have a doc comment.
+
+```rust
+// lib.rs
+#![deny(missing_docs)]
+#![deny(rustdoc::broken_intra_doc_links)]
+```
+
+```bash
+# CI check (catches broken doc links)
+cargo doc --no-deps --document-private-items 2>&1 | grep -i warning && exit 1
+```
+
+#### Unsafe Code Tracking
+
+FFI requires `unsafe` (OpenSSL, PKCS#11, NCrypt, Security.framework).
+Every `unsafe` block must have a `// SAFETY:` comment explaining the
+invariant. Blanket `#![allow(unsafe_code)]` is forbidden — each usage
+is individually justified.
+
+```rust
+// lib.rs
+#![deny(unsafe_code)]  // Force explicit #[allow(unsafe_code)] per function
+
+// In FFI modules:
+#[allow(unsafe_code)]
+/// # Safety
+/// `ctx` must be a valid OpenSSL `SSL_CTX*` pointer from Python's ssl module.
+pub unsafe fn configure_ssl_context(ctx: *mut c_void) { ... }
+```
+
+#### Test Coverage: 100% Line Coverage
+
+CI fails if coverage drops below 100%.
+
+```bash
+# Coverage gate
+cargo llvm-cov --fail-under-lines 100
+
+# Or with tarpaulin
+cargo tarpaulin --fail-under 100
+```
+
+Platform-specific coverage: `win_ncrypt.rs` measured on Windows CI,
+`mac_se.rs` on macOS CI, `pkcs11.rs` on all three.
 
 **Mock strategy by backend:**
 
 | Backend | What to mock | How |
 |---|---|---|
-| `pkcs11.rs` | PKCS#11 module (`C_Sign`, `C_Login`, etc.) | Mock `dlopen` → in-memory function table that returns known signatures |
-| `win_ncrypt.rs` | `ncrypt.dll` (`NCryptSignHash`, `NCryptOpenKey`) | Conditional compilation: `#[cfg(test)]` replaces FFI calls with mock |
+| `pkcs11.rs` | PKCS#11 module (`C_Sign`, `C_Login`, etc.) | Mock `dlopen` → in-memory function table returning known signatures |
+| `win_ncrypt.rs` | `ncrypt.dll` (`NCryptSignHash`, `NCryptOpenKey`) | `#[cfg(test)]` replaces FFI calls with mock |
 | `mac_se.rs` | Security.framework (`SecKeyCreateSignature`) | Same conditional compilation pattern |
-| `ssl_ctx.rs` | OpenSSL `SSL_CTX*` | Create real `SSL_CTX` via `openssl-sys` in test, verify cert/key attached |
+| `ssl_ctx.rs` | OpenSSL `SSL_CTX*` | Create real `SSL_CTX` via `openssl-sys`, verify cert/key attached |
 | `config.rs` | Filesystem | `tempfile` crate, write JSON to temp dir |
 | `lib.rs` | Full C API | `#[test]` calls exported functions with mock backends |
 | `dispatch.rs` | Backend selection | Unit test each config variant → correct backend type |
+
+#### Dependency Auditing: `cargo-deny`
+
+Block known-vulnerable and unwanted-license dependencies.
+
+```toml
+# deny.toml
+[advisories]
+vulnerability = "deny"
+unmaintained = "warn"
+
+[licenses]
+allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC"]
+```
+
+```bash
+# CI check
+cargo deny check advisories licenses
+```
+
+#### CI Pipeline Summary
+
+Every PR runs all of these. All must pass to merge.
+
+```yaml
+# .github/workflows/ci.yml (conceptual)
+jobs:
+  check:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - cargo fmt --all -- --check
+      - cargo clippy --all-targets -- -D warnings
+      - cargo test
+      - cargo llvm-cov --fail-under-lines 100
+      - cargo doc --no-deps
+      - cargo deny check advisories licenses
+```
+
+| Gate | Tool | Failure = |
+|---|---|---|
+| Formatting | `cargo fmt --check` | PR blocked |
+| Linting | `cargo clippy -D warnings` | PR blocked |
+| Tests | `cargo test` | PR blocked |
+| Coverage | `cargo llvm-cov --fail-under-lines 100` | PR blocked |
+| Docs | `#![deny(missing_docs)]` | Compile error |
+| Unsafe | `#![deny(unsafe_code)]` + per-fn `#[allow]` | Compile error without `// SAFETY:` |
+| Dependencies | `cargo deny check` | PR blocked |
 
 ---
 
