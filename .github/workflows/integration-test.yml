@@ -135,6 +135,16 @@ jobs:
                 --project="$PROJECT_ID" \
                 --display-name="CI Runner ${RUNNER_ID}"
 
+              # Wait for SA to propagate before adding IAM bindings
+              echo "  Waiting for SA propagation..."
+              for i in $(seq 1 30); do
+                if gcloud iam service-accounts describe "$SA_EMAIL" --project="$PROJECT_ID" &>/dev/null; then
+                  echo "  SA visible after ${i}s"
+                  break
+                fi
+                sleep 1
+              done
+
               # SA is owner of its own project
               gcloud projects add-iam-policy-binding "$PROJECT_ID" \
                 --member="serviceAccount:${SA_EMAIL}" \
