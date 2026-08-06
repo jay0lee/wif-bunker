@@ -25,7 +25,7 @@ openssl = "0.10"
 openssl-sys = "0.9"
 
 # PKCS#11 FFI (cross-platform: Linux, macOS, Windows)
-cryptoki = "0.7"
+cryptoki = "0.7.0"
 
 # Error handling
 thiserror = "2"
