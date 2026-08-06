@@ -382,12 +382,19 @@ def _main_impl() -> None:
         logger.info("=== 3) Generating Hardware-Backed Certificate ===")
         cert_bundle = generate_os_keystore_cert(config)
 
-        # On Windows + YubiKey: verify the cert is visible in the Windows
-        # Certificate Store (via the Smart Card Minidriver).  If it's not,
-        # ECP won't be able to use it for mTLS and all subsequent steps
-        # would be wasted.
+        # On Windows + YubiKey: the Smart Card Minidriver needs a fresh
+        # card insertion to discover the new cert.  Prompt the user to
+        # re-insert, then verify it appears in the Windows cert store.
         if sys.platform == "win32" and config.use_yubikey:
             import subprocess as _sp
+            import time as _time
+            logger.info("")
+            logger.info("    Windows requires a YubiKey re-insertion for the Smart Card")
+            logger.info("    Minidriver to discover the new certificate.")
+            input("    Please REMOVE and RE-INSERT the YubiKey, then press Enter...")
+            _time.sleep(2)  # Give Windows time to enumerate the card
+            _sp.run(["certutil", "-pulse"], capture_output=True, timeout=10)
+
             _check = _sp.run(
                 ["powershell", "-Command",
                  "Get-ChildItem Cert:\\CurrentUser\\My"
@@ -396,10 +403,9 @@ def _main_impl() -> None:
             )
             if not _check.stdout.strip():
                 logger.error(
-                    "❌ YubiKey certificate was generated, but it is NOT visible\n"
-                    "   in the Windows Certificate Store.\n\n"
-                    "   The YubiKey Smart Card Minidriver is required for ECP\n"
-                    "   to access YubiKey certificates on Windows.\n\n"
+                    "❌ YubiKey certificate is NOT visible in the Windows\n"
+                    "   Certificate Store after re-insertion.\n\n"
+                    "   The YubiKey Smart Card Minidriver may not be installed.\n\n"
                     "   Install it:\n"
                     "     1. Download from:\n"
                     "        https://www.yubico.com/support/download/smart-card-drivers-tools/\n"
@@ -407,6 +413,7 @@ def _main_impl() -> None:
                     "     3. Re-run wif-bunker\n"
                 )
                 raise SystemExit(1)
+            logger.info("    ✓ Certificate visible in Windows Certificate Store")
 
         # --- Step 4: SA + WIF Creation (or reuse) ---
         use_sa = not args.no_service_account

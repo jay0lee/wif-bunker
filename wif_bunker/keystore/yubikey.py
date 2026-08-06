@@ -100,6 +100,7 @@ def generate_cert_yubikey(config: WorkloadConfig) -> CertificateBundle:
         DEFAULT_MANAGEMENT_KEY,
         KEY_TYPE,
         MANAGEMENT_KEY_TYPE,
+        OBJECT_ID,
         PIN_POLICY,
         SLOT,
         TOUCH_POLICY,
@@ -237,9 +238,16 @@ def generate_cert_yubikey(config: WorkloadConfig) -> CertificateBundle:
         cert_obj = cx509.load_pem_x509_certificate(workload_pem.encode("utf-8"))
         piv.put_certificate(slot, cert_obj)
 
+        # 9. Generate CHUID and CCC — required for the Windows Smart Card
+        #    Minidriver to discover PIV keys and propagate certificates to
+        #    the Windows Certificate Store.
+        from ykman.piv import generate_chuid, generate_ccc
+        piv.put_object(OBJECT_ID.CHUID, generate_chuid())
+        piv.put_object(OBJECT_ID.CAPABILITY, generate_ccc())
+
         logger.info("Successfully imported CA-signed certificate into YubiKey.")
 
-        # 9. Return CertificateBundle
+        # 10. Return CertificateBundle
         return bundle
 
 
