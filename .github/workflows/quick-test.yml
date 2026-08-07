@@ -191,6 +191,16 @@ jobs:
         with:
           arch: ${{ runner.arch }}
 
+      - name: "Windows: Hide Git link.exe (shadows MSVC)"
+        if: needs.config.outputs.install_wif_bunker == 'true' && runner.os == 'Windows'
+        shell: bash
+        run: |
+          GIT_LINK="/c/Program Files/Git/usr/bin/link.exe"
+          if [ -f "$GIT_LINK" ]; then
+            mv "$GIT_LINK" "${GIT_LINK}.bak"
+            echo "Renamed Git link.exe to avoid MSVC collision"
+          fi
+
       - name: "Build hardmTLS"
         if: needs.config.outputs.install_wif_bunker == 'true'
         shell: bash
