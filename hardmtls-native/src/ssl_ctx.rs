@@ -16,7 +16,7 @@
 //! When OpenSSL performs a TLS handshake, it routes signing through our
 //! provider, which calls the `sign_func` callback.
 
-use std::ffi::{c_char, c_void, CStr};
+use std::ffi::{c_char, c_int, c_void, CStr};
 
 use foreign_types_shared::ForeignType;
 
@@ -84,22 +84,41 @@ pub unsafe fn configure_ssl_context(
         ));
     }
 
-    // ── Detect the cert's public key type ──────────────────────────────
+    // ── Detect the cert's public key type and compute metadata ─────────
     let pub_key = x509
         .public_key()
         .map_err(|e| HardmtlsError::SslError(format!("failed to get public key: {e}")))?;
-    let key_type_name = if pub_key.rsa().is_ok() {
-        c"RSA"
-    } else if pub_key.ec_key().is_ok() {
-        c"EC"
+
+    let (key_type_name, key_bits, security_bits, max_sig_size) = if let Ok(rsa) = pub_key.rsa() {
+        let bits = rsa.size() as c_int * 8; // RSA::size() returns bytes
+        let sec_bits = rsa_security_bits(bits);
+        let max_size = rsa.size() as c_int; // signature = modulus size in bytes
+        (c"RSA", bits, sec_bits, max_size)
+    } else if let Ok(ec) = pub_key.ec_key() {
+        let nid = ec
+            .group()
+            .curve_name()
+            .ok_or_else(|| HardmtlsError::SslError("EC key has no named curve".into()))?;
+        let (bits, sec_bits, max_size) = ec_key_metadata(nid)?;
+        (c"EC", bits, sec_bits, max_size)
     } else {
         return Err(HardmtlsError::SslError(
             "unsupported key type in certificate".into(),
         ));
     };
 
+    log::info!(
+        "hardmTLS: key metadata: type={}, bits={}, security_bits={}, max_sig_size={}",
+        key_type_name.to_str().unwrap_or("?"),
+        key_bits,
+        security_bits,
+        max_sig_size
+    );
+
     // ── Create custom EVP_PKEY via our provider ────────────────────────
-    let pkey = unsafe { create_provider_pkey(sign_func, key_type_name) }?;
+    let pkey = unsafe {
+        create_provider_pkey(sign_func, key_type_name, key_bits, security_bits, max_sig_size)
+    }?;
 
     // SAFETY: ssl_ctx and pkey are valid.
     let rc = unsafe { openssl_sys::SSL_CTX_use_PrivateKey(ssl_ctx, pkey) };
@@ -119,9 +138,41 @@ pub unsafe fn configure_ssl_context(
     Ok(())
 }
 
+/// Compute security bits for an RSA key based on NIST SP800-57 Table 2.
+fn rsa_security_bits(key_bits: c_int) -> c_int {
+    match key_bits {
+        n if n >= 15360 => 256,
+        n if n >= 7680 => 192,
+        n if n >= 3072 => 128,
+        n if n >= 2048 => 112,
+        n if n >= 1024 => 80,
+        _ => 0,
+    }
+}
+
+/// Get key metadata (bits, security_bits, max_sig_size) for an EC key by curve NID.
+fn ec_key_metadata(
+    nid: openssl::nid::Nid,
+) -> Result<(c_int, c_int, c_int), HardmtlsError> {
+    use openssl::nid::Nid;
+
+    // max_sig_size for ECDSA = 2 * (key_bytes + 1) + 6 (DER overhead)
+    // This is a conservative upper bound matching OpenSSL's internal calculation.
+    match nid {
+        Nid::X9_62_PRIME256V1 => Ok((256, 128, 72)),    // P-256
+        Nid::SECP384R1 => Ok((384, 192, 104)),           // P-384
+        Nid::SECP521R1 => Ok((521, 256, 141)),           // P-521
+        _ => Err(HardmtlsError::SslError(format!(
+            "unsupported EC curve NID: {:?}",
+            nid
+        ))),
+    }
+}
+
 /// Create an `EVP_PKEY` backed by our hardmTLS provider.
 ///
-/// The key stores `sign_func` as its internal signing callback.
+/// The key stores `sign_func` as its internal signing callback, along with
+/// key metadata that OpenSSL queries via `EVP_PKEY_get_size()` etc.
 ///
 /// # Safety
 ///
@@ -130,8 +181,14 @@ pub unsafe fn configure_ssl_context(
 unsafe fn create_provider_pkey(
     sign_func: SignCallback,
     key_type: &std::ffi::CStr,
+    key_bits: c_int,
+    security_bits: c_int,
+    max_sig_size: c_int,
 ) -> Result<*mut openssl_sys::EVP_PKEY, HardmtlsError> {
-    use crate::provider_ffi::{HARDMTLS_PARAM_SIGN_FUNC, OSSL_PARAM_OCTET_STRING};
+    use crate::provider_ffi::{
+        HARDMTLS_PARAM_KEY_BITS, HARDMTLS_PARAM_MAX_SIZE, HARDMTLS_PARAM_SECURITY_BITS,
+        HARDMTLS_PARAM_SIGN_FUNC, OSSL_PARAM_INTEGER, OSSL_PARAM_OCTET_STRING,
+    };
 
     // Step 1: Create EVP_PKEY_CTX targeting our provider's keymgmt.
     let pkey_ctx = unsafe {
@@ -157,15 +214,39 @@ unsafe fn create_provider_pkey(
         ));
     }
 
-    // Step 3: Build OSSL_PARAM array with our sign_func pointer.
-    // We pass the raw bytes of the function pointer as an octet string.
+    // Step 3: Build OSSL_PARAM array with sign_func + key metadata.
     let mut sign_func_bytes = sign_func;
-    let params: [openssl_sys::OSSL_PARAM; 2] = [
+    let mut key_bits_val = key_bits;
+    let mut security_bits_val = security_bits;
+    let mut max_sig_size_val = max_sig_size;
+
+    let params: [openssl_sys::OSSL_PARAM; 5] = [
         openssl_sys::OSSL_PARAM {
             key: HARDMTLS_PARAM_SIGN_FUNC.as_ptr(),
             data_type: OSSL_PARAM_OCTET_STRING,
             data: std::ptr::addr_of_mut!(sign_func_bytes).cast::<std::ffi::c_void>(),
             data_size: std::mem::size_of::<SignCallback>(),
+            return_size: 0,
+        },
+        openssl_sys::OSSL_PARAM {
+            key: HARDMTLS_PARAM_KEY_BITS.as_ptr(),
+            data_type: OSSL_PARAM_INTEGER,
+            data: std::ptr::addr_of_mut!(key_bits_val).cast::<std::ffi::c_void>(),
+            data_size: std::mem::size_of::<c_int>(),
+            return_size: 0,
+        },
+        openssl_sys::OSSL_PARAM {
+            key: HARDMTLS_PARAM_SECURITY_BITS.as_ptr(),
+            data_type: OSSL_PARAM_INTEGER,
+            data: std::ptr::addr_of_mut!(security_bits_val).cast::<std::ffi::c_void>(),
+            data_size: std::mem::size_of::<c_int>(),
+            return_size: 0,
+        },
+        openssl_sys::OSSL_PARAM {
+            key: HARDMTLS_PARAM_MAX_SIZE.as_ptr(),
+            data_type: OSSL_PARAM_INTEGER,
+            data: std::ptr::addr_of_mut!(max_sig_size_val).cast::<std::ffi::c_void>(),
+            data_size: std::mem::size_of::<c_int>(),
             return_size: 0,
         },
         // Sentinel.
@@ -360,7 +441,7 @@ mod tests {
 
         // Create a custom EVP_PKEY.
         #[allow(unsafe_code)]
-        let result = unsafe { super::create_provider_pkey(dummy_sign, c"RSA") };
+        let result = unsafe { super::create_provider_pkey(dummy_sign, c"RSA", 2048, 112, 256) };
 
         assert!(result.is_ok(), "create_provider_pkey failed: {result:?}");
 
