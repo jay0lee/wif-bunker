@@ -30,16 +30,17 @@ use crate::provider_ffi::{
     OSSL_FUNC_KEYMGMT_HAS, OSSL_FUNC_KEYMGMT_IMPORT, OSSL_FUNC_KEYMGMT_IMPORT_TYPES,
     OSSL_FUNC_KEYMGMT_MATCH, OSSL_FUNC_KEYMGMT_NEW, OSSL_FUNC_KEYMGMT_SET_PARAMS,
     OSSL_FUNC_KEYMGMT_SETTABLE_PARAMS, OSSL_FUNC_KEYMGMT_VALIDATE,
+    OSSL_FUNC_KEYMGMT_QUERY_OPERATION_NAME,
     // SIGNATURE function IDs
     OSSL_FUNC_SIGNATURE_DIGEST_SIGN, OSSL_FUNC_SIGNATURE_DIGEST_SIGN_FINAL,
     OSSL_FUNC_SIGNATURE_DIGEST_SIGN_INIT, OSSL_FUNC_SIGNATURE_DIGEST_SIGN_UPDATE,
-    OSSL_FUNC_SIGNATURE_DIGEST_VERIFY, OSSL_FUNC_SIGNATURE_DIGEST_VERIFY_FINAL,
+    OSSL_FUNC_SIGNATURE_DIGEST_VERIFY_FINAL,
     OSSL_FUNC_SIGNATURE_DIGEST_VERIFY_INIT, OSSL_FUNC_SIGNATURE_DIGEST_VERIFY_UPDATE,
     OSSL_FUNC_SIGNATURE_DUPCTX, OSSL_FUNC_SIGNATURE_FREECTX,
-    OSSL_FUNC_SIGNATURE_GET_CTX_MD_PARAMS, OSSL_FUNC_SIGNATURE_GET_CTX_PARAMS,
-    OSSL_FUNC_SIGNATURE_GETTABLE_CTX_MD_PARAMS, OSSL_FUNC_SIGNATURE_GETTABLE_CTX_PARAMS,
-    OSSL_FUNC_SIGNATURE_NEWCTX, OSSL_FUNC_SIGNATURE_SET_CTX_MD_PARAMS,
-    OSSL_FUNC_SIGNATURE_SET_CTX_PARAMS, OSSL_FUNC_SIGNATURE_SETTABLE_CTX_MD_PARAMS,
+    OSSL_FUNC_SIGNATURE_GET_CTX_PARAMS,
+    OSSL_FUNC_SIGNATURE_GETTABLE_CTX_PARAMS,
+    OSSL_FUNC_SIGNATURE_NEWCTX,
+    OSSL_FUNC_SIGNATURE_SET_CTX_PARAMS,
     OSSL_FUNC_SIGNATURE_SETTABLE_CTX_PARAMS, OSSL_FUNC_SIGNATURE_SIGN,
     OSSL_FUNC_SIGNATURE_SIGN_INIT,
     // Operation IDs
@@ -70,11 +71,8 @@ const KEYMGMT_PROPS: &std::ffi::CStr = c"provider=hardmtls,hardmtls.sign=yes";
 
 /// Property definition for SIGNATURE algorithms.
 ///
-/// Uses only `provider=hardmtls` (no custom properties) so the TLS stack
-/// can discover our SIGNATURE via its default NULL property query during
-/// the CertificateVerify handshake. With `hardmtls.sign=yes`, OpenSSL's
-/// default lookup skipped our SIGNATURE entirely, causing "No client cert
-/// found in mTLS handshake" errors.
+/// Matches the pattern used by reference providers (tpm2-openssl, pkcs11-provider).
+/// Both use `"provider=<name>"` to scope their SIGNATURE algorithms.
 const SIGNATURE_PROPS: &std::ffi::CStr = c"provider=hardmtls";
 
 // ── Key data (stored inside EVP_PKEY via KEYMGMT) ──────────────────────
@@ -94,6 +92,10 @@ struct HardmtlsKey {
     security_bits: c_int,
     /// Maximum signature size in bytes (e.g., 256 for RSA-2048, 72 for P-256).
     max_sig_size: c_int,
+    /// EC group (curve) name, e.g., "prime256v1". Empty for RSA keys.
+    /// Required by the TLS stack to match against signature algorithms
+    /// like `ecdsa_secp256r1_sha256`.
+    group_name: Vec<u8>,
 }
 
 // ── Signing context (stored by SIGNATURE operations) ───────────────────
@@ -120,6 +122,7 @@ extern "C" fn keymgmt_new(_provctx: *mut c_void) -> *mut c_void {
         key_bits: 0,
         security_bits: 0,
         max_sig_size: 0,
+        group_name: Vec::new(),
     });
     Box::into_raw(key).cast::<c_void>()
 }
@@ -187,12 +190,13 @@ extern "C" fn keymgmt_import(
 #[allow(unsafe_code)]
 extern "C" fn keymgmt_import_types(_selection: c_int) -> *const openssl_sys::OSSL_PARAM {
     use crate::provider_ffi::{
-        HARDMTLS_PARAM_KEY_BITS, HARDMTLS_PARAM_MAX_SIZE, HARDMTLS_PARAM_SECURITY_BITS,
-        HARDMTLS_PARAM_SIGN_FUNC, OSSL_PARAM_INTEGER, OSSL_PARAM_OCTET_STRING,
+        HARDMTLS_PARAM_GROUP_NAME, HARDMTLS_PARAM_KEY_BITS, HARDMTLS_PARAM_MAX_SIZE,
+        HARDMTLS_PARAM_SECURITY_BITS, HARDMTLS_PARAM_SIGN_FUNC, OSSL_PARAM_INTEGER,
+        OSSL_PARAM_OCTET_STRING, OSSL_PARAM_UTF8_STRING,
     };
 
     /// Wrapper to allow `OSSL_PARAM` array in a static.
-    struct SyncParams([openssl_sys::OSSL_PARAM; 5]);
+    struct SyncParams([openssl_sys::OSSL_PARAM; 6]);
 
     // SAFETY: OSSL_PARAM contains raw pointers that point to static data
     // (CStr literals and null). These are immutable and valid for 'static.
@@ -226,6 +230,13 @@ extern "C" fn keymgmt_import_types(_selection: c_int) -> *const openssl_sys::OSS
             data_type: OSSL_PARAM_INTEGER,
             data: std::ptr::null_mut(),
             data_size: std::mem::size_of::<c_int>(),
+            return_size: 0,
+        },
+        openssl_sys::OSSL_PARAM {
+            key: HARDMTLS_PARAM_GROUP_NAME.as_ptr(),
+            data_type: OSSL_PARAM_UTF8_STRING,
+            data: std::ptr::null_mut(),
+            data_size: 0,
             return_size: 0,
         },
         // Sentinel.
@@ -266,8 +277,8 @@ extern "C" fn keymgmt_get_params(
     params: *mut openssl_sys::OSSL_PARAM,
 ) -> c_int {
     use crate::provider_ffi::{
-        OSSL_PARAM_INTEGER, OSSL_PKEY_PARAM_BITS, OSSL_PKEY_PARAM_MAX_SIZE,
-        OSSL_PKEY_PARAM_SECURITY_BITS,
+        OSSL_PARAM_INTEGER, OSSL_PARAM_UTF8_STRING, OSSL_PKEY_PARAM_BITS,
+        OSSL_PKEY_PARAM_GROUP_NAME, OSSL_PKEY_PARAM_MAX_SIZE, OSSL_PKEY_PARAM_SECURITY_BITS,
     };
 
     if keydata.is_null() || params.is_null() {
@@ -297,6 +308,23 @@ extern "C" fn keymgmt_get_params(
             } else if key_bytes == OSSL_PKEY_PARAM_SECURITY_BITS.to_bytes() {
                 unsafe { write_int_param(param, key.security_bits) };
             }
+        } else if param.data_type == OSSL_PARAM_UTF8_STRING {
+            if key_bytes == OSSL_PKEY_PARAM_GROUP_NAME.to_bytes() && !key.group_name.is_empty() {
+                // Write group name as a null-terminated UTF-8 string.
+                let src = &key.group_name;
+                param.return_size = src.len();
+                if !param.data.is_null() && param.data_size > src.len() {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            src.as_ptr(),
+                            param.data.cast::<u8>(),
+                            src.len(),
+                        );
+                        // Null-terminate.
+                        *param.data.cast::<u8>().add(src.len()) = 0;
+                    }
+                }
+            }
         }
 
         i += 1;
@@ -309,11 +337,11 @@ extern "C" fn keymgmt_get_params(
 #[allow(unsafe_code)]
 extern "C" fn keymgmt_gettable_params(_provctx: *mut c_void) -> *const openssl_sys::OSSL_PARAM {
     use crate::provider_ffi::{
-        OSSL_PARAM_INTEGER, OSSL_PKEY_PARAM_BITS, OSSL_PKEY_PARAM_MAX_SIZE,
-        OSSL_PKEY_PARAM_SECURITY_BITS,
+        OSSL_PARAM_INTEGER, OSSL_PARAM_UTF8_STRING, OSSL_PKEY_PARAM_BITS,
+        OSSL_PKEY_PARAM_GROUP_NAME, OSSL_PKEY_PARAM_MAX_SIZE, OSSL_PKEY_PARAM_SECURITY_BITS,
     };
 
-    struct SyncParams([openssl_sys::OSSL_PARAM; 4]);
+    struct SyncParams([openssl_sys::OSSL_PARAM; 5]);
 
     #[allow(unsafe_code)]
     unsafe impl Sync for SyncParams {}
@@ -338,6 +366,13 @@ extern "C" fn keymgmt_gettable_params(_provctx: *mut c_void) -> *const openssl_s
             data_type: OSSL_PARAM_INTEGER,
             data: std::ptr::null_mut(),
             data_size: std::mem::size_of::<c_int>(),
+            return_size: 0,
+        },
+        openssl_sys::OSSL_PARAM {
+            key: OSSL_PKEY_PARAM_GROUP_NAME.as_ptr(),
+            data_type: OSSL_PARAM_UTF8_STRING,
+            data: std::ptr::null_mut(),
+            data_size: 0,
             return_size: 0,
         },
         // Sentinel.
@@ -370,6 +405,27 @@ extern "C" fn keymgmt_settable_params(_provctx: *mut c_void) -> *const openssl_s
 
 /// Validate a key (always valid — proxy key).
 #[allow(unsafe_code)]
+/// Query which signature algorithm an EC key type prefers.
+#[allow(unsafe_code)]
+extern "C" fn ec_keymgmt_query_operation_name(operation_id: c_int) -> *const c_char {
+    if operation_id == OSSL_OP_SIGNATURE {
+        c"ECDSA".as_ptr()
+    } else {
+        ptr::null()
+    }
+}
+
+/// Query which signature algorithm an RSA key type prefers.
+#[allow(unsafe_code)]
+extern "C" fn rsa_keymgmt_query_operation_name(operation_id: c_int) -> *const c_char {
+    if operation_id == OSSL_OP_SIGNATURE {
+        c"RSA".as_ptr()
+    } else {
+        ptr::null()
+    }
+}
+
+/// Validate key consistency.
 extern "C" fn keymgmt_validate(
     _keydata: *const c_void,
     _selection: c_int,
@@ -426,6 +482,7 @@ extern "C" fn keymgmt_dup(
         key_bits: src.key_bits,
         security_bits: src.security_bits,
         max_sig_size: src.max_sig_size,
+        group_name: src.group_name.clone(),
     });
     Box::into_raw(dup).cast::<c_void>()
 }
@@ -489,8 +546,8 @@ unsafe fn extract_key_metadata_from_params(
     key: &mut HardmtlsKey,
 ) {
     use crate::provider_ffi::{
-        HARDMTLS_PARAM_KEY_BITS, HARDMTLS_PARAM_MAX_SIZE, HARDMTLS_PARAM_SECURITY_BITS,
-        OSSL_PARAM_INTEGER,
+        HARDMTLS_PARAM_GROUP_NAME, HARDMTLS_PARAM_KEY_BITS, HARDMTLS_PARAM_MAX_SIZE,
+        HARDMTLS_PARAM_SECURITY_BITS, OSSL_PARAM_INTEGER, OSSL_PARAM_UTF8_STRING,
     };
 
     let mut i = 0;
@@ -509,6 +566,16 @@ unsafe fn extract_key_metadata_from_params(
                 key.security_bits = unsafe { read_int_param(param) };
             } else if key_bytes == HARDMTLS_PARAM_MAX_SIZE.to_bytes() {
                 key.max_sig_size = unsafe { read_int_param(param) };
+            }
+        } else if param.data_type == OSSL_PARAM_UTF8_STRING && !param.data.is_null() {
+            if key_bytes == HARDMTLS_PARAM_GROUP_NAME.to_bytes() {
+                // Read the group name as a UTF-8 string (null-terminated).
+                let cstr = unsafe { std::ffi::CStr::from_ptr(param.data.cast::<c_char>()) };
+                key.group_name = cstr.to_bytes().to_vec();
+                log::debug!(
+                    "hardmTLS provider: imported group_name={:?}",
+                    cstr.to_str().unwrap_or("?")
+                );
             }
         }
 
@@ -562,6 +629,7 @@ fn empty_param_list() -> *const openssl_sys::OSSL_PARAM {
 /// Allocate a new signing context.
 #[allow(unsafe_code)]
 extern "C" fn signature_newctx(_provctx: *mut c_void, _propq: *const c_char) -> *mut c_void {
+    eprintln!(">>> SIGNATURE_NEWCTX CALLED <<<");
     log::debug!("hardmTLS provider: signature_newctx called");
     let ctx = Box::new(HardmtlsSignCtx {
         key: ptr::null(),
@@ -849,18 +917,6 @@ extern "C" fn signature_digest_verify_final(
     0
 }
 
-/// One-shot digest+verify (stub).
-#[allow(unsafe_code)]
-extern "C" fn signature_digest_verify(
-    _ctx: *mut c_void,
-    _sig: *const c_uchar,
-    _siglen: usize,
-    _tbs: *const c_uchar,
-    _tbslen: usize,
-) -> c_int {
-    0
-}
-
 // ── Signature context parameter functions ──────────────────────────────
 
 /// Get signature context parameters (no-op).
@@ -900,42 +956,6 @@ extern "C" fn signature_settable_ctx_params(
     empty_param_list()
 }
 
-// ── Signature MD context parameter functions ───────────────────────────
-
-/// Get digest context parameters (no-op).
-#[allow(unsafe_code)]
-extern "C" fn signature_get_ctx_md_params(
-    _ctx: *mut c_void,
-    _params: *mut openssl_sys::OSSL_PARAM,
-) -> c_int {
-    1
-}
-
-/// Declare gettable digest context parameters (empty).
-#[allow(unsafe_code)]
-extern "C" fn signature_gettable_ctx_md_params(
-    _ctx: *const c_void,
-) -> *const openssl_sys::OSSL_PARAM {
-    empty_param_list()
-}
-
-/// Set digest context parameters (no-op).
-#[allow(unsafe_code)]
-extern "C" fn signature_set_ctx_md_params(
-    _ctx: *mut c_void,
-    _params: *const openssl_sys::OSSL_PARAM,
-) -> c_int {
-    1
-}
-
-/// Declare settable digest context parameters (empty).
-#[allow(unsafe_code)]
-extern "C" fn signature_settable_ctx_md_params(
-    _ctx: *const c_void,
-) -> *const openssl_sys::OSSL_PARAM {
-    empty_param_list()
-}
-
 // ═══════════════════════════════════════════════════════════════════════
 // Dispatch tables
 // ═══════════════════════════════════════════════════════════════════════
@@ -956,9 +976,9 @@ macro_rules! dispatch_entry {
     };
 }
 
-/// KEYMGMT dispatch table — 14 functions + sentinel.
+/// RSA KEYMGMT dispatch table — 15 functions + sentinel.
 #[allow(unsafe_code)]
-static KEYMGMT_DISPATCH: [OsslDispatch; 15] = [
+static RSA_KEYMGMT_DISPATCH: [OsslDispatch; 16] = [
     dispatch_entry!(OSSL_FUNC_KEYMGMT_NEW, keymgmt_new,
         extern "C" fn(*mut c_void) -> *mut c_void),
     dispatch_entry!(OSSL_FUNC_KEYMGMT_FREE, keymgmt_free,
@@ -987,12 +1007,51 @@ static KEYMGMT_DISPATCH: [OsslDispatch; 15] = [
         extern "C" fn(c_int) -> *const openssl_sys::OSSL_PARAM),
     dispatch_entry!(OSSL_FUNC_KEYMGMT_DUP, keymgmt_dup,
         extern "C" fn(*const c_void, c_int) -> *mut c_void),
+    dispatch_entry!(OSSL_FUNC_KEYMGMT_QUERY_OPERATION_NAME, rsa_keymgmt_query_operation_name,
+        extern "C" fn(c_int) -> *const c_char),
     OsslDispatch::end(),
 ];
 
-/// SIGNATURE dispatch table — 21 functions + sentinel.
+/// EC KEYMGMT dispatch table — 15 functions + sentinel.
 #[allow(unsafe_code)]
-static SIGNATURE_DISPATCH: [OsslDispatch; 22] = [
+static EC_KEYMGMT_DISPATCH: [OsslDispatch; 16] = [
+    dispatch_entry!(OSSL_FUNC_KEYMGMT_NEW, keymgmt_new,
+        extern "C" fn(*mut c_void) -> *mut c_void),
+    dispatch_entry!(OSSL_FUNC_KEYMGMT_FREE, keymgmt_free,
+        extern "C" fn(*mut c_void)),
+    dispatch_entry!(OSSL_FUNC_KEYMGMT_HAS, keymgmt_has,
+        extern "C" fn(*const c_void, c_int) -> c_int),
+    dispatch_entry!(OSSL_FUNC_KEYMGMT_IMPORT, keymgmt_import,
+        extern "C" fn(*mut c_void, c_int, *const openssl_sys::OSSL_PARAM) -> c_int),
+    dispatch_entry!(OSSL_FUNC_KEYMGMT_IMPORT_TYPES, keymgmt_import_types,
+        extern "C" fn(c_int) -> *const openssl_sys::OSSL_PARAM),
+    dispatch_entry!(OSSL_FUNC_KEYMGMT_MATCH, keymgmt_match,
+        extern "C" fn(*const c_void, *const c_void, c_int) -> c_int),
+    dispatch_entry!(OSSL_FUNC_KEYMGMT_GET_PARAMS, keymgmt_get_params,
+        extern "C" fn(*const c_void, *mut openssl_sys::OSSL_PARAM) -> c_int),
+    dispatch_entry!(OSSL_FUNC_KEYMGMT_GETTABLE_PARAMS, keymgmt_gettable_params,
+        extern "C" fn(*mut c_void) -> *const openssl_sys::OSSL_PARAM),
+    dispatch_entry!(OSSL_FUNC_KEYMGMT_SET_PARAMS, keymgmt_set_params,
+        extern "C" fn(*mut c_void, *const openssl_sys::OSSL_PARAM) -> c_int),
+    dispatch_entry!(OSSL_FUNC_KEYMGMT_SETTABLE_PARAMS, keymgmt_settable_params,
+        extern "C" fn(*mut c_void) -> *const openssl_sys::OSSL_PARAM),
+    dispatch_entry!(OSSL_FUNC_KEYMGMT_VALIDATE, keymgmt_validate,
+        extern "C" fn(*const c_void, c_int, c_int) -> c_int),
+    dispatch_entry!(OSSL_FUNC_KEYMGMT_EXPORT, keymgmt_export,
+        extern "C" fn(*const c_void, c_int, Option<unsafe extern "C" fn(*const openssl_sys::OSSL_PARAM, *mut c_void) -> c_int>, *mut c_void) -> c_int),
+    dispatch_entry!(OSSL_FUNC_KEYMGMT_EXPORT_TYPES, keymgmt_export_types,
+        extern "C" fn(c_int) -> *const openssl_sys::OSSL_PARAM),
+    dispatch_entry!(OSSL_FUNC_KEYMGMT_DUP, keymgmt_dup,
+        extern "C" fn(*const c_void, c_int) -> *mut c_void),
+    dispatch_entry!(OSSL_FUNC_KEYMGMT_QUERY_OPERATION_NAME, ec_keymgmt_query_operation_name,
+        extern "C" fn(c_int) -> *const c_char),
+    OsslDispatch::end(),
+];
+
+/// RSA SIGNATURE dispatch table — matches tpm2-openssl pattern.
+/// 16 functions + sentinel.
+#[allow(unsafe_code)]
+static RSA_SIGNATURE_DISPATCH: [OsslDispatch; 17] = [
     dispatch_entry!(OSSL_FUNC_SIGNATURE_NEWCTX, signature_newctx,
         extern "C" fn(*mut c_void, *const c_char) -> *mut c_void),
     dispatch_entry!(OSSL_FUNC_SIGNATURE_FREECTX, signature_freectx,
@@ -1017,8 +1076,6 @@ static SIGNATURE_DISPATCH: [OsslDispatch; 22] = [
         extern "C" fn(*mut c_void, *const c_uchar, usize) -> c_int),
     dispatch_entry!(OSSL_FUNC_SIGNATURE_DIGEST_VERIFY_FINAL, signature_digest_verify_final,
         extern "C" fn(*mut c_void, *const c_uchar, usize) -> c_int),
-    dispatch_entry!(OSSL_FUNC_SIGNATURE_DIGEST_VERIFY, signature_digest_verify,
-        extern "C" fn(*mut c_void, *const c_uchar, usize, *const c_uchar, usize) -> c_int),
     dispatch_entry!(OSSL_FUNC_SIGNATURE_GET_CTX_PARAMS, signature_get_ctx_params,
         extern "C" fn(*mut c_void, *mut openssl_sys::OSSL_PARAM) -> c_int),
     dispatch_entry!(OSSL_FUNC_SIGNATURE_GETTABLE_CTX_PARAMS, signature_gettable_ctx_params,
@@ -1027,14 +1084,45 @@ static SIGNATURE_DISPATCH: [OsslDispatch; 22] = [
         extern "C" fn(*mut c_void, *const openssl_sys::OSSL_PARAM) -> c_int),
     dispatch_entry!(OSSL_FUNC_SIGNATURE_SETTABLE_CTX_PARAMS, signature_settable_ctx_params,
         extern "C" fn(*const c_void, *const c_void) -> *const openssl_sys::OSSL_PARAM),
-    dispatch_entry!(OSSL_FUNC_SIGNATURE_GET_CTX_MD_PARAMS, signature_get_ctx_md_params,
+    OsslDispatch::end(),
+];
+
+/// ECDSA SIGNATURE dispatch table — matches tpm2-openssl pattern.
+/// 16 functions + sentinel.
+#[allow(unsafe_code)]
+static ECDSA_SIGNATURE_DISPATCH: [OsslDispatch; 17] = [
+    dispatch_entry!(OSSL_FUNC_SIGNATURE_NEWCTX, signature_newctx,
+        extern "C" fn(*mut c_void, *const c_char) -> *mut c_void),
+    dispatch_entry!(OSSL_FUNC_SIGNATURE_FREECTX, signature_freectx,
+        extern "C" fn(*mut c_void)),
+    dispatch_entry!(OSSL_FUNC_SIGNATURE_DUPCTX, signature_dupctx,
+        extern "C" fn(*mut c_void) -> *mut c_void),
+    dispatch_entry!(OSSL_FUNC_SIGNATURE_SIGN_INIT, signature_sign_init,
+        extern "C" fn(*mut c_void, *mut c_void, *const openssl_sys::OSSL_PARAM) -> c_int),
+    dispatch_entry!(OSSL_FUNC_SIGNATURE_SIGN, signature_sign,
+        extern "C" fn(*mut c_void, *mut c_uchar, *mut usize, usize, *const c_uchar, usize) -> c_int),
+    dispatch_entry!(OSSL_FUNC_SIGNATURE_DIGEST_SIGN_INIT, signature_digest_sign_init,
+        extern "C" fn(*mut c_void, *const c_char, *mut c_void, *const openssl_sys::OSSL_PARAM) -> c_int),
+    dispatch_entry!(OSSL_FUNC_SIGNATURE_DIGEST_SIGN_UPDATE, signature_digest_sign_update,
+        extern "C" fn(*mut c_void, *const c_uchar, usize) -> c_int),
+    dispatch_entry!(OSSL_FUNC_SIGNATURE_DIGEST_SIGN_FINAL, signature_digest_sign_final,
+        extern "C" fn(*mut c_void, *mut c_uchar, *mut usize, usize) -> c_int),
+    dispatch_entry!(OSSL_FUNC_SIGNATURE_DIGEST_SIGN, signature_digest_sign,
+        extern "C" fn(*mut c_void, *mut c_uchar, *mut usize, usize, *const c_uchar, usize) -> c_int),
+    dispatch_entry!(OSSL_FUNC_SIGNATURE_DIGEST_VERIFY_INIT, signature_digest_verify_init,
+        extern "C" fn(*mut c_void, *const c_char, *mut c_void, *const openssl_sys::OSSL_PARAM) -> c_int),
+    dispatch_entry!(OSSL_FUNC_SIGNATURE_DIGEST_VERIFY_UPDATE, signature_digest_verify_update,
+        extern "C" fn(*mut c_void, *const c_uchar, usize) -> c_int),
+    dispatch_entry!(OSSL_FUNC_SIGNATURE_DIGEST_VERIFY_FINAL, signature_digest_verify_final,
+        extern "C" fn(*mut c_void, *const c_uchar, usize) -> c_int),
+    dispatch_entry!(OSSL_FUNC_SIGNATURE_GET_CTX_PARAMS, signature_get_ctx_params,
         extern "C" fn(*mut c_void, *mut openssl_sys::OSSL_PARAM) -> c_int),
-    dispatch_entry!(OSSL_FUNC_SIGNATURE_GETTABLE_CTX_MD_PARAMS, signature_gettable_ctx_md_params,
-        extern "C" fn(*const c_void) -> *const openssl_sys::OSSL_PARAM),
-    dispatch_entry!(OSSL_FUNC_SIGNATURE_SET_CTX_MD_PARAMS, signature_set_ctx_md_params,
+    dispatch_entry!(OSSL_FUNC_SIGNATURE_GETTABLE_CTX_PARAMS, signature_gettable_ctx_params,
+        extern "C" fn(*const c_void, *const c_void) -> *const openssl_sys::OSSL_PARAM),
+    dispatch_entry!(OSSL_FUNC_SIGNATURE_SET_CTX_PARAMS, signature_set_ctx_params,
         extern "C" fn(*mut c_void, *const openssl_sys::OSSL_PARAM) -> c_int),
-    dispatch_entry!(OSSL_FUNC_SIGNATURE_SETTABLE_CTX_MD_PARAMS, signature_settable_ctx_md_params,
-        extern "C" fn(*const c_void) -> *const openssl_sys::OSSL_PARAM),
+    dispatch_entry!(OSSL_FUNC_SIGNATURE_SETTABLE_CTX_PARAMS, signature_settable_ctx_params,
+        extern "C" fn(*const c_void, *const c_void) -> *const openssl_sys::OSSL_PARAM),
     OsslDispatch::end(),
 ];
 
@@ -1047,19 +1135,22 @@ static KEYMGMT_ALGORITHMS: [OsslAlgorithm; 3] = [
     OsslAlgorithm {
         algorithm_names: RSA_ALG_NAME.as_ptr(),
         property_definition: KEYMGMT_PROPS.as_ptr(),
-        implementation: KEYMGMT_DISPATCH.as_ptr(),
+        implementation: RSA_KEYMGMT_DISPATCH.as_ptr(),
         algorithm_description: c"hardmTLS RSA key".as_ptr(),
     },
     OsslAlgorithm {
         algorithm_names: EC_ALG_NAME.as_ptr(),
         property_definition: KEYMGMT_PROPS.as_ptr(),
-        implementation: KEYMGMT_DISPATCH.as_ptr(),
+        implementation: EC_KEYMGMT_DISPATCH.as_ptr(),
         algorithm_description: c"hardmTLS EC key".as_ptr(),
     },
     OsslAlgorithm::end(),
 ];
 
 /// SIGNATURE algorithm table — registers RSA and ECDSA signatures.
+///
+/// Each algorithm gets its own dispatch table, matching the pattern used by
+/// tpm2-openssl and pkcs11-provider reference implementations.
 ///
 /// IMPORTANT: KEYMGMT uses "RSA" and "EC" (key types), but SIGNATURE must
 /// use the *signing algorithm* names: "RSA" and "ECDSA". OpenSSL's TLS
@@ -1068,13 +1159,13 @@ static SIGNATURE_ALGORITHMS: [OsslAlgorithm; 3] = [
     OsslAlgorithm {
         algorithm_names: c"RSA:rsaEncryption:RSA-PSS:RSASSA-PSS".as_ptr(),
         property_definition: SIGNATURE_PROPS.as_ptr(),
-        implementation: SIGNATURE_DISPATCH.as_ptr(),
+        implementation: RSA_SIGNATURE_DISPATCH.as_ptr(),
         algorithm_description: c"hardmTLS RSA signature".as_ptr(),
     },
     OsslAlgorithm {
-        algorithm_names: c"ECDSA:id-ecPublicKey:EC".as_ptr(),
+        algorithm_names: c"ECDSA".as_ptr(),
         property_definition: SIGNATURE_PROPS.as_ptr(),
-        implementation: SIGNATURE_DISPATCH.as_ptr(),
+        implementation: ECDSA_SIGNATURE_DISPATCH.as_ptr(),
         algorithm_description: c"hardmTLS ECDSA signature".as_ptr(),
     },
     OsslAlgorithm::end(),
@@ -1215,13 +1306,20 @@ mod tests {
 
     #[test]
     fn dispatch_tables_are_well_formed() {
-        // KEYMGMT has 14 entries + sentinel.
-        assert_eq!(KEYMGMT_DISPATCH.len(), 15);
-        assert_eq!(KEYMGMT_DISPATCH[14].function_id, 0);
+        // KEYMGMT has 15 entries + sentinel.
+        assert_eq!(RSA_KEYMGMT_DISPATCH.len(), 16);
+        assert_eq!(RSA_KEYMGMT_DISPATCH[15].function_id, 0);
 
-        // SIGNATURE has 21 entries + sentinel.
-        assert_eq!(SIGNATURE_DISPATCH.len(), 22);
-        assert_eq!(SIGNATURE_DISPATCH[21].function_id, 0);
+        assert_eq!(EC_KEYMGMT_DISPATCH.len(), 16);
+        assert_eq!(EC_KEYMGMT_DISPATCH[15].function_id, 0);
+
+        // RSA SIGNATURE has 16 entries + sentinel.
+        assert_eq!(RSA_SIGNATURE_DISPATCH.len(), 17);
+        assert_eq!(RSA_SIGNATURE_DISPATCH[16].function_id, 0);
+
+        // ECDSA SIGNATURE has 16 entries + sentinel.
+        assert_eq!(ECDSA_SIGNATURE_DISPATCH.len(), 17);
+        assert_eq!(ECDSA_SIGNATURE_DISPATCH[16].function_id, 0);
 
         // Provider dispatch has 2 entries + sentinel.
         assert_eq!(PROVIDER_DISPATCH.len(), 3);
@@ -1257,5 +1355,64 @@ mod tests {
         let _ = register_provider();
         let result = register_provider();
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn dump_ecdsa_dispatch_table() {
+        eprintln!("=== ECDSA_SIGNATURE_DISPATCH ({} entries) ===", ECDSA_SIGNATURE_DISPATCH.len());
+        for (i, entry) in ECDSA_SIGNATURE_DISPATCH.iter().enumerate() {
+            let fn_ptr: usize = match entry.function {
+                Some(f) => f as usize,
+                None => 0,
+            };
+            eprintln!("  [{}] function_id={}, function={:#x}", i, entry.function_id, fn_ptr);
+        }
+        // Verify all non-sentinel entries have non-null function pointers
+        for (i, entry) in ECDSA_SIGNATURE_DISPATCH.iter().enumerate() {
+            if entry.function_id == 0 {
+                assert!(entry.function.is_none(), "sentinel entry {i} should have None function");
+            } else {
+                assert!(entry.function.is_some(), "entry {i} (id={}) should have Some function", entry.function_id);
+            }
+        }
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn test_signature_fetch_after_register() {
+        // Register the provider first
+        register_provider().expect("provider registration failed");
+
+        unsafe {
+            // Try to fetch ECDSA signature from our provider
+            openssl_sys::ERR_clear_error();
+
+            let sig = openssl_sys::EVP_SIGNATURE_fetch(
+                std::ptr::null_mut(),
+                c"ECDSA".as_ptr(),
+                c"provider=hardmtls".as_ptr(),
+            );
+
+            if sig.is_null() {
+                // Dump all errors
+                loop {
+                    let err = openssl_sys::ERR_get_error();
+                    if err == 0 { break; }
+                    let lib = openssl_sys::ERR_lib_error_string(err);
+                    let reason = openssl_sys::ERR_reason_error_string(err);
+                    let lib_s = if !lib.is_null() {
+                        std::ffi::CStr::from_ptr(lib).to_str().unwrap_or("?")
+                    } else { "?" };
+                    let rsn_s = if !reason.is_null() {
+                        std::ffi::CStr::from_ptr(reason).to_str().unwrap_or("?")
+                    } else { "?" };
+                    eprintln!("  ERR: lib={lib_s} reason={rsn_s} code={err:#x}");
+                }
+                panic!("EVP_SIGNATURE_fetch('ECDSA', provider=hardmtls) returned NULL!");
+            } else {
+                eprintln!("EVP_SIGNATURE_fetch('ECDSA', provider=hardmtls) = {:?} ✓", sig);
+                openssl_sys::EVP_SIGNATURE_free(sig);
+            }
+        }
     }
 }
