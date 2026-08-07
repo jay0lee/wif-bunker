@@ -540,7 +540,7 @@ def _main_impl() -> None:
                 logger.info("  export %s=%s", k, value)
         logger.info("=" * 70)
         reuse_parts = [
-            f"python3 {sys.argv[0]}",
+            f"{sys.executable}" if getattr(sys, "frozen", False) else f"python3 {sys.argv[0]}",
             f"--use-project {config.project_id}",
             f"--use-pool {config.pool_id}",
         ]
@@ -718,11 +718,11 @@ def _main_impl() -> None:
             )
 
         try:
-            # Allow IAM bindings to propagate before attempting auth.
-            # Allow IAM bindings to propagate before attempting auth.
-            logger.info("    Waiting 10s for IAM propagation...")
-            time.sleep(10)
-
+            @with_retries(
+                max_attempts=15,
+                retryable_exceptions=(google.auth.exceptions.RefreshError,),
+                retry_msg="Waiting for IAM propagation",
+            )
             def _verify_adc():
                 adc_creds, _ = google.auth.default(
                     scopes=["https://www.googleapis.com/auth/cloud-platform"],
@@ -736,6 +736,7 @@ def _main_impl() -> None:
                 return target_api_res.json()
 
             proj_result = _verify_adc()
+
             logger.info("%s API Call Successful! The OS signed the handshake via hardmTLS.", SYM_OK)
             if use_sa:
                 logger.info("   Authenticated SA: %s", sa_email)

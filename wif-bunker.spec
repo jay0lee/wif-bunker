@@ -72,7 +72,12 @@ elif platform.system() == 'Linux':
 else:
     _hardmtls_lib = os.path.join(_hardmtls_dir, 'hardmtls.dll')
 
-hardmtls_binaries = [(_hardmtls_lib, 'hardmtls')] if os.path.exists(_hardmtls_lib) else []
+if not os.path.exists(_hardmtls_lib):
+    raise FileNotFoundError(
+        f"hardmTLS library not found at {_hardmtls_lib!r}.\n"
+        "Build it first:  cd hardmtls-native && cargo build --release"
+    )
+hardmtls_binaries = [(_hardmtls_lib, 'hardmtls')]
 
 a = Analysis(
     ['wif_bunker/cli.py'],

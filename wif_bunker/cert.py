@@ -213,7 +213,8 @@ def _find_hardmtls_library() -> Path:
 
     # Search locations in priority order.
     search_dirs = [
-        binary_dir / "hardmtls",  # Bundled (PyInstaller dist)
+        binary_dir / "hardmtls",  # Bundled (PyInstaller dist, flat)
+        binary_dir / "lib" / "hardmtls",  # Bundled (PyInstaller dist, contents_directory='lib')
         binary_dir / "hardmtls-native" / "target" / "release",  # Dev build
     ]
 
