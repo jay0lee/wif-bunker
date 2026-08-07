@@ -365,13 +365,70 @@ jobs:
             python-ssl-${{ runner.os }}-${{ runner.arch }}-v1-
           fail-on-cache-miss: true
 
+      - name: "Debug: Inspect cached OpenSSL + Python"
+        shell: bash
+        run: |
+          echo "══════════════════════════════════════════════════"
+          echo "Cache restore key used: ${{ steps.cache-python-ssl.outputs.cache-matched-key }}"
+          echo "Cache primary key:      python-ssl-${{ runner.os }}-${{ runner.arch }}-v1-"
+          echo "══════════════════════════════════════════════════"
+
+          echo ""
+          echo "=== bin/ssl directory ==="
+          ls -la bin/ssl/ 2>/dev/null || echo "bin/ssl/ NOT FOUND"
+          echo ""
+          echo "=== bin/ssl/bin ==="
+          ls -la bin/ssl/bin/ 2>/dev/null || echo "bin/ssl/bin/ NOT FOUND"
+          echo ""
+          echo "=== bin/ssl/lib (libraries) ==="
+          ls -la bin/ssl/lib/ 2>/dev/null || echo "bin/ssl/lib/ NOT FOUND"
+          echo ""
+          echo "=== bin/ssl/lib shared objects ==="
+          find bin/ssl/lib -name '*.so*' -o -name '*.dylib' -o -name '*.dll' 2>/dev/null || echo "No shared libraries found"
+          echo ""
+          echo "=== bin/ssl/lib static libraries ==="
+          find bin/ssl/lib -name '*.a' -o -name '*.lib' 2>/dev/null || echo "No static libraries found"
+          echo ""
+          echo "=== bin/ssl/include/openssl/opensslv.h (version) ==="
+          grep -E 'OPENSSL_VERSION_(TEXT|STR|MAJOR|MINOR|PATCH)' bin/ssl/include/openssl/opensslv.h 2>/dev/null | head -10 || echo "opensslv.h NOT FOUND"
+          echo ""
+          echo "=== OpenSSL binary version ==="
+          bin/ssl/bin/openssl version -a 2>/dev/null || echo "openssl binary not found or failed"
+
+          echo ""
+          echo "=== bin/python directory ==="
+          ls -la bin/python/ 2>/dev/null || echo "bin/python/ NOT FOUND"
+          echo ""
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            echo "=== Windows: python executables ==="
+            find bin/python -maxdepth 1 -name 'python*' -o -name 'python*.exe' 2>/dev/null || echo "No python executables found"
+            echo ""
+            echo "=== Windows: _ssl.pyd location ==="
+            find bin/python -name '_ssl*' 2>/dev/null || echo "_ssl not found"
+            echo ""
+            echo "=== Windows: OpenSSL DLLs in python dir ==="
+            find bin/python -name 'libssl*' -o -name 'libcrypto*' 2>/dev/null || echo "No OpenSSL DLLs found in python dir"
+          else
+            echo "=== Python binary ==="
+            ls -la bin/python/bin/python* 2>/dev/null || echo "No python binary found"
+            echo ""
+            echo "=== Python lib dir ==="
+            ls -la bin/python/lib/ 2>/dev/null || echo "bin/python/lib/ NOT FOUND"
+            echo ""
+            echo "=== _ssl module location ==="
+            find bin/python -name '_ssl*' 2>/dev/null || echo "_ssl not found"
+          fi
+
       - name: "Add compiled Python to PATH"
         shell: bash
         run: |
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            echo "Adding to PATH: ${PYTHON_INSTALL_PATH}"
+            echo "Adding to PATH: ${PYTHON_INSTALL_PATH}/Scripts"
             echo "${PYTHON_INSTALL_PATH}" >> "$GITHUB_PATH"
             echo "${PYTHON_INSTALL_PATH}/Scripts" >> "$GITHUB_PATH"
           else
+            echo "Adding to PATH: ${PYTHON_INSTALL_PATH}/bin"
             echo "${PYTHON_INSTALL_PATH}/bin" >> "$GITHUB_PATH"
             if [[ "${RUNNER_OS}" == "Linux" ]]; then
               echo "LD_LIBRARY_PATH=${PYTHON_INSTALL_PATH}/lib:${OPENSSL_INSTALL_PATH}/lib:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
@@ -383,8 +440,48 @@ jobs:
       - name: "Verify compiled Python + OpenSSL"
         shell: bash
         run: |
-          echo "Python: $(python3 --version)"
-          python3 -c "import ssl; print(f'Python ssl module OpenSSL: {ssl.OPENSSL_VERSION}')"
+          echo "══════════════════════════════════════════════════"
+          echo "ENVIRONMENT VERIFICATION"
+          echo "══════════════════════════════════════════════════"
+
+          echo ""
+          echo "=== Which python3 is on PATH ==="
+          which python3 || echo "python3 NOT FOUND on PATH"
+          which python3.14 2>/dev/null || which python3.12 2>/dev/null || true
+          echo ""
+          echo "=== python3 --version ==="
+          python3 --version
+          echo ""
+          echo "=== Python sys.executable ==="
+          python3 -c "import sys; print(f'sys.executable: {sys.executable}')"
+          echo ""
+          echo "=== Python ssl module details ==="
+          python3 -c "
+          import ssl, sys, os
+          print(f'Python version:       {sys.version}')
+          print(f'Python executable:    {sys.executable}')
+          print(f'ssl module file:      {ssl.__file__}')
+          print(f'ssl.OPENSSL_VERSION:  {ssl.OPENSSL_VERSION}')
+          print(f'ssl.OPENSSL_VERSION_INFO: {ssl.OPENSSL_VERSION_INFO}')
+          try:
+              import _ssl
+              print(f'_ssl module file:     {_ssl.__file__}')
+          except Exception as e:
+              print(f'_ssl import error:    {e}')
+          print(f'PATH: {os.environ.get(\"PATH\", \"(not set)\")[:200]}...')
+          "
+          echo ""
+          echo "=== Expected vs actual ==="
+          EXPECTED_PYTHON="${PYTHON_INSTALL_PATH}"
+          ACTUAL_PYTHON=$(python3 -c "import sys; print(sys.executable)")
+          echo "Expected prefix: ${EXPECTED_PYTHON}"
+          echo "Actual executable: ${ACTUAL_PYTHON}"
+          if [[ "${ACTUAL_PYTHON}" == "${EXPECTED_PYTHON}"* ]]; then
+            echo "✓ Python executable is from compiled cache"
+          else
+            echo "✗ WARNING: Python executable is NOT from compiled cache!"
+            echo "  This means a system Python is being used instead."
+          fi
 
 
 
@@ -651,10 +748,26 @@ jobs:
           # creates a separate OSSL_LIB_CTX, making our provider
           # invisible to Python's SSL_CTX during TLS handshakes.
         run: |
+          echo "=== hardmTLS build: OpenSSL being linked ==="
+          echo "OPENSSL_DIR=${OPENSSL_DIR}"
+          echo "OpenSSL version in OPENSSL_DIR:"
+          grep -E 'OPENSSL_VERSION_(TEXT|STR|MAJOR|MINOR|PATCH)' "${OPENSSL_DIR}/include/openssl/opensslv.h" 2>/dev/null | head -5 || echo "opensslv.h not found in OPENSSL_DIR"
+          echo ""
+          echo "OpenSSL libs in OPENSSL_DIR:"
+          ls -la "${OPENSSL_DIR}/lib/"libssl* "${OPENSSL_DIR}/lib/"libcrypto* 2>/dev/null || echo "No OpenSSL libs found"
+          echo ""
+          echo "=== Python's OpenSSL (for comparison) ==="
+          python3 -c "import ssl; print(f'Python ssl uses: {ssl.OPENSSL_VERSION}')" 2>/dev/null || echo "Could not check Python ssl"
+          echo ""
+
           cd hardmtls-native
           cargo build --release
-          echo "hardmTLS library built:"
+          echo ""
+          echo "=== hardmTLS library built ==="
           ls -la target/release/libhardmtls* target/release/hardmtls* 2>/dev/null || true
+          echo ""
+          echo "=== hardmTLS linked OpenSSL (openssl-sys build output) ==="
+          cat target/release/build/openssl-sys-*/output 2>/dev/null | grep -E 'cargo:|version|OPENSSL' | head -20 || echo "Could not find openssl-sys build output"
 
 
       # ── YubiKey: Discover serials, test error handling, pick random key ──

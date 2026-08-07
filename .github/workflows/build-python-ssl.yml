@@ -290,13 +290,70 @@ jobs:
       - name: "Verify compiled Python + OpenSSL"
         shell: bash
         run: |
-          echo "=== Python ==="
+          echo "══════════════════════════════════════════════════"
+          echo "BUILD VERIFICATION"
+          echo "══════════════════════════════════════════════════"
+
+          echo ""
+          echo "=== Which python3 is on PATH ==="
+          which python3 || echo "python3 NOT FOUND"
+          echo ""
+          echo "=== Python version ==="
           python3 --version
-          echo "=== OpenSSL (standalone) ==="
+          echo ""
+          echo "=== Python sys.executable ==="
+          python3 -c "import sys; print(f'sys.executable: {sys.executable}')"
+          echo ""
+          echo "=== OpenSSL (standalone binary) ==="
           "${OPENSSL_INSTALL_PATH}/bin/openssl" version -a
+          echo ""
           echo "=== OpenSSL (via Python ssl module) ==="
-          python3 -c "import ssl; print(f'Python ssl uses: {ssl.OPENSSL_VERSION}')"
+          python3 -c "
+          import ssl, sys
+          print(f'Python version:       {sys.version}')
+          print(f'Python executable:    {sys.executable}')
+          print(f'ssl module file:      {ssl.__file__}')
+          print(f'ssl.OPENSSL_VERSION:  {ssl.OPENSSL_VERSION}')
+          print(f'ssl.OPENSSL_VERSION_INFO: {ssl.OPENSSL_VERSION_INFO}')
+          try:
+              import _ssl
+              print(f'_ssl module file:     {_ssl.__file__}')
+          except Exception as e:
+              print(f'_ssl import error:    {e}')
+          "
+          echo ""
+          echo "=== Version match check ==="
+          STANDALONE_VER=$("${OPENSSL_INSTALL_PATH}/bin/openssl" version 2>/dev/null | awk '{print $2}')
+          PYTHON_VER=$(python3 -c "import ssl; print(ssl.OPENSSL_VERSION.split()[1])")
+          echo "Standalone OpenSSL: ${STANDALONE_VER}"
+          echo "Python ssl OpenSSL: ${PYTHON_VER}"
+          if [[ "${STANDALONE_VER}" == "${PYTHON_VER}" ]]; then
+            echo "✓ Versions MATCH"
+          else
+            echo "✗ VERSION MISMATCH! Python did not link against the compiled OpenSSL."
+            echo "  This will cause ABI crashes when hardmTLS links against bin/ssl."
+          fi
+          echo ""
+          echo "=== OpenSSL header version (what hardmTLS will compile against) ==="
+          grep -E 'OPENSSL_VERSION_(TEXT|STR|MAJOR|MINOR|PATCH)' "${OPENSSL_INSTALL_PATH}/include/openssl/opensslv.h" 2>/dev/null | head -10 || echo "opensslv.h not found"
+          echo ""
+          echo "=== Libraries in bin/ssl/lib ==="
+          ls -la "${OPENSSL_INSTALL_PATH}/lib/"libssl* "${OPENSSL_INSTALL_PATH}/lib/"libcrypto* 2>/dev/null || echo "No OpenSSL libs found"
+          echo ""
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            echo "=== Windows: _ssl.pyd location ==="
+            find "${PYTHON_INSTALL_PATH}" -name '_ssl*' 2>/dev/null || echo "_ssl not found"
+            echo ""
+            echo "=== Windows: OpenSSL DLLs in Python dir ==="
+            find "${PYTHON_INSTALL_PATH}" -name 'libssl*' -o -name 'libcrypto*' 2>/dev/null || echo "No OpenSSL DLLs in Python dir"
+            echo ""
+            echo "=== Windows: All DLLs in Python dir ==="
+            find "${PYTHON_INSTALL_PATH}" -maxdepth 1 -name '*.dll' 2>/dev/null || echo "No DLLs found"
+          fi
+          echo ""
           echo "=== Build info ==="
           echo "Cache key: python-ssl-${RUNNER_OS}-${RUNNER_ARCH}-${CACHE_VERSION}-$(date +%Y%m%d)"
+          echo "COMPILED_OPENSSL_VERSION: ${COMPILED_OPENSSL_VERSION:-not set}"
+          echo "COMPILED_PYTHON_VERSION:  ${COMPILED_PYTHON_VERSION:-not set}"
 
       # Cache is automatically saved at end of job by actions/cache
