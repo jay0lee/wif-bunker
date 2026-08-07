@@ -333,17 +333,20 @@ jobs:
       # ══════════════════════════════════════════════════════════════════════
 
       - name: "Restore compiled OpenSSL + Python"
+        if: ${{ !matrix.self_hosted }}
         uses: actions/cache/restore@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         id: cache-python-ssl
         with:
           path: |
             bin/ssl
             bin/python
+          key: python-ssl-${{ runner.os }}-${{ runner.arch }}-v1-
           restore-keys: |
             python-ssl-${{ runner.os }}-${{ runner.arch }}-v1-
           fail-on-cache-miss: true
 
       - name: "Add compiled Python to PATH"
+        if: ${{ !matrix.self_hosted }}
         shell: bash
         run: |
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
@@ -359,6 +362,7 @@ jobs:
           fi
 
       - name: "Verify compiled Python + OpenSSL"
+        if: ${{ !matrix.self_hosted }}
         shell: bash
         run: |
           echo "Python: $(python3 --version)"

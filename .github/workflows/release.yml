@@ -64,6 +64,7 @@ jobs:
           path: |
             bin/ssl
             bin/python
+          key: python-ssl-${{ runner.os }}-${{ runner.arch }}-v1-
           restore-keys: |
             python-ssl-${{ runner.os }}-${{ runner.arch }}-v1-
           fail-on-cache-miss: true
