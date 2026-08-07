@@ -559,31 +559,130 @@ def _main_impl() -> None:
         except RuntimeError:
             sys.exit(1)
 
-        # ── mTLS Smoke Test ──
-        # Bare mTLS connection to sts.mtls.googleapis.com — no STS auth,
-        # just prove that hardmTLS can present the client cert in a real
-        # TLS handshake.  Any HTTP response (even 403) means success.
-        logger.info("=== 7b) mTLS Handshake Smoke Test ===")
+        # ── mTLS Client Cert Verification ──
+        # certauth.idrix.fr REQUIRES client certs (unlike sts.mtls which
+        # makes them optional).  It reflects the presented cert's details
+        # as JSON, giving us a definitive check that hardmTLS actually
+        # sent the certificate during the TLS handshake.
+        logger.info("=== 7b) mTLS Client Cert Verification ===")
         try:
             from google.auth.transport.requests import _MutualTlsOffloadAdapter
 
             mtls_session = requests.Session()
             mtls_session.mount("https://", _MutualTlsOffloadAdapter(str(cert_config_path)))
-            mtls_resp = mtls_session.get("https://sts.mtls.googleapis.com/", timeout=15)
-            logger.info(
-                "    PASS: mTLS handshake succeeded — server returned HTTP %d",
-                mtls_resp.status_code,
-            )
+
+            # certauth.idrix.fr requires client certs and returns their details
+            mtls_resp = mtls_session.get("https://certauth.idrix.fr/json/", timeout=15)
+            if mtls_resp.status_code == 200:
+                cert_info = mtls_resp.json()
+                client_dn = cert_info.get("SSL_CLIENT_S_DN", "(not present)")
+                client_issuer = cert_info.get("SSL_CLIENT_I_DN", "(not present)")
+                client_serial = cert_info.get("SSL_CLIENT_SERIAL", "(not present)")
+                client_verify = cert_info.get("SSL_CLIENT_VERIFY", "(not present)")
+                logger.info("    PASS: Server confirmed client cert was presented")
+                logger.info("    Subject:  %s", client_dn)
+                logger.info("    Issuer:   %s", client_issuer)
+                logger.info("    Serial:   %s", client_serial)
+                logger.info("    Verify:   %s", client_verify)
+            else:
+                logger.warning(
+                    "    Server returned HTTP %d — client cert may not have been sent",
+                    mtls_resp.status_code,
+                )
         except requests.exceptions.SSLError as ssl_err:
-            logger.error("    FAIL: mTLS handshake failed with SSL error:")
+            logger.error("    FAIL: mTLS handshake failed (server requires client cert):")
             logger.error("    %s", ssl_err)
+            logger.error("    This means hardmTLS did NOT send the client certificate.")
             if args.debug:
                 from wif_bunker.cert import run_hardmtls_diagnostics
                 run_hardmtls_diagnostics(cert_config_path, logger)
             sys.exit(1)
         except Exception as mtls_err:
-            logger.error("    FAIL: mTLS smoke test error: %s", mtls_err)
+            logger.error("    FAIL: mTLS verification error: %s", mtls_err)
             sys.exit(1)
+
+        # ── Direct STS Token Exchange (JSON) ──
+        # Bypass google-auth's form-urlencoded STS client and POST
+        # application/json directly, matching the Google x.509 WIF docs.
+        # This isolates Content-Type issues from mTLS issues.
+        logger.info("=== 7c) Direct STS Token Exchange (JSON) ===")
+        try:
+            import base64
+            import json as _json
+
+            from cryptography import x509 as cx509
+            from cryptography.hazmat.primitives import serialization
+
+            # Build subject_token: JSON array of base64-DER certs
+            # (leaf first, then trust chain)
+            _workload_cert_path = Path.cwd() / "workload_cert.pem"
+            _trust_chain_path_7c = Path.cwd() / "trust_chain.pem"
+
+            leaf_cert = cx509.load_pem_x509_certificate(
+                _workload_cert_path.read_bytes()
+            )
+            leaf_b64 = base64.b64encode(
+                leaf_cert.public_bytes(serialization.Encoding.DER)
+            ).decode("utf-8")
+
+            cert_chain = [leaf_b64]
+            trust_chain_data = _trust_chain_path_7c.read_bytes()
+            for block in trust_chain_data.split(b"-----BEGIN CERTIFICATE-----"):
+                block = block.strip()
+                if not block:
+                    continue
+                pem = b"-----BEGIN CERTIFICATE-----" + block
+                tc_cert = cx509.load_pem_x509_certificate(pem)
+                tc_b64 = base64.b64encode(
+                    tc_cert.public_bytes(serialization.Encoding.DER)
+                ).decode("utf-8")
+                if tc_b64 != leaf_b64:
+                    cert_chain.append(tc_b64)
+
+            logger.info("    Cert chain has %d certificate(s)", len(cert_chain))
+
+            # Read audience from adc.json
+            _adc_path_7c = Path.cwd() / "adc.json"
+            _adc_cfg = _json.loads(_adc_path_7c.read_text())
+            _audience = _adc_cfg["audience"]
+
+            sts_body = {
+                "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+                "audience": _audience,
+                "scope": "https://www.googleapis.com/auth/cloud-platform",
+                "requested_token_type": "urn:ietf:params:oauth:token-type:access_token",
+                "subject_token_type": "urn:ietf:params:oauth:token-type:mtls",
+                "subject_token": _json.dumps(cert_chain),
+            }
+            logger.info("    POST https://sts.mtls.googleapis.com/v1/token")
+            logger.info("    Content-Type: application/json")
+            logger.info("    audience: %s", _audience)
+
+            # Reuse an mTLS session
+            sts_session = requests.Session()
+            sts_session.mount(
+                "https://",
+                _MutualTlsOffloadAdapter(str(cert_config_path)),
+            )
+            sts_resp = sts_session.post(
+                "https://sts.mtls.googleapis.com/v1/token",
+                json=sts_body,
+                timeout=30,
+            )
+            logger.info("    STS response: HTTP %d", sts_resp.status_code)
+            logger.info("    STS body: %s", sts_resp.text[:500])
+
+            if sts_resp.status_code == 200:
+                logger.info("    PASS: Direct JSON STS exchange succeeded!")
+            else:
+                logger.warning(
+                    "    STS returned HTTP %d (expected 200 for full success)",
+                    sts_resp.status_code,
+                )
+
+        except Exception as sts_err:
+            logger.error("    FAIL: Direct STS exchange error: %s", sts_err)
+            # Don't exit — fall through to step 7 for comparison
 
         # ── ADC Verification (always runs) ──
         # End-to-end proof: hardware key → hardmTLS → mTLS → Google STS → API call.
