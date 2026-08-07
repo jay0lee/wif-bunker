@@ -314,7 +314,9 @@ def _ensure_token_via_tpm2_ptool(pin: str, tpm_store: str, module_path: str) -> 
             [tpm2_ptool, "listtokens", "--path", tpm_store],
             capture_output=True, text=True, check=False,
         )
-        if _TOKEN_LABEL in result.stdout:
+        # tpm2_ptool may output to stdout or stderr (Python logging)
+        combined_output = result.stdout + result.stderr
+        if _TOKEN_LABEL in combined_output:
             # Token exists — verify our PIN works by forcing a login.
             # (--list-objects without --login succeeds even with wrong PIN
             # because it only lists public objects.)
@@ -374,11 +376,9 @@ def _ensure_token_via_tpm2_ptool(pin: str, tpm_store: str, module_path: str) -> 
             _TOKEN_LABEL,
         )
     except subprocess.CalledProcessError as exc:
-        logger.info(
-            "    tpm2_ptool addtoken failed: %s\n"
-            "    stderr: %s",
-            exc, exc.stderr,
-        )
+        raise RuntimeError(
+            f"Failed to create PKCS#11 token '{_TOKEN_LABEL}':\n{exc.stderr}"
+        ) from exc
 
 
 def _init_token(lib, pin: str, module_path: str):
