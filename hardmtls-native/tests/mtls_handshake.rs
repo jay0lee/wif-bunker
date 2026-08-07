@@ -165,9 +165,7 @@ fn build_test_pki() -> TestPki {
         .set_serial_number(&sn.to_asn1_integer().unwrap())
         .unwrap();
     let mut cli_name = X509NameBuilder::new().unwrap();
-    cli_name
-        .append_entry_by_text("CN", "test-client")
-        .unwrap();
+    cli_name.append_entry_by_text("CN", "test-client").unwrap();
     let cli_name = cli_name.build();
     cli_builder.set_subject_name(&cli_name).unwrap();
     cli_builder.set_issuer_name(ca_cert.subject_name()).unwrap();
@@ -298,11 +296,7 @@ impl std::fmt::Display for TlsVersion {
 
 /// Connect to the local mTLS server using our hardmTLS provider.
 /// Returns the number of sign_func invocations that occurred.
-fn mtls_client_connect(
-    pki: &TestPki,
-    addr: std::net::SocketAddr,
-    version: TlsVersion,
-) -> u32 {
+fn mtls_client_connect(pki: &TestPki, addr: std::net::SocketAddr, version: TlsVersion) -> u32 {
     let cert_cstr = std::ffi::CString::new(pki.client_cert_pem.clone()).unwrap();
 
     // Build client SSL_CTX.
@@ -358,10 +352,14 @@ fn mtls_client_connect(
             let pkey_id = openssl_sys::EVP_PKEY_get_id(pkey);
             let pkey_size = openssl_sys::EVP_PKEY_get_size(pkey);
             let pkey_bits = openssl_sys::EVP_PKEY_get_bits(pkey);
-            
+
             eprintln!("    [diag] EVP_PKEY id={pkey_id}, size={pkey_size}, bits={pkey_bits}");
-            eprintln!("    [diag] EVP_PKEY_EC={}, EVP_PKEY_RSA={}", openssl_sys::EVP_PKEY_EC, openssl_sys::EVP_PKEY_RSA);
-            
+            eprintln!(
+                "    [diag] EVP_PKEY_EC={}, EVP_PKEY_RSA={}",
+                openssl_sys::EVP_PKEY_EC,
+                openssl_sys::EVP_PKEY_RSA
+            );
+
             // Check group name
             let mut group_buf = [0u8; 64];
             let mut group_len: usize = 0;
@@ -378,11 +376,11 @@ fn mtls_client_connect(
             } else {
                 eprintln!("    [diag] EVP_PKEY has no group_name");
             }
-            
+
             // Check EVP_PKEY_is_a
             let is_ec = openssl_sys::EVP_PKEY_is_a(pkey, c"EC".as_ptr());
             eprintln!("    [diag] EVP_PKEY_is_a(pkey, \"EC\") = {is_ec}");
-            
+
             // Check EVP_PKEY_eq with the certificate's public key
             let cert = openssl_sys::SSL_CTX_get0_certificate(ssl_ctx_ptr);
             if !cert.is_null() {
@@ -390,7 +388,9 @@ fn mtls_client_connect(
                 if !cert_pubkey.is_null() {
                     let eq_result = openssl_sys::EVP_PKEY_eq(cert_pubkey, pkey);
                     eprintln!("    [diag] EVP_PKEY_eq(cert_pubkey, pkey) = {eq_result}");
-                    eprintln!("    [diag]   (1=match, 0=no-match, -1=not-same-type, -2=unsupported)");
+                    eprintln!(
+                        "    [diag]   (1=match, 0=no-match, -1=not-same-type, -2=unsupported)"
+                    );
                     openssl_sys::EVP_PKEY_free(cert_pubkey);
                 } else {
                     eprintln!("    [diag] cert has no public key!");
@@ -398,23 +398,31 @@ fn mtls_client_connect(
             } else {
                 eprintln!("    [diag] SSL_CTX has no certificate!");
             }
-            
+
             // Fetch ECDSA SIGNATURE - test hardmtls FIRST (before NULL-props
             // fetch which triggers construction for ALL providers and may
             // cache the operation bit, masking our actual error)
             openssl_sys::ERR_clear_error();
 
             // Helper closure to dump all errors with full details
-            let dump_errors = |label: &str| {
-                loop {
-                    let err = openssl_sys::ERR_get_error();
-                    if err == 0 { break; }
-                    let lib = openssl_sys::ERR_lib_error_string(err);
-                    let reason = openssl_sys::ERR_reason_error_string(err);
-                    let lib_s = if !lib.is_null() { std::ffi::CStr::from_ptr(lib).to_str().unwrap_or("?") } else { "?" };
-                    let rsn_s = if !reason.is_null() { std::ffi::CStr::from_ptr(reason).to_str().unwrap_or("?") } else { "?" };
-                    eprintln!("    [diag]   {label}: lib={lib_s} reason={rsn_s} code={err:#x}");
+            let dump_errors = |label: &str| loop {
+                let err = openssl_sys::ERR_get_error();
+                if err == 0 {
+                    break;
                 }
+                let lib = openssl_sys::ERR_lib_error_string(err);
+                let reason = openssl_sys::ERR_reason_error_string(err);
+                let lib_s = if !lib.is_null() {
+                    std::ffi::CStr::from_ptr(lib).to_str().unwrap_or("?")
+                } else {
+                    "?"
+                };
+                let rsn_s = if !reason.is_null() {
+                    std::ffi::CStr::from_ptr(reason).to_str().unwrap_or("?")
+                } else {
+                    "?"
+                };
+                eprintln!("    [diag]   {label}: lib={lib_s} reason={rsn_s} code={err:#x}");
             };
 
             // Try hardmtls FIRST
@@ -423,7 +431,10 @@ fn mtls_client_connect(
                 c"ECDSA".as_ptr(),
                 c"provider=hardmtls".as_ptr(),
             );
-            eprintln!("    [diag] EVP_SIGNATURE_fetch('ECDSA', provider=hardmtls) = {:?}", sig_ecdsa_hardmtls);
+            eprintln!(
+                "    [diag] EVP_SIGNATURE_fetch('ECDSA', provider=hardmtls) = {:?}",
+                sig_ecdsa_hardmtls
+            );
             if sig_ecdsa_hardmtls.is_null() {
                 dump_errors("ECDSA+hardmtls");
             } else {
@@ -436,20 +447,26 @@ fn mtls_client_connect(
                 c"ECDSA".as_ptr(),
                 std::ptr::null(),
             );
-            eprintln!("    [diag] EVP_SIGNATURE_fetch('ECDSA', NULL) = {:?}", sig_ecdsa_null);
+            eprintln!(
+                "    [diag] EVP_SIGNATURE_fetch('ECDSA', NULL) = {:?}",
+                sig_ecdsa_null
+            );
             if sig_ecdsa_null.is_null() {
                 dump_errors("ECDSA+NULL");
             } else {
                 openssl_sys::EVP_SIGNATURE_free(sig_ecdsa_null);
             }
             openssl_sys::ERR_clear_error();
-            
+
             let sig_ecdsa_default = openssl_sys::EVP_SIGNATURE_fetch(
                 std::ptr::null_mut(),
                 c"ECDSA".as_ptr(),
                 c"provider=default".as_ptr(),
             );
-            eprintln!("    [diag] EVP_SIGNATURE_fetch('ECDSA', provider=default) = {:?}", sig_ecdsa_default);
+            eprintln!(
+                "    [diag] EVP_SIGNATURE_fetch('ECDSA', provider=default) = {:?}",
+                sig_ecdsa_default
+            );
             if sig_ecdsa_default.is_null() {
                 dump_errors("ECDSA+default");
             } else {
@@ -474,11 +491,21 @@ fn mtls_client_connect(
                     // Print ALL queued OpenSSL errors
                     loop {
                         let err = openssl_sys::ERR_get_error();
-                        if err == 0 { break; }
+                        if err == 0 {
+                            break;
+                        }
                         let lib = openssl_sys::ERR_lib_error_string(err);
                         let reason = openssl_sys::ERR_reason_error_string(err);
-                        let lib_s = if !lib.is_null() { std::ffi::CStr::from_ptr(lib).to_str().unwrap_or("?") } else { "?" };
-                        let rsn_s = if !reason.is_null() { std::ffi::CStr::from_ptr(reason).to_str().unwrap_or("?") } else { "?" };
+                        let lib_s = if !lib.is_null() {
+                            std::ffi::CStr::from_ptr(lib).to_str().unwrap_or("?")
+                        } else {
+                            "?"
+                        };
+                        let rsn_s = if !reason.is_null() {
+                            std::ffi::CStr::from_ptr(reason).to_str().unwrap_or("?")
+                        } else {
+                            "?"
+                        };
                         eprintln!("    [diag]   err: lib={lib_s} reason={rsn_s}");
                     }
                 }
@@ -629,18 +656,36 @@ fn baseline_mtls_no_provider() {
     let mut ca_builder = X509Builder::new().unwrap();
     ca_builder.set_version(2).unwrap();
     let mut sn = BigNum::new().unwrap();
-    sn.rand(128, openssl::bn::MsbOption::MAYBE_ZERO, false).unwrap();
-    ca_builder.set_serial_number(&sn.to_asn1_integer().unwrap()).unwrap();
+    sn.rand(128, openssl::bn::MsbOption::MAYBE_ZERO, false)
+        .unwrap();
+    ca_builder
+        .set_serial_number(&sn.to_asn1_integer().unwrap())
+        .unwrap();
     let mut ca_name = X509NameBuilder::new().unwrap();
     ca_name.append_entry_by_text("CN", "baseline-ca").unwrap();
     let ca_name = ca_name.build();
     ca_builder.set_subject_name(&ca_name).unwrap();
     ca_builder.set_issuer_name(&ca_name).unwrap();
     ca_builder.set_pubkey(&ca_key).unwrap();
-    ca_builder.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
-    ca_builder.set_not_after(&Asn1Time::days_from_now(1).unwrap()).unwrap();
-    ca_builder.append_extension(BasicConstraints::new().critical().ca().build().unwrap()).unwrap();
-    ca_builder.append_extension(KeyUsage::new().critical().key_cert_sign().crl_sign().build().unwrap()).unwrap();
+    ca_builder
+        .set_not_before(&Asn1Time::days_from_now(0).unwrap())
+        .unwrap();
+    ca_builder
+        .set_not_after(&Asn1Time::days_from_now(1).unwrap())
+        .unwrap();
+    ca_builder
+        .append_extension(BasicConstraints::new().critical().ca().build().unwrap())
+        .unwrap();
+    ca_builder
+        .append_extension(
+            KeyUsage::new()
+                .critical()
+                .key_cert_sign()
+                .crl_sign()
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
     ca_builder.sign(&ca_key, MessageDigest::sha256()).unwrap();
     let ca_cert = ca_builder.build();
 
@@ -649,16 +694,23 @@ fn baseline_mtls_no_provider() {
     let mut srv_builder = X509Builder::new().unwrap();
     srv_builder.set_version(2).unwrap();
     let mut sn = BigNum::new().unwrap();
-    sn.rand(128, openssl::bn::MsbOption::MAYBE_ZERO, false).unwrap();
-    srv_builder.set_serial_number(&sn.to_asn1_integer().unwrap()).unwrap();
+    sn.rand(128, openssl::bn::MsbOption::MAYBE_ZERO, false)
+        .unwrap();
+    srv_builder
+        .set_serial_number(&sn.to_asn1_integer().unwrap())
+        .unwrap();
     let mut srv_name = X509NameBuilder::new().unwrap();
     srv_name.append_entry_by_text("CN", "localhost").unwrap();
     let srv_name = srv_name.build();
     srv_builder.set_subject_name(&srv_name).unwrap();
     srv_builder.set_issuer_name(ca_cert.subject_name()).unwrap();
     srv_builder.set_pubkey(&server_key).unwrap();
-    srv_builder.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
-    srv_builder.set_not_after(&Asn1Time::days_from_now(1).unwrap()).unwrap();
+    srv_builder
+        .set_not_before(&Asn1Time::days_from_now(0).unwrap())
+        .unwrap();
+    srv_builder
+        .set_not_after(&Asn1Time::days_from_now(1).unwrap())
+        .unwrap();
     srv_builder.sign(&ca_key, MessageDigest::sha256()).unwrap();
     let server_cert = srv_builder.build();
 
@@ -667,16 +719,25 @@ fn baseline_mtls_no_provider() {
     let mut cli_builder = X509Builder::new().unwrap();
     cli_builder.set_version(2).unwrap();
     let mut sn = BigNum::new().unwrap();
-    sn.rand(128, openssl::bn::MsbOption::MAYBE_ZERO, false).unwrap();
-    cli_builder.set_serial_number(&sn.to_asn1_integer().unwrap()).unwrap();
+    sn.rand(128, openssl::bn::MsbOption::MAYBE_ZERO, false)
+        .unwrap();
+    cli_builder
+        .set_serial_number(&sn.to_asn1_integer().unwrap())
+        .unwrap();
     let mut cli_name = X509NameBuilder::new().unwrap();
-    cli_name.append_entry_by_text("CN", "baseline-client").unwrap();
+    cli_name
+        .append_entry_by_text("CN", "baseline-client")
+        .unwrap();
     let cli_name = cli_name.build();
     cli_builder.set_subject_name(&cli_name).unwrap();
     cli_builder.set_issuer_name(ca_cert.subject_name()).unwrap();
     cli_builder.set_pubkey(&client_key).unwrap();
-    cli_builder.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
-    cli_builder.set_not_after(&Asn1Time::days_from_now(1).unwrap()).unwrap();
+    cli_builder
+        .set_not_before(&Asn1Time::days_from_now(0).unwrap())
+        .unwrap();
+    cli_builder
+        .set_not_after(&Asn1Time::days_from_now(1).unwrap())
+        .unwrap();
     cli_builder.sign(&ca_key, MessageDigest::sha256()).unwrap();
     let client_cert = cli_builder.build();
 

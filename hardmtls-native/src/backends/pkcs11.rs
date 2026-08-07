@@ -145,9 +145,15 @@ impl SigningBackend for Pkcs11Backend {
                 _ => return Err(HardmtlsError::Pkcs11Error("Unsupported key type".into())),
             };
 
-            session
+            let raw_sig = session
                 .sign(&mechanism, *key_handle, tbs)
-                .map_err(|e| HardmtlsError::Pkcs11Error(format!("Failed to sign: {e}")))
+                .map_err(|e| HardmtlsError::Pkcs11Error(format!("Failed to sign: {e}")))?;
+
+            if matches!(*key_type, KeyType::EC) {
+                crate::backends::raw_ecdsa_to_der(&raw_sig)
+            } else {
+                Ok(raw_sig)
+            }
         })
     }
 

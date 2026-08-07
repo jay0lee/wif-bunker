@@ -31,14 +31,11 @@ use std::slice;
 
 use windows_sys::Win32::Foundation::TRUE;
 use windows_sys::Win32::Security::Cryptography::{
-    CertCloseStore, CertEnumCertificatesInStore, CertFreeCertificateContext,
-    CertGetNameStringW, CertOpenStore, CryptAcquireCertificatePrivateKey,
-    NCryptFreeObject, NCryptGetProperty, NCryptSignHash,
-    BCRYPT_PAD_PKCS1, BCRYPT_PKCS1_PADDING_INFO,
-    CERT_NAME_SIMPLE_DISPLAY_TYPE, CERT_STORE_PROV_SYSTEM_W,
-    CERT_SYSTEM_STORE_CURRENT_USER, CERT_SYSTEM_STORE_LOCAL_MACHINE,
-    CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG, CERT_CONTEXT,
-    NCRYPT_KEY_HANDLE,
+    CertCloseStore, CertEnumCertificatesInStore, CertFreeCertificateContext, CertGetNameStringW,
+    CertOpenStore, CryptAcquireCertificatePrivateKey, NCryptFreeObject, NCryptGetProperty,
+    NCryptSignHash, BCRYPT_PAD_PKCS1, BCRYPT_PKCS1_PADDING_INFO, CERT_CONTEXT,
+    CERT_NAME_SIMPLE_DISPLAY_TYPE, CERT_STORE_PROV_SYSTEM_W, CERT_SYSTEM_STORE_CURRENT_USER,
+    CERT_SYSTEM_STORE_LOCAL_MACHINE, CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG, NCRYPT_KEY_HANDLE,
 };
 
 /// Wide (UTF-16) null-terminated string for `NCRYPT_ALGORITHM_GROUP_PROPERTY`.
@@ -46,21 +43,36 @@ use windows_sys::Win32::Security::Cryptography::{
 /// Corresponds to the Windows constant `NCRYPT_ALGORITHM_GROUP_PROPERTY`
 /// (`L"Algorithm Group"`).
 const NCRYPT_ALGORITHM_GROUP_PROPERTY_W: &[u16] = &[
-    b'A' as u16, b'l' as u16, b'g' as u16, b'o' as u16, b'r' as u16,
-    b'i' as u16, b't' as u16, b'h' as u16, b'm' as u16, b' ' as u16,
-    b'G' as u16, b'r' as u16, b'o' as u16, b'u' as u16, b'p' as u16,
+    b'A' as u16,
+    b'l' as u16,
+    b'g' as u16,
+    b'o' as u16,
+    b'r' as u16,
+    b'i' as u16,
+    b't' as u16,
+    b'h' as u16,
+    b'm' as u16,
+    b' ' as u16,
+    b'G' as u16,
+    b'r' as u16,
+    b'o' as u16,
+    b'u' as u16,
+    b'p' as u16,
     0,
 ];
 
 /// Wide (UTF-16) null-terminated string `"ECDSA"`.
 const ECDSA_GROUP: &[u16] = &[
-    b'E' as u16, b'C' as u16, b'D' as u16, b'S' as u16, b'A' as u16, 0,
+    b'E' as u16,
+    b'C' as u16,
+    b'D' as u16,
+    b'S' as u16,
+    b'A' as u16,
+    0,
 ];
 
 /// Wide (UTF-16) null-terminated string `"ECDH"`.
-const ECDH_GROUP: &[u16] = &[
-    b'E' as u16, b'C' as u16, b'D' as u16, b'H' as u16, 0,
-];
+const ECDH_GROUP: &[u16] = &[b'E' as u16, b'C' as u16, b'D' as u16, b'H' as u16, 0];
 
 /// Wide (UTF-16) null-terminated string `"RSA"`.
 const RSA_GROUP: &[u16] = &[b'R' as u16, b'S' as u16, b'A' as u16, 0];
@@ -70,8 +82,13 @@ const RSA_GROUP: &[u16] = &[b'R' as u16, b'S' as u16, b'A' as u16, 0];
 /// Corresponds to the Windows constant `BCRYPT_SHA256_ALGORITHM`
 /// (`L"SHA256"`).
 const BCRYPT_SHA256_ALGORITHM_W: &[u16] = &[
-    b'S' as u16, b'H' as u16, b'A' as u16,
-    b'2' as u16, b'5' as u16, b'6' as u16, 0,
+    b'S' as u16,
+    b'H' as u16,
+    b'A' as u16,
+    b'2' as u16,
+    b'5' as u16,
+    b'6' as u16,
+    0,
 ];
 
 /// Key algorithm group detected from NCrypt.
@@ -392,12 +409,9 @@ fn wide_eq_ignore_case(a: &[u16], b: &[u16]) -> bool {
         return false;
     }
 
-    a_trimmed
-        .iter()
-        .zip(b_trimmed.iter())
-        .all(|(&ac, &bc)| {
-            char::from(ac as u8).to_ascii_lowercase() == char::from(bc as u8).to_ascii_lowercase()
-        })
+    a_trimmed.iter().zip(b_trimmed.iter()).all(|(&ac, &bc)| {
+        char::from(ac as u8).to_ascii_lowercase() == char::from(bc as u8).to_ascii_lowercase()
+    })
 }
 
 /// Convert DER certificate bytes to PEM format.
@@ -427,7 +441,13 @@ impl SigningBackend for NcryptBackend {
                     data.len(),
                     algorithm,
                 );
-                Self::ncrypt_sign(key_handle, algorithm, data)
+                let raw_sig = Self::ncrypt_sign(key_handle, algorithm, data)?;
+                
+                if matches!(algorithm, KeyAlgorithm::Ec) {
+                    crate::backends::raw_ecdsa_to_der(&raw_sig)
+                } else {
+                    Ok(raw_sig)
+                }
             })();
 
             // Free the key handle only if the system told us to.
@@ -549,7 +569,14 @@ mod tests {
     #[test]
     fn test_wide_eq_ignore_case_match() {
         assert!(wide_eq_ignore_case(
-            &[b'E' as u16, b'C' as u16, b'D' as u16, b'S' as u16, b'A' as u16, 0],
+            &[
+                b'E' as u16,
+                b'C' as u16,
+                b'D' as u16,
+                b'S' as u16,
+                b'A' as u16,
+                0
+            ],
             ECDSA_GROUP,
         ));
     }
@@ -557,7 +584,14 @@ mod tests {
     #[test]
     fn test_wide_eq_ignore_case_lowercase() {
         assert!(wide_eq_ignore_case(
-            &[b'e' as u16, b'c' as u16, b'd' as u16, b's' as u16, b'a' as u16, 0],
+            &[
+                b'e' as u16,
+                b'c' as u16,
+                b'd' as u16,
+                b's' as u16,
+                b'a' as u16,
+                0
+            ],
             ECDSA_GROUP,
         ));
     }

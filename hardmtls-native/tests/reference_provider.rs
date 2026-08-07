@@ -39,7 +39,10 @@ unsafe impl Sync for OsslDispatch {}
 
 impl OsslDispatch {
     const fn end() -> Self {
-        Self { function_id: 0, function: None }
+        Self {
+            function_id: 0,
+            function: None,
+        }
     }
 }
 
@@ -68,8 +71,10 @@ extern "C" {
         ctx: *mut openssl_sys::OSSL_LIB_CTX,
         name: *const c_char,
         init_fn: unsafe extern "C" fn(
-            *const c_void, *const OsslDispatch,
-            *mut *const OsslDispatch, *mut *mut c_void,
+            *const c_void,
+            *const OsslDispatch,
+            *mut *const OsslDispatch,
+            *mut *mut c_void,
         ) -> c_int,
     ) -> c_int;
 }
@@ -80,9 +85,7 @@ macro_rules! dispatch_entry {
         OsslDispatch {
             function_id: $id,
             function: Some(unsafe {
-                std::mem::transmute::<$cast_type, unsafe extern "C" fn()>(
-                    $func as $cast_type,
-                )
+                std::mem::transmute::<$cast_type, unsafe extern "C" fn()>($func as $cast_type)
             }),
         }
     };
@@ -187,17 +190,27 @@ extern "C" fn keymgmt_free(keydata: *mut c_void) {
 }
 
 extern "C" fn keymgmt_has(keydata: *const c_void, _selection: c_int) -> c_int {
-    if keydata.is_null() { return 0; }
+    if keydata.is_null() {
+        return 0;
+    }
     1
 }
 
 extern "C" fn keymgmt_validate(keydata: *const c_void, _selection: c_int, _check: c_int) -> c_int {
-    if keydata.is_null() { return 0; }
+    if keydata.is_null() {
+        return 0;
+    }
     1
 }
 
-extern "C" fn keymgmt_match(keydata1: *const c_void, keydata2: *const c_void, _selection: c_int) -> c_int {
-    if keydata1.is_null() || keydata2.is_null() { return 0; }
+extern "C" fn keymgmt_match(
+    keydata1: *const c_void,
+    keydata2: *const c_void,
+    _selection: c_int,
+) -> c_int {
+    if keydata1.is_null() || keydata2.is_null() {
+        return 0;
+    }
     1 // Always match (like hardmtls)
 }
 
@@ -206,27 +219,36 @@ extern "C" fn keymgmt_import(
     _selection: c_int,
     params: *const openssl_sys::OSSL_PARAM,
 ) -> c_int {
-    if keydata.is_null() || params.is_null() { return 0; }
+    if keydata.is_null() || params.is_null() {
+        return 0;
+    }
     let key = unsafe { &mut *keydata.cast::<SoftKey>() };
 
     // Try to extract our custom "softkey-ec-key" param (raw private key bytes)
-    let ec_key_param = unsafe {
-        openssl_sys::OSSL_PARAM_locate(params as *mut _, c"softkey-ec-key".as_ptr())
-    };
+    let ec_key_param =
+        unsafe { openssl_sys::OSSL_PARAM_locate(params as *mut _, c"softkey-ec-key".as_ptr()) };
     if !ec_key_param.is_null() {
         let param = unsafe { &*ec_key_param };
-        if param.data_type == OSSL_PARAM_OCTET_STRING && !param.data.is_null() && param.data_size > 0 {
-            let bytes = unsafe { std::slice::from_raw_parts(param.data.cast::<u8>(), param.data_size) };
+        if param.data_type == OSSL_PARAM_OCTET_STRING
+            && !param.data.is_null()
+            && param.data_size > 0
+        {
+            let bytes =
+                unsafe { std::slice::from_raw_parts(param.data.cast::<u8>(), param.data_size) };
             // Deserialize the EC private key from DER
             if let Ok(ec) = EcKey::private_key_from_der(bytes) {
-                eprintln!("    [softkey] imported EC private key ({} bytes DER)", bytes.len());
+                eprintln!(
+                    "    [softkey] imported EC private key ({} bytes DER)",
+                    bytes.len()
+                );
                 key.ec_key = Some(ec);
             }
         }
     }
 
     // Extract metadata
-    let bits_param = unsafe { openssl_sys::OSSL_PARAM_locate(params as *mut _, c"softkey-bits".as_ptr()) };
+    let bits_param =
+        unsafe { openssl_sys::OSSL_PARAM_locate(params as *mut _, c"softkey-bits".as_ptr()) };
     if !bits_param.is_null() {
         let p = unsafe { &*bits_param };
         if p.data_type == OSSL_PARAM_INTEGER && !p.data.is_null() {
@@ -234,7 +256,9 @@ extern "C" fn keymgmt_import(
         }
     }
 
-    let sec_param = unsafe { openssl_sys::OSSL_PARAM_locate(params as *mut _, c"softkey-security-bits".as_ptr()) };
+    let sec_param = unsafe {
+        openssl_sys::OSSL_PARAM_locate(params as *mut _, c"softkey-security-bits".as_ptr())
+    };
     if !sec_param.is_null() {
         let p = unsafe { &*sec_param };
         if p.data_type == OSSL_PARAM_INTEGER && !p.data.is_null() {
@@ -242,7 +266,8 @@ extern "C" fn keymgmt_import(
         }
     }
 
-    let max_param = unsafe { openssl_sys::OSSL_PARAM_locate(params as *mut _, c"softkey-max-size".as_ptr()) };
+    let max_param =
+        unsafe { openssl_sys::OSSL_PARAM_locate(params as *mut _, c"softkey-max-size".as_ptr()) };
     if !max_param.is_null() {
         let p = unsafe { &*max_param };
         if p.data_type == OSSL_PARAM_INTEGER && !p.data.is_null() {
@@ -250,13 +275,17 @@ extern "C" fn keymgmt_import(
         }
     }
 
-    let group_param = unsafe { openssl_sys::OSSL_PARAM_locate(params as *mut _, c"group".as_ptr()) };
+    let group_param =
+        unsafe { openssl_sys::OSSL_PARAM_locate(params as *mut _, c"group".as_ptr()) };
     if !group_param.is_null() {
         let p = unsafe { &*group_param };
         if p.data_type == OSSL_PARAM_UTF8_STRING && !p.data.is_null() && p.data_size > 0 {
             let s = unsafe { std::slice::from_raw_parts(p.data.cast::<u8>(), p.data_size) };
             key.group_name = s.to_vec();
-            eprintln!("    [softkey] imported group_name={}", String::from_utf8_lossy(s));
+            eprintln!(
+                "    [softkey] imported group_name={}",
+                String::from_utf8_lossy(s)
+            );
         }
     }
 
@@ -326,13 +355,22 @@ extern "C" fn keymgmt_export_types(_selection: c_int) -> *const openssl_sys::OSS
     struct SyncP(openssl_sys::OSSL_PARAM);
     unsafe impl Sync for SyncP {}
     static END: SyncP = SyncP(openssl_sys::OSSL_PARAM {
-        key: ptr::null(), data_type: 0, data: ptr::null_mut(), data_size: 0, return_size: 0,
+        key: ptr::null(),
+        data_type: 0,
+        data: ptr::null_mut(),
+        data_size: 0,
+        return_size: 0,
     });
     &END.0
 }
 
-extern "C" fn keymgmt_get_params(keydata: *mut c_void, params: *mut openssl_sys::OSSL_PARAM) -> c_int {
-    if keydata.is_null() || params.is_null() { return 0; }
+extern "C" fn keymgmt_get_params(
+    keydata: *mut c_void,
+    params: *mut openssl_sys::OSSL_PARAM,
+) -> c_int {
+    if keydata.is_null() || params.is_null() {
+        return 0;
+    }
     let key = unsafe { &*keydata.cast::<SoftKey>() };
 
     // bits
@@ -340,7 +378,9 @@ extern "C" fn keymgmt_get_params(keydata: *mut c_void, params: *mut openssl_sys:
     if !p.is_null() {
         let param = unsafe { &mut *p };
         if param.data_type == OSSL_PARAM_INTEGER && !param.data.is_null() {
-            unsafe { *(param.data.cast::<c_int>()) = key.key_bits; }
+            unsafe {
+                *(param.data.cast::<c_int>()) = key.key_bits;
+            }
             param.return_size = std::mem::size_of::<c_int>();
         }
     }
@@ -350,7 +390,9 @@ extern "C" fn keymgmt_get_params(keydata: *mut c_void, params: *mut openssl_sys:
     if !p.is_null() {
         let param = unsafe { &mut *p };
         if param.data_type == OSSL_PARAM_INTEGER && !param.data.is_null() {
-            unsafe { *(param.data.cast::<c_int>()) = key.security_bits; }
+            unsafe {
+                *(param.data.cast::<c_int>()) = key.security_bits;
+            }
             param.return_size = std::mem::size_of::<c_int>();
         }
     }
@@ -360,7 +402,9 @@ extern "C" fn keymgmt_get_params(keydata: *mut c_void, params: *mut openssl_sys:
     if !p.is_null() {
         let param = unsafe { &mut *p };
         if param.data_type == OSSL_PARAM_INTEGER && !param.data.is_null() {
-            unsafe { *(param.data.cast::<c_int>()) = key.max_sig_size; }
+            unsafe {
+                *(param.data.cast::<c_int>()) = key.max_sig_size;
+            }
             param.return_size = std::mem::size_of::<c_int>();
         }
     }
@@ -372,7 +416,11 @@ extern "C" fn keymgmt_get_params(keydata: *mut c_void, params: *mut openssl_sys:
         if param.data_type == OSSL_PARAM_UTF8_STRING && !param.data.is_null() {
             let copy_len = key.group_name.len().min(param.data_size);
             unsafe {
-                ptr::copy_nonoverlapping(key.group_name.as_ptr(), param.data.cast::<u8>(), copy_len);
+                ptr::copy_nonoverlapping(
+                    key.group_name.as_ptr(),
+                    param.data.cast::<u8>(),
+                    copy_len,
+                );
             }
             param.return_size = key.group_name.len();
         }
@@ -385,17 +433,52 @@ extern "C" fn keymgmt_gettable_params(_provctx: *mut c_void) -> *const openssl_s
     struct S([openssl_sys::OSSL_PARAM; 5]);
     unsafe impl Sync for S {}
     static PARAMS: S = S([
-        openssl_sys::OSSL_PARAM { key: c"bits".as_ptr(), data_type: OSSL_PARAM_INTEGER, data: ptr::null_mut(), data_size: 0, return_size: 0 },
-        openssl_sys::OSSL_PARAM { key: c"security-bits".as_ptr(), data_type: OSSL_PARAM_INTEGER, data: ptr::null_mut(), data_size: 0, return_size: 0 },
-        openssl_sys::OSSL_PARAM { key: c"max-size".as_ptr(), data_type: OSSL_PARAM_INTEGER, data: ptr::null_mut(), data_size: 0, return_size: 0 },
-        openssl_sys::OSSL_PARAM { key: c"group".as_ptr(), data_type: OSSL_PARAM_UTF8_STRING, data: ptr::null_mut(), data_size: 0, return_size: 0 },
-        openssl_sys::OSSL_PARAM { key: ptr::null(), data_type: 0, data: ptr::null_mut(), data_size: 0, return_size: 0 },
+        openssl_sys::OSSL_PARAM {
+            key: c"bits".as_ptr(),
+            data_type: OSSL_PARAM_INTEGER,
+            data: ptr::null_mut(),
+            data_size: 0,
+            return_size: 0,
+        },
+        openssl_sys::OSSL_PARAM {
+            key: c"security-bits".as_ptr(),
+            data_type: OSSL_PARAM_INTEGER,
+            data: ptr::null_mut(),
+            data_size: 0,
+            return_size: 0,
+        },
+        openssl_sys::OSSL_PARAM {
+            key: c"max-size".as_ptr(),
+            data_type: OSSL_PARAM_INTEGER,
+            data: ptr::null_mut(),
+            data_size: 0,
+            return_size: 0,
+        },
+        openssl_sys::OSSL_PARAM {
+            key: c"group".as_ptr(),
+            data_type: OSSL_PARAM_UTF8_STRING,
+            data: ptr::null_mut(),
+            data_size: 0,
+            return_size: 0,
+        },
+        openssl_sys::OSSL_PARAM {
+            key: ptr::null(),
+            data_type: 0,
+            data: ptr::null_mut(),
+            data_size: 0,
+            return_size: 0,
+        },
     ]);
     PARAMS.0.as_ptr()
 }
 
-extern "C" fn keymgmt_set_params(keydata: *mut c_void, params: *const openssl_sys::OSSL_PARAM) -> c_int {
-    if keydata.is_null() || params.is_null() { return 0; }
+extern "C" fn keymgmt_set_params(
+    keydata: *mut c_void,
+    params: *const openssl_sys::OSSL_PARAM,
+) -> c_int {
+    if keydata.is_null() || params.is_null() {
+        return 0;
+    }
     1
 }
 
@@ -403,7 +486,11 @@ extern "C" fn keymgmt_settable_params(_provctx: *mut c_void) -> *const openssl_s
     struct SyncP(openssl_sys::OSSL_PARAM);
     unsafe impl Sync for SyncP {}
     static END: SyncP = SyncP(openssl_sys::OSSL_PARAM {
-        key: ptr::null(), data_type: 0, data: ptr::null_mut(), data_size: 0, return_size: 0,
+        key: ptr::null(),
+        data_type: 0,
+        data: ptr::null_mut(),
+        data_size: 0,
+        return_size: 0,
     });
     &END.0
 }
@@ -418,12 +505,16 @@ extern "C" fn keymgmt_query_operation_name(operation_id: c_int) -> *const c_char
 }
 
 extern "C" fn keymgmt_dup(keydata: *const c_void, _selection: c_int) -> *mut c_void {
-    if keydata.is_null() { return ptr::null_mut(); }
+    if keydata.is_null() {
+        return ptr::null_mut();
+    }
     let src = unsafe { &*keydata.cast::<SoftKey>() };
     let dup = Box::new(SoftKey {
         ec_key: src.ec_key.as_ref().and_then(|k| {
             // Clone via DER round-trip
-            k.private_key_to_der().ok().and_then(|d| EcKey::private_key_from_der(&d).ok())
+            k.private_key_to_der()
+                .ok()
+                .and_then(|d| EcKey::private_key_from_der(&d).ok())
         }),
         key_bits: src.key_bits,
         security_bits: src.security_bits,
@@ -452,7 +543,9 @@ extern "C" fn signature_freectx(ctx: *mut c_void) {
 }
 
 extern "C" fn signature_dupctx(ctx: *mut c_void) -> *mut c_void {
-    if ctx.is_null() { return ptr::null_mut(); }
+    if ctx.is_null() {
+        return ptr::null_mut();
+    }
     let src = unsafe { &*ctx.cast::<SoftSignCtx>() };
     let dup = Box::new(SoftSignCtx {
         key: src.key,
@@ -462,9 +555,13 @@ extern "C" fn signature_dupctx(ctx: *mut c_void) -> *mut c_void {
 }
 
 extern "C" fn signature_sign_init(
-    ctx: *mut c_void, provkey: *mut c_void, _params: *const openssl_sys::OSSL_PARAM,
+    ctx: *mut c_void,
+    provkey: *mut c_void,
+    _params: *const openssl_sys::OSSL_PARAM,
 ) -> c_int {
-    if ctx.is_null() || provkey.is_null() { return 0; }
+    if ctx.is_null() || provkey.is_null() {
+        return 0;
+    }
     let sign_ctx = unsafe { &mut *ctx.cast::<SoftSignCtx>() };
     sign_ctx.key = provkey.cast::<SoftKey>();
     1
@@ -478,9 +575,13 @@ extern "C" fn signature_sign(
     tbs: *const c_uchar,
     tbslen: usize,
 ) -> c_int {
-    if ctx.is_null() || siglen.is_null() { return 0; }
+    if ctx.is_null() || siglen.is_null() {
+        return 0;
+    }
     let sign_ctx = unsafe { &*ctx.cast::<SoftSignCtx>() };
-    if sign_ctx.key.is_null() { return 0; }
+    if sign_ctx.key.is_null() {
+        return 0;
+    }
     let key = unsafe { &*sign_ctx.key };
 
     let ec_key = match &key.ec_key {
@@ -490,7 +591,9 @@ extern "C" fn signature_sign(
 
     // Size query
     if sigret.is_null() {
-        unsafe { *siglen = key.max_sig_size as usize; }
+        unsafe {
+            *siglen = key.max_sig_size as usize;
+        }
         return 1;
     }
 
@@ -507,15 +610,22 @@ extern "C" fn signature_sign(
     }
 
     SIGN_COUNT.fetch_add(1, Ordering::SeqCst);
-    eprintln!("    [softkey] signature_sign produced {} byte sig", der.len());
+    eprintln!(
+        "    [softkey] signature_sign produced {} byte sig",
+        der.len()
+    );
     1
 }
 
 extern "C" fn signature_digest_sign_init(
-    ctx: *mut c_void, _mdname: *const c_char, provkey: *mut c_void,
+    ctx: *mut c_void,
+    _mdname: *const c_char,
+    provkey: *mut c_void,
     _params: *const openssl_sys::OSSL_PARAM,
 ) -> c_int {
-    if ctx.is_null() || provkey.is_null() { return 0; }
+    if ctx.is_null() || provkey.is_null() {
+        return 0;
+    }
     let sign_ctx = unsafe { &mut *ctx.cast::<SoftSignCtx>() };
     sign_ctx.key = provkey.cast::<SoftKey>();
     sign_ctx.tbs_buffer.clear();
@@ -524,9 +634,13 @@ extern "C" fn signature_digest_sign_init(
 }
 
 extern "C" fn signature_digest_sign_update(
-    ctx: *mut c_void, data: *const c_uchar, datalen: usize,
+    ctx: *mut c_void,
+    data: *const c_uchar,
+    datalen: usize,
 ) -> c_int {
-    if ctx.is_null() || data.is_null() { return 0; }
+    if ctx.is_null() || data.is_null() {
+        return 0;
+    }
     let sign_ctx = unsafe { &mut *ctx.cast::<SoftSignCtx>() };
     let slice = unsafe { std::slice::from_raw_parts(data, datalen) };
     sign_ctx.tbs_buffer.extend_from_slice(slice);
@@ -534,15 +648,24 @@ extern "C" fn signature_digest_sign_update(
 }
 
 extern "C" fn signature_digest_sign_final(
-    ctx: *mut c_void, sigret: *mut c_uchar, siglen: *mut usize, _sigsize: usize,
+    ctx: *mut c_void,
+    sigret: *mut c_uchar,
+    siglen: *mut usize,
+    _sigsize: usize,
 ) -> c_int {
-    if ctx.is_null() || siglen.is_null() { return 0; }
+    if ctx.is_null() || siglen.is_null() {
+        return 0;
+    }
     let sign_ctx = unsafe { &*ctx.cast::<SoftSignCtx>() };
-    if sign_ctx.key.is_null() { return 0; }
+    if sign_ctx.key.is_null() {
+        return 0;
+    }
     let key = unsafe { &*sign_ctx.key };
 
     if sigret.is_null() {
-        unsafe { *siglen = key.max_sig_size as usize; }
+        unsafe {
+            *siglen = key.max_sig_size as usize;
+        }
         return 1;
     }
 
@@ -562,21 +685,35 @@ extern "C" fn signature_digest_sign_final(
     }
 
     SIGN_COUNT.fetch_add(1, Ordering::SeqCst);
-    eprintln!("    [softkey] digest_sign_final produced {} byte sig from {} bytes data", der.len(), sign_ctx.tbs_buffer.len());
+    eprintln!(
+        "    [softkey] digest_sign_final produced {} byte sig from {} bytes data",
+        der.len(),
+        sign_ctx.tbs_buffer.len()
+    );
     1
 }
 
 extern "C" fn signature_digest_sign(
-    ctx: *mut c_void, sigret: *mut c_uchar, siglen: *mut usize, _sigsize: usize,
-    tbs: *const c_uchar, tbslen: usize,
+    ctx: *mut c_void,
+    sigret: *mut c_uchar,
+    siglen: *mut usize,
+    _sigsize: usize,
+    tbs: *const c_uchar,
+    tbslen: usize,
 ) -> c_int {
-    if ctx.is_null() || siglen.is_null() { return 0; }
+    if ctx.is_null() || siglen.is_null() {
+        return 0;
+    }
     let sign_ctx = unsafe { &*ctx.cast::<SoftSignCtx>() };
-    if sign_ctx.key.is_null() { return 0; }
+    if sign_ctx.key.is_null() {
+        return 0;
+    }
     let key = unsafe { &*sign_ctx.key };
 
     if sigret.is_null() {
-        unsafe { *siglen = key.max_sig_size as usize; }
+        unsafe {
+            *siglen = key.max_sig_size as usize;
+        }
         return 1;
     }
 
@@ -600,10 +737,14 @@ extern "C" fn signature_digest_sign(
 }
 
 extern "C" fn signature_digest_verify_init(
-    ctx: *mut c_void, _mdname: *const c_char, provkey: *mut c_void,
+    ctx: *mut c_void,
+    _mdname: *const c_char,
+    provkey: *mut c_void,
     _params: *const openssl_sys::OSSL_PARAM,
 ) -> c_int {
-    if ctx.is_null() || provkey.is_null() { return 0; }
+    if ctx.is_null() || provkey.is_null() {
+        return 0;
+    }
     let sign_ctx = unsafe { &mut *ctx.cast::<SoftSignCtx>() };
     sign_ctx.key = provkey.cast::<SoftKey>();
     sign_ctx.tbs_buffer.clear();
@@ -611,9 +752,13 @@ extern "C" fn signature_digest_verify_init(
 }
 
 extern "C" fn signature_digest_verify_update(
-    ctx: *mut c_void, data: *const c_uchar, datalen: usize,
+    ctx: *mut c_void,
+    data: *const c_uchar,
+    datalen: usize,
 ) -> c_int {
-    if ctx.is_null() || data.is_null() { return 0; }
+    if ctx.is_null() || data.is_null() {
+        return 0;
+    }
     let sign_ctx = unsafe { &mut *ctx.cast::<SoftSignCtx>() };
     let slice = unsafe { std::slice::from_raw_parts(data, datalen) };
     sign_ctx.tbs_buffer.extend_from_slice(slice);
@@ -621,11 +766,17 @@ extern "C" fn signature_digest_verify_update(
 }
 
 extern "C" fn signature_digest_verify_final(
-    ctx: *mut c_void, sig: *const c_uchar, siglen: usize,
+    ctx: *mut c_void,
+    sig: *const c_uchar,
+    siglen: usize,
 ) -> c_int {
-    if ctx.is_null() || sig.is_null() { return 0; }
+    if ctx.is_null() || sig.is_null() {
+        return 0;
+    }
     let sign_ctx = unsafe { &*ctx.cast::<SoftSignCtx>() };
-    if sign_ctx.key.is_null() { return 0; }
+    if sign_ctx.key.is_null() {
+        return 0;
+    }
     let key = unsafe { &*sign_ctx.key };
 
     let ec_key = match &key.ec_key {
@@ -638,42 +789,58 @@ extern "C" fn signature_digest_verify_final(
 
     match EcdsaSig::from_der(sig_bytes) {
         Ok(ecdsa_sig) => {
-            if ecdsa_sig.verify(&digest, ec_key).unwrap_or(false) { 1 } else { 0 }
+            if ecdsa_sig.verify(&digest, ec_key).unwrap_or(false) {
+                1
+            } else {
+                0
+            }
         }
         Err(_) => 0,
     }
 }
 
 extern "C" fn signature_get_ctx_params(
-    _ctx: *mut c_void, _params: *mut openssl_sys::OSSL_PARAM,
+    _ctx: *mut c_void,
+    _params: *mut openssl_sys::OSSL_PARAM,
 ) -> c_int {
     1
 }
 
 extern "C" fn signature_gettable_ctx_params(
-    _ctx: *const c_void, _provctx: *const c_void,
+    _ctx: *const c_void,
+    _provctx: *const c_void,
 ) -> *const openssl_sys::OSSL_PARAM {
     struct SyncP(openssl_sys::OSSL_PARAM);
     unsafe impl Sync for SyncP {}
     static END: SyncP = SyncP(openssl_sys::OSSL_PARAM {
-        key: ptr::null(), data_type: 0, data: ptr::null_mut(), data_size: 0, return_size: 0,
+        key: ptr::null(),
+        data_type: 0,
+        data: ptr::null_mut(),
+        data_size: 0,
+        return_size: 0,
     });
     &END.0
 }
 
 extern "C" fn signature_set_ctx_params(
-    _ctx: *mut c_void, _params: *const openssl_sys::OSSL_PARAM,
+    _ctx: *mut c_void,
+    _params: *const openssl_sys::OSSL_PARAM,
 ) -> c_int {
     1
 }
 
 extern "C" fn signature_settable_ctx_params(
-    _ctx: *const c_void, _provctx: *const c_void,
+    _ctx: *const c_void,
+    _provctx: *const c_void,
 ) -> *const openssl_sys::OSSL_PARAM {
     struct SyncP(openssl_sys::OSSL_PARAM);
     unsafe impl Sync for SyncP {}
     static END: SyncP = SyncP(openssl_sys::OSSL_PARAM {
-        key: ptr::null(), data_type: 0, data: ptr::null_mut(), data_size: 0, return_size: 0,
+        key: ptr::null(),
+        data_type: 0,
+        data: ptr::null_mut(),
+        data_size: 0,
+        return_size: 0,
     });
     &END.0
 }
@@ -683,72 +850,180 @@ extern "C" fn signature_settable_ctx_params(
 // ═══════════════════════════════════════════════════════════════════════
 
 static KEYMGMT_DISPATCH: [OsslDispatch; 16] = [
-    dispatch_entry!(OSSL_FUNC_KEYMGMT_NEW, keymgmt_new,
-        extern "C" fn(*mut c_void) -> *mut c_void),
-    dispatch_entry!(OSSL_FUNC_KEYMGMT_FREE, keymgmt_free,
-        extern "C" fn(*mut c_void)),
-    dispatch_entry!(OSSL_FUNC_KEYMGMT_HAS, keymgmt_has,
-        extern "C" fn(*const c_void, c_int) -> c_int),
-    dispatch_entry!(OSSL_FUNC_KEYMGMT_VALIDATE, keymgmt_validate,
-        extern "C" fn(*const c_void, c_int, c_int) -> c_int),
-    dispatch_entry!(OSSL_FUNC_KEYMGMT_MATCH, keymgmt_match,
-        extern "C" fn(*const c_void, *const c_void, c_int) -> c_int),
-    dispatch_entry!(OSSL_FUNC_KEYMGMT_IMPORT, keymgmt_import,
-        extern "C" fn(*mut c_void, c_int, *const openssl_sys::OSSL_PARAM) -> c_int),
-    dispatch_entry!(OSSL_FUNC_KEYMGMT_IMPORT_TYPES, keymgmt_import_types,
-        extern "C" fn(c_int) -> *const openssl_sys::OSSL_PARAM),
-    dispatch_entry!(OSSL_FUNC_KEYMGMT_EXPORT, keymgmt_export,
-        extern "C" fn(*mut c_void, c_int, Option<unsafe extern "C" fn(*const openssl_sys::OSSL_PARAM, *mut c_void) -> c_int>, *mut c_void) -> c_int),
-    dispatch_entry!(OSSL_FUNC_KEYMGMT_EXPORT_TYPES, keymgmt_export_types,
-        extern "C" fn(c_int) -> *const openssl_sys::OSSL_PARAM),
-    dispatch_entry!(OSSL_FUNC_KEYMGMT_GET_PARAMS, keymgmt_get_params,
-        extern "C" fn(*mut c_void, *mut openssl_sys::OSSL_PARAM) -> c_int),
-    dispatch_entry!(OSSL_FUNC_KEYMGMT_GETTABLE_PARAMS, keymgmt_gettable_params,
-        extern "C" fn(*mut c_void) -> *const openssl_sys::OSSL_PARAM),
-    dispatch_entry!(OSSL_FUNC_KEYMGMT_SET_PARAMS, keymgmt_set_params,
-        extern "C" fn(*mut c_void, *const openssl_sys::OSSL_PARAM) -> c_int),
-    dispatch_entry!(OSSL_FUNC_KEYMGMT_SETTABLE_PARAMS, keymgmt_settable_params,
-        extern "C" fn(*mut c_void) -> *const openssl_sys::OSSL_PARAM),
-    dispatch_entry!(OSSL_FUNC_KEYMGMT_QUERY_OPERATION_NAME, keymgmt_query_operation_name,
-        extern "C" fn(c_int) -> *const c_char),
-    dispatch_entry!(OSSL_FUNC_KEYMGMT_DUP, keymgmt_dup,
-        extern "C" fn(*const c_void, c_int) -> *mut c_void),
+    dispatch_entry!(
+        OSSL_FUNC_KEYMGMT_NEW,
+        keymgmt_new,
+        extern "C" fn(*mut c_void) -> *mut c_void
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_KEYMGMT_FREE,
+        keymgmt_free,
+        extern "C" fn(*mut c_void)
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_KEYMGMT_HAS,
+        keymgmt_has,
+        extern "C" fn(*const c_void, c_int) -> c_int
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_KEYMGMT_VALIDATE,
+        keymgmt_validate,
+        extern "C" fn(*const c_void, c_int, c_int) -> c_int
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_KEYMGMT_MATCH,
+        keymgmt_match,
+        extern "C" fn(*const c_void, *const c_void, c_int) -> c_int
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_KEYMGMT_IMPORT,
+        keymgmt_import,
+        extern "C" fn(*mut c_void, c_int, *const openssl_sys::OSSL_PARAM) -> c_int
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_KEYMGMT_IMPORT_TYPES,
+        keymgmt_import_types,
+        extern "C" fn(c_int) -> *const openssl_sys::OSSL_PARAM
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_KEYMGMT_EXPORT,
+        keymgmt_export,
+        extern "C" fn(
+            *mut c_void,
+            c_int,
+            Option<unsafe extern "C" fn(*const openssl_sys::OSSL_PARAM, *mut c_void) -> c_int>,
+            *mut c_void,
+        ) -> c_int
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_KEYMGMT_EXPORT_TYPES,
+        keymgmt_export_types,
+        extern "C" fn(c_int) -> *const openssl_sys::OSSL_PARAM
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_KEYMGMT_GET_PARAMS,
+        keymgmt_get_params,
+        extern "C" fn(*mut c_void, *mut openssl_sys::OSSL_PARAM) -> c_int
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_KEYMGMT_GETTABLE_PARAMS,
+        keymgmt_gettable_params,
+        extern "C" fn(*mut c_void) -> *const openssl_sys::OSSL_PARAM
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_KEYMGMT_SET_PARAMS,
+        keymgmt_set_params,
+        extern "C" fn(*mut c_void, *const openssl_sys::OSSL_PARAM) -> c_int
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_KEYMGMT_SETTABLE_PARAMS,
+        keymgmt_settable_params,
+        extern "C" fn(*mut c_void) -> *const openssl_sys::OSSL_PARAM
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_KEYMGMT_QUERY_OPERATION_NAME,
+        keymgmt_query_operation_name,
+        extern "C" fn(c_int) -> *const c_char
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_KEYMGMT_DUP,
+        keymgmt_dup,
+        extern "C" fn(*const c_void, c_int) -> *mut c_void
+    ),
     OsslDispatch::end(),
 ];
 
 static ECDSA_SIGNATURE_DISPATCH: [OsslDispatch; 17] = [
-    dispatch_entry!(OSSL_FUNC_SIGNATURE_NEWCTX, signature_newctx,
-        extern "C" fn(*mut c_void, *const c_char) -> *mut c_void),
-    dispatch_entry!(OSSL_FUNC_SIGNATURE_FREECTX, signature_freectx,
-        extern "C" fn(*mut c_void)),
-    dispatch_entry!(OSSL_FUNC_SIGNATURE_DUPCTX, signature_dupctx,
-        extern "C" fn(*mut c_void) -> *mut c_void),
-    dispatch_entry!(OSSL_FUNC_SIGNATURE_SIGN_INIT, signature_sign_init,
-        extern "C" fn(*mut c_void, *mut c_void, *const openssl_sys::OSSL_PARAM) -> c_int),
-    dispatch_entry!(OSSL_FUNC_SIGNATURE_SIGN, signature_sign,
-        extern "C" fn(*mut c_void, *mut c_uchar, *mut usize, usize, *const c_uchar, usize) -> c_int),
-    dispatch_entry!(OSSL_FUNC_SIGNATURE_DIGEST_SIGN_INIT, signature_digest_sign_init,
-        extern "C" fn(*mut c_void, *const c_char, *mut c_void, *const openssl_sys::OSSL_PARAM) -> c_int),
-    dispatch_entry!(OSSL_FUNC_SIGNATURE_DIGEST_SIGN_UPDATE, signature_digest_sign_update,
-        extern "C" fn(*mut c_void, *const c_uchar, usize) -> c_int),
-    dispatch_entry!(OSSL_FUNC_SIGNATURE_DIGEST_SIGN_FINAL, signature_digest_sign_final,
-        extern "C" fn(*mut c_void, *mut c_uchar, *mut usize, usize) -> c_int),
-    dispatch_entry!(OSSL_FUNC_SIGNATURE_DIGEST_SIGN, signature_digest_sign,
-        extern "C" fn(*mut c_void, *mut c_uchar, *mut usize, usize, *const c_uchar, usize) -> c_int),
-    dispatch_entry!(OSSL_FUNC_SIGNATURE_DIGEST_VERIFY_INIT, signature_digest_verify_init,
-        extern "C" fn(*mut c_void, *const c_char, *mut c_void, *const openssl_sys::OSSL_PARAM) -> c_int),
-    dispatch_entry!(OSSL_FUNC_SIGNATURE_DIGEST_VERIFY_UPDATE, signature_digest_verify_update,
-        extern "C" fn(*mut c_void, *const c_uchar, usize) -> c_int),
-    dispatch_entry!(OSSL_FUNC_SIGNATURE_DIGEST_VERIFY_FINAL, signature_digest_verify_final,
-        extern "C" fn(*mut c_void, *const c_uchar, usize) -> c_int),
-    dispatch_entry!(OSSL_FUNC_SIGNATURE_GET_CTX_PARAMS, signature_get_ctx_params,
-        extern "C" fn(*mut c_void, *mut openssl_sys::OSSL_PARAM) -> c_int),
-    dispatch_entry!(OSSL_FUNC_SIGNATURE_GETTABLE_CTX_PARAMS, signature_gettable_ctx_params,
-        extern "C" fn(*const c_void, *const c_void) -> *const openssl_sys::OSSL_PARAM),
-    dispatch_entry!(OSSL_FUNC_SIGNATURE_SET_CTX_PARAMS, signature_set_ctx_params,
-        extern "C" fn(*mut c_void, *const openssl_sys::OSSL_PARAM) -> c_int),
-    dispatch_entry!(OSSL_FUNC_SIGNATURE_SETTABLE_CTX_PARAMS, signature_settable_ctx_params,
-        extern "C" fn(*const c_void, *const c_void) -> *const openssl_sys::OSSL_PARAM),
+    dispatch_entry!(
+        OSSL_FUNC_SIGNATURE_NEWCTX,
+        signature_newctx,
+        extern "C" fn(*mut c_void, *const c_char) -> *mut c_void
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_SIGNATURE_FREECTX,
+        signature_freectx,
+        extern "C" fn(*mut c_void)
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_SIGNATURE_DUPCTX,
+        signature_dupctx,
+        extern "C" fn(*mut c_void) -> *mut c_void
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_SIGNATURE_SIGN_INIT,
+        signature_sign_init,
+        extern "C" fn(*mut c_void, *mut c_void, *const openssl_sys::OSSL_PARAM) -> c_int
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_SIGNATURE_SIGN,
+        signature_sign,
+        extern "C" fn(*mut c_void, *mut c_uchar, *mut usize, usize, *const c_uchar, usize) -> c_int
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_SIGNATURE_DIGEST_SIGN_INIT,
+        signature_digest_sign_init,
+        extern "C" fn(
+            *mut c_void,
+            *const c_char,
+            *mut c_void,
+            *const openssl_sys::OSSL_PARAM,
+        ) -> c_int
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_SIGNATURE_DIGEST_SIGN_UPDATE,
+        signature_digest_sign_update,
+        extern "C" fn(*mut c_void, *const c_uchar, usize) -> c_int
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_SIGNATURE_DIGEST_SIGN_FINAL,
+        signature_digest_sign_final,
+        extern "C" fn(*mut c_void, *mut c_uchar, *mut usize, usize) -> c_int
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_SIGNATURE_DIGEST_SIGN,
+        signature_digest_sign,
+        extern "C" fn(*mut c_void, *mut c_uchar, *mut usize, usize, *const c_uchar, usize) -> c_int
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_SIGNATURE_DIGEST_VERIFY_INIT,
+        signature_digest_verify_init,
+        extern "C" fn(
+            *mut c_void,
+            *const c_char,
+            *mut c_void,
+            *const openssl_sys::OSSL_PARAM,
+        ) -> c_int
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_SIGNATURE_DIGEST_VERIFY_UPDATE,
+        signature_digest_verify_update,
+        extern "C" fn(*mut c_void, *const c_uchar, usize) -> c_int
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_SIGNATURE_DIGEST_VERIFY_FINAL,
+        signature_digest_verify_final,
+        extern "C" fn(*mut c_void, *const c_uchar, usize) -> c_int
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_SIGNATURE_GET_CTX_PARAMS,
+        signature_get_ctx_params,
+        extern "C" fn(*mut c_void, *mut openssl_sys::OSSL_PARAM) -> c_int
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_SIGNATURE_GETTABLE_CTX_PARAMS,
+        signature_gettable_ctx_params,
+        extern "C" fn(*const c_void, *const c_void) -> *const openssl_sys::OSSL_PARAM
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_SIGNATURE_SET_CTX_PARAMS,
+        signature_set_ctx_params,
+        extern "C" fn(*mut c_void, *const openssl_sys::OSSL_PARAM) -> c_int
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_SIGNATURE_SETTABLE_CTX_PARAMS,
+        signature_settable_ctx_params,
+        extern "C" fn(*const c_void, *const c_void) -> *const openssl_sys::OSSL_PARAM
+    ),
     OsslDispatch::end(),
 ];
 
@@ -781,7 +1056,9 @@ static SIGNATURE_ALGORITHMS: [OsslAlgorithm; 2] = [
 // ═══════════════════════════════════════════════════════════════════════
 
 extern "C" fn provider_query_operation(
-    _provctx: *mut c_void, operation_id: c_int, _no_cache: *mut c_int,
+    _provctx: *mut c_void,
+    operation_id: c_int,
+    _no_cache: *mut c_int,
 ) -> *const OsslAlgorithm {
     eprintln!("    [softkey] query_operation(op_id={operation_id})");
     match operation_id {
@@ -794,10 +1071,16 @@ extern "C" fn provider_query_operation(
 extern "C" fn provider_teardown(_provctx: *mut c_void) {}
 
 static PROVIDER_DISPATCH: [OsslDispatch; 3] = [
-    dispatch_entry!(OSSL_FUNC_PROVIDER_TEARDOWN, provider_teardown,
-        extern "C" fn(*mut c_void)),
-    dispatch_entry!(OSSL_FUNC_PROVIDER_QUERY_OPERATION, provider_query_operation,
-        extern "C" fn(*mut c_void, c_int, *mut c_int) -> *const OsslAlgorithm),
+    dispatch_entry!(
+        OSSL_FUNC_PROVIDER_TEARDOWN,
+        provider_teardown,
+        extern "C" fn(*mut c_void)
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_PROVIDER_QUERY_OPERATION,
+        provider_query_operation,
+        extern "C" fn(*mut c_void, c_int, *mut c_int) -> *const OsslAlgorithm
+    ),
     OsslDispatch::end(),
 ];
 
@@ -824,15 +1107,12 @@ fn register_softkey_provider() {
         };
         assert_eq!(rc, 1, "OSSL_PROVIDER_add_builtin failed");
 
-        let prov = unsafe {
-            openssl_sys::OSSL_PROVIDER_load(ptr::null_mut(), c"softkey".as_ptr())
-        };
+        let prov = unsafe { openssl_sys::OSSL_PROVIDER_load(ptr::null_mut(), c"softkey".as_ptr()) };
         assert!(!prov.is_null(), "OSSL_PROVIDER_load failed for softkey");
 
         // Also load the default provider
-        let default = unsafe {
-            openssl_sys::OSSL_PROVIDER_load(ptr::null_mut(), c"default".as_ptr())
-        };
+        let default =
+            unsafe { openssl_sys::OSSL_PROVIDER_load(ptr::null_mut(), c"default".as_ptr()) };
         assert!(!default.is_null(), "OSSL_PROVIDER_load failed for default");
 
         eprintln!("    [softkey] provider registered and loaded");
@@ -862,18 +1142,36 @@ fn generate_test_pki() -> TestPki {
     let mut ca_builder = X509Builder::new().unwrap();
     ca_builder.set_version(2).unwrap();
     let mut sn = BigNum::new().unwrap();
-    sn.rand(128, openssl::bn::MsbOption::MAYBE_ZERO, false).unwrap();
-    ca_builder.set_serial_number(&sn.to_asn1_integer().unwrap()).unwrap();
+    sn.rand(128, openssl::bn::MsbOption::MAYBE_ZERO, false)
+        .unwrap();
+    ca_builder
+        .set_serial_number(&sn.to_asn1_integer().unwrap())
+        .unwrap();
     let mut ca_name = X509NameBuilder::new().unwrap();
     ca_name.append_entry_by_text("CN", "test-ca").unwrap();
     let ca_name = ca_name.build();
     ca_builder.set_subject_name(&ca_name).unwrap();
     ca_builder.set_issuer_name(&ca_name).unwrap();
     ca_builder.set_pubkey(&ca_key).unwrap();
-    ca_builder.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
-    ca_builder.set_not_after(&Asn1Time::days_from_now(1).unwrap()).unwrap();
-    ca_builder.append_extension(BasicConstraints::new().critical().ca().build().unwrap()).unwrap();
-    ca_builder.append_extension(KeyUsage::new().critical().key_cert_sign().crl_sign().build().unwrap()).unwrap();
+    ca_builder
+        .set_not_before(&Asn1Time::days_from_now(0).unwrap())
+        .unwrap();
+    ca_builder
+        .set_not_after(&Asn1Time::days_from_now(1).unwrap())
+        .unwrap();
+    ca_builder
+        .append_extension(BasicConstraints::new().critical().ca().build().unwrap())
+        .unwrap();
+    ca_builder
+        .append_extension(
+            KeyUsage::new()
+                .critical()
+                .key_cert_sign()
+                .crl_sign()
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
     ca_builder.sign(&ca_key, MessageDigest::sha256()).unwrap();
     let ca_cert = ca_builder.build();
 
@@ -882,16 +1180,23 @@ fn generate_test_pki() -> TestPki {
     let mut srv_builder = X509Builder::new().unwrap();
     srv_builder.set_version(2).unwrap();
     let mut sn = BigNum::new().unwrap();
-    sn.rand(128, openssl::bn::MsbOption::MAYBE_ZERO, false).unwrap();
-    srv_builder.set_serial_number(&sn.to_asn1_integer().unwrap()).unwrap();
+    sn.rand(128, openssl::bn::MsbOption::MAYBE_ZERO, false)
+        .unwrap();
+    srv_builder
+        .set_serial_number(&sn.to_asn1_integer().unwrap())
+        .unwrap();
     let mut srv_name = X509NameBuilder::new().unwrap();
     srv_name.append_entry_by_text("CN", "localhost").unwrap();
     let srv_name = srv_name.build();
     srv_builder.set_subject_name(&srv_name).unwrap();
     srv_builder.set_issuer_name(ca_cert.subject_name()).unwrap();
     srv_builder.set_pubkey(&server_key).unwrap();
-    srv_builder.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
-    srv_builder.set_not_after(&Asn1Time::days_from_now(1).unwrap()).unwrap();
+    srv_builder
+        .set_not_before(&Asn1Time::days_from_now(0).unwrap())
+        .unwrap();
+    srv_builder
+        .set_not_after(&Asn1Time::days_from_now(1).unwrap())
+        .unwrap();
     srv_builder.sign(&ca_key, MessageDigest::sha256()).unwrap();
     let server_cert = srv_builder.build();
 
@@ -901,16 +1206,23 @@ fn generate_test_pki() -> TestPki {
     let mut cli_builder = X509Builder::new().unwrap();
     cli_builder.set_version(2).unwrap();
     let mut sn = BigNum::new().unwrap();
-    sn.rand(128, openssl::bn::MsbOption::MAYBE_ZERO, false).unwrap();
-    cli_builder.set_serial_number(&sn.to_asn1_integer().unwrap()).unwrap();
+    sn.rand(128, openssl::bn::MsbOption::MAYBE_ZERO, false)
+        .unwrap();
+    cli_builder
+        .set_serial_number(&sn.to_asn1_integer().unwrap())
+        .unwrap();
     let mut cli_name = X509NameBuilder::new().unwrap();
     cli_name.append_entry_by_text("CN", "test-client").unwrap();
     let cli_name = cli_name.build();
     cli_builder.set_subject_name(&cli_name).unwrap();
     cli_builder.set_issuer_name(ca_cert.subject_name()).unwrap();
     cli_builder.set_pubkey(&client_key).unwrap();
-    cli_builder.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
-    cli_builder.set_not_after(&Asn1Time::days_from_now(1).unwrap()).unwrap();
+    cli_builder
+        .set_not_before(&Asn1Time::days_from_now(0).unwrap())
+        .unwrap();
+    cli_builder
+        .set_not_after(&Asn1Time::days_from_now(1).unwrap())
+        .unwrap();
     cli_builder.sign(&ca_key, MessageDigest::sha256()).unwrap();
     let client_cert = cli_builder.build();
 
@@ -937,8 +1249,12 @@ fn build_server_acceptor(pki: &TestPki) -> openssl::ssl::SslAcceptor {
     builder.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
 
     // Force TLS 1.2
-    builder.set_min_proto_version(Some(openssl::ssl::SslVersion::TLS1_2)).unwrap();
-    builder.set_max_proto_version(Some(openssl::ssl::SslVersion::TLS1_2)).unwrap();
+    builder
+        .set_min_proto_version(Some(openssl::ssl::SslVersion::TLS1_2))
+        .unwrap();
+    builder
+        .set_max_proto_version(Some(openssl::ssl::SslVersion::TLS1_2))
+        .unwrap();
 
     builder.build()
 }
@@ -1022,7 +1338,9 @@ unsafe fn create_softkey_pkey(ec_key_der: &[u8]) -> *mut openssl_sys::EVP_PKEY {
     assert_eq!(rc, 1, "EVP_PKEY_fromdata failed");
     assert!(!pkey.is_null(), "EVP_PKEY_fromdata returned null");
 
-    unsafe { openssl_sys::EVP_PKEY_CTX_free(pkey_ctx); }
+    unsafe {
+        openssl_sys::EVP_PKEY_CTX_free(pkey_ctx);
+    }
 
     pkey
 }
@@ -1035,7 +1353,7 @@ unsafe fn create_softkey_pkey(ec_key_der: &[u8]) -> *mut openssl_sys::EVP_PKEY {
 fn softkey_provider_fetch_works() {
     // Generate PKI BEFORE registering provider to avoid interference
     let pki = generate_test_pki();
-    
+
     register_softkey_provider();
 
     unsafe {
@@ -1045,14 +1363,23 @@ fn softkey_provider_fetch_works() {
             c"ECDSA".as_ptr(),
             c"provider=softkey".as_ptr(),
         );
-        eprintln!("[test] EVP_SIGNATURE_fetch('ECDSA', provider=softkey) = {:?}", sig);
+        eprintln!(
+            "[test] EVP_SIGNATURE_fetch('ECDSA', provider=softkey) = {:?}",
+            sig
+        );
         if sig.is_null() {
             // Dump errors
             loop {
                 let err = openssl_sys::ERR_get_error();
-                if err == 0 { break; }
+                if err == 0 {
+                    break;
+                }
                 let reason = openssl_sys::ERR_reason_error_string(err);
-                let r = if !reason.is_null() { CStr::from_ptr(reason).to_str().unwrap_or("?") } else { "?" };
+                let r = if !reason.is_null() {
+                    CStr::from_ptr(reason).to_str().unwrap_or("?")
+                } else {
+                    "?"
+                };
                 eprintln!("  ERR: {r}");
             }
             panic!("EVP_SIGNATURE_fetch for softkey returned NULL!");
@@ -1071,15 +1398,25 @@ fn softkey_provider_fetch_works() {
         let sha256 = openssl_sys::EVP_sha256();
         let mut pctx: *mut openssl_sys::EVP_PKEY_CTX = ptr::null_mut();
         let rc = openssl_sys::EVP_DigestSignInit(
-            md_ctx, &mut pctx, sha256, ptr::null_mut(), pkey as *mut _,
+            md_ctx,
+            &mut pctx,
+            sha256,
+            ptr::null_mut(),
+            pkey as *mut _,
         );
         eprintln!("[test] EVP_DigestSignInit = {rc}");
         if rc != 1 {
             loop {
                 let err = openssl_sys::ERR_get_error();
-                if err == 0 { break; }
+                if err == 0 {
+                    break;
+                }
                 let reason = openssl_sys::ERR_reason_error_string(err);
-                let r = if !reason.is_null() { CStr::from_ptr(reason).to_str().unwrap_or("?") } else { "?" };
+                let r = if !reason.is_null() {
+                    CStr::from_ptr(reason).to_str().unwrap_or("?")
+                } else {
+                    "?"
+                };
                 eprintln!("  ERR: {r}");
             }
             openssl_sys::EVP_MD_CTX_free(md_ctx);
@@ -1125,8 +1462,12 @@ fn softkey_tls12_handshake() {
     builder.set_cert_store(store_builder.build());
 
     // Pin TLS 1.2
-    builder.set_min_proto_version(Some(openssl::ssl::SslVersion::TLS1_2)).unwrap();
-    builder.set_max_proto_version(Some(openssl::ssl::SslVersion::TLS1_2)).unwrap();
+    builder
+        .set_min_proto_version(Some(openssl::ssl::SslVersion::TLS1_2))
+        .unwrap();
+    builder
+        .set_max_proto_version(Some(openssl::ssl::SslVersion::TLS1_2))
+        .unwrap();
 
     let ssl_ctx = builder.build();
 
@@ -1140,7 +1481,9 @@ fn softkey_tls12_handshake() {
     // Create provider EVP_PKEY with the real private key
     let pkey = unsafe { create_softkey_pkey(&pki.client_ec_key_der) };
     let rc = unsafe { openssl_sys::SSL_CTX_use_PrivateKey(ssl_ctx_ptr, pkey) };
-    unsafe { openssl_sys::EVP_PKEY_free(pkey); }
+    unsafe {
+        openssl_sys::EVP_PKEY_free(pkey);
+    }
     assert_eq!(rc, 1, "SSL_CTX_use_PrivateKey failed");
     eprintln!("[test] ✓ SSL_CTX_use_PrivateKey OK");
 
@@ -1155,15 +1498,26 @@ fn softkey_tls12_handshake() {
         // Fetch test
         openssl_sys::ERR_clear_error();
         let sig = openssl_sys::EVP_SIGNATURE_fetch(
-            ptr::null_mut(), c"ECDSA".as_ptr(), c"provider=softkey".as_ptr(),
+            ptr::null_mut(),
+            c"ECDSA".as_ptr(),
+            c"provider=softkey".as_ptr(),
         );
-        eprintln!("[test] EVP_SIGNATURE_fetch('ECDSA', provider=softkey) = {:?}", sig);
+        eprintln!(
+            "[test] EVP_SIGNATURE_fetch('ECDSA', provider=softkey) = {:?}",
+            sig
+        );
         if sig.is_null() {
             loop {
                 let err = openssl_sys::ERR_get_error();
-                if err == 0 { break; }
+                if err == 0 {
+                    break;
+                }
                 let reason = openssl_sys::ERR_reason_error_string(err);
-                let r = if !reason.is_null() { CStr::from_ptr(reason).to_str().unwrap_or("?") } else { "?" };
+                let r = if !reason.is_null() {
+                    CStr::from_ptr(reason).to_str().unwrap_or("?")
+                } else {
+                    "?"
+                };
                 eprintln!("  ERR: {r}");
             }
         } else {
@@ -1176,15 +1530,25 @@ fn softkey_tls12_handshake() {
         let sha256 = openssl_sys::EVP_sha256();
         let mut pctx: *mut openssl_sys::EVP_PKEY_CTX = ptr::null_mut();
         let rc = openssl_sys::EVP_DigestSignInit(
-            md_ctx, &mut pctx, sha256, ptr::null_mut(), pkey as *mut _,
+            md_ctx,
+            &mut pctx,
+            sha256,
+            ptr::null_mut(),
+            pkey as *mut _,
         );
         eprintln!("[test] EVP_DigestSignInit(SHA256, pkey) = {rc}");
         if rc != 1 {
             loop {
                 let err = openssl_sys::ERR_get_error();
-                if err == 0 { break; }
+                if err == 0 {
+                    break;
+                }
                 let reason = openssl_sys::ERR_reason_error_string(err);
-                let r = if !reason.is_null() { CStr::from_ptr(reason).to_str().unwrap_or("?") } else { "?" };
+                let r = if !reason.is_null() {
+                    CStr::from_ptr(reason).to_str().unwrap_or("?")
+                } else {
+                    "?"
+                };
                 eprintln!("  ERR: {r}");
             }
         }
@@ -1204,7 +1568,9 @@ fn softkey_tls12_handshake() {
     let server_thread = std::thread::spawn(move || {
         server_ready.wait();
         let (stream, _) = listener.accept().unwrap();
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
         match server_acceptor.accept(stream) {
             Ok(mut tls) => {
                 eprintln!("    [server] TLS accepted ✓");
@@ -1224,7 +1590,9 @@ fn softkey_tls12_handshake() {
 
     // Connect
     let stream = TcpStream::connect(addr).unwrap();
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
     let ssl = openssl::ssl::Ssl::new(&ssl_ctx).unwrap();
     match ssl.connect(stream) {
         Ok(mut tls) => {
@@ -1244,6 +1612,9 @@ fn softkey_tls12_handshake() {
 
     server_thread.join().unwrap();
 
-    assert!(sign_calls > 0, "sign function was never called! The provider is broken.");
+    assert!(
+        sign_calls > 0,
+        "sign function was never called! The provider is broken."
+    );
     eprintln!("[test] ✓ SOFTKEY TLS 1.2 mTLS HANDSHAKE PASSED — provider works!");
 }

@@ -77,7 +77,10 @@ pub unsafe fn configure_ssl_context(
 
     // ── Load certificate into SSL_CTX ──────────────────────────────────
     let ssl_ctx = ctx.cast::<openssl_sys::SSL_CTX>();
-    log::debug!("hardmTLS: calling SSL_CTX_use_certificate (ssl_ctx={:?})", ssl_ctx);
+    log::debug!(
+        "hardmTLS: calling SSL_CTX_use_certificate (ssl_ctx={:?})",
+        ssl_ctx
+    );
 
     // SAFETY: ssl_ctx is valid (guaranteed by caller), x509 is valid.
     let rc = unsafe { openssl_sys::SSL_CTX_use_certificate(ssl_ctx, x509.as_ptr()) };
@@ -153,7 +156,9 @@ pub unsafe fn configure_ssl_context(
             >,
         );
     }
-    unsafe { SSL_CTX_set_client_cert_cb(ssl_ctx, Some(client_cert_cb)); }
+    unsafe {
+        SSL_CTX_set_client_cert_cb(ssl_ctx, Some(client_cert_cb));
+    }
 
     // Free the EVP_PKEY (SSL_CTX_use_PrivateKey increments the refcount).
     // SAFETY: pkey is valid.
@@ -192,17 +197,15 @@ fn rsa_security_bits(key_bits: c_int) -> c_int {
 }
 
 /// Get key metadata (bits, security_bits, max_sig_size) for an EC key by curve NID.
-fn ec_key_metadata(
-    nid: openssl::nid::Nid,
-) -> Result<(c_int, c_int, c_int), HardmtlsError> {
+fn ec_key_metadata(nid: openssl::nid::Nid) -> Result<(c_int, c_int, c_int), HardmtlsError> {
     use openssl::nid::Nid;
 
     // max_sig_size for ECDSA = 2 * (key_bytes + 1) + 6 (DER overhead)
     // This is a conservative upper bound matching OpenSSL's internal calculation.
     match nid {
-        Nid::X9_62_PRIME256V1 => Ok((256, 128, 72)),    // P-256
-        Nid::SECP384R1 => Ok((384, 192, 104)),           // P-384
-        Nid::SECP521R1 => Ok((521, 256, 141)),           // P-521
+        Nid::X9_62_PRIME256V1 => Ok((256, 128, 72)), // P-256
+        Nid::SECP384R1 => Ok((384, 192, 104)),       // P-384
+        Nid::SECP521R1 => Ok((521, 256, 141)),       // P-521
         _ => Err(HardmtlsError::SslError(format!(
             "unsupported EC curve NID: {:?}",
             nid
@@ -503,7 +506,8 @@ mod tests {
 
         // Create a custom EVP_PKEY.
         #[allow(unsafe_code)]
-        let result = unsafe { super::create_provider_pkey(dummy_sign, c"RSA", 2048, 112, 256, None) };
+        let result =
+            unsafe { super::create_provider_pkey(dummy_sign, c"RSA", 2048, 112, 256, None) };
 
         assert!(result.is_ok(), "create_provider_pkey failed: {result:?}");
 
@@ -523,8 +527,10 @@ extern "C" fn client_cert_cb(
 ) -> std::ffi::c_int {
     unsafe {
         let ssl_ctx = openssl_sys::SSL_get_SSL_CTX(ssl);
-        if ssl_ctx.is_null() { return 0; }
-        
+        if ssl_ctx.is_null() {
+            return 0;
+        }
+
         let cert = openssl_sys::SSL_CTX_get0_certificate(ssl_ctx);
         let private_key = openssl_sys::SSL_CTX_get0_privatekey(ssl_ctx);
 

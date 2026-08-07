@@ -155,6 +155,9 @@ mod tests {
         }"#;
         let config: CertificateConfig = serde_json::from_str(json).unwrap();
         let backend = select_backend(&config);
-        assert!(backend.is_ok(), "Windows store config should select a backend");
+        assert!(
+            backend.is_ok(),
+            "Windows store config should select a backend"
+        );
     }
 }
