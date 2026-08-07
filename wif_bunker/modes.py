@@ -159,17 +159,17 @@ def _run_status() -> None:
     cert_config_path = Path.cwd() / "certificate_config.json"
     try:
         cert_config = json.loads(cert_config_path.read_text())
-        ecp_client_path = cert_config.get("libs", {}).get("ecp_client")
-        if not ecp_client_path or not Path(ecp_client_path).exists():
-            logger.error("ECP:       %s ECP client library not found at: %s", SYM_CROSS, ecp_client_path)
+        hardmtls_lib_path = cert_config.get("libs", {}).get("ecp_client")
+        if not hardmtls_lib_path or not Path(hardmtls_lib_path).exists():
+            logger.error("hardmTLS:  %s library not found at: %s", SYM_CROSS, hardmtls_lib_path)
             return
 
-        from wif_bunker.cert import ecp_get_cert_pem
+        from wif_bunker.cert import hardmtls_get_cert_pem
 
-        _cert_pem_bytes = ecp_get_cert_pem(ecp_client_path, cert_config_path)
-        logger.info("ECP:       %s Certificate retrieved (%d bytes)", SYM_CHECK, len(_cert_pem_bytes))
+        _cert_pem_bytes = hardmtls_get_cert_pem(hardmtls_lib_path, cert_config_path)
+        logger.info("hardmTLS:  %s Certificate retrieved (%d bytes)", SYM_CHECK, len(_cert_pem_bytes))
     except Exception as exc:
-        logger.error("ECP:       %s %s", SYM_CROSS, exc)
+        logger.error("hardmTLS:  %s %s", SYM_CROSS, exc)
         return
 
     # Stage 4: Test ADC
