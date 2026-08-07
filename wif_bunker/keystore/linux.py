@@ -325,6 +325,9 @@ def _init_token(lib, pin: str, module_path: str):
                 "    Created PKCS#11 token '%s' via tpm2_ptool addtoken",
                 _TOKEN_LABEL,
             )
+            # tpm2_ptool modifies the SQLite store directly — the
+            # already-loaded lib has stale cached state.  Reload.
+            lib = pkcs11.lib(module_path)
             return lib.get_token(token_label=_TOKEN_LABEL)
         except subprocess.CalledProcessError as exc:
             logger.debug(
