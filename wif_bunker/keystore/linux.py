@@ -308,46 +308,50 @@ def _ensure_token_via_tpm2_ptool(pin: str, tpm_store: str, module_path: str) -> 
     if not tpm2_ptool:
         return
 
-    # Check if our token already exists by listing tokens.
-    try:
-        result = subprocess.run(
-            [tpm2_ptool, "listtokens", "--path", tpm_store],
+    # Check if our token already exists via the SQLite store.
+    db_path = Path(tpm_store) / "tpm2_pkcs11.sqlite3"
+    token_exists = False
+    if db_path.exists():
+        import sqlite3 as _sqlite3
+        try:
+            conn = _sqlite3.connect(str(db_path))
+            cursor = conn.execute(
+                "SELECT COUNT(*) FROM tokens WHERE label = ?", (_TOKEN_LABEL,)
+            )
+            token_exists = cursor.fetchone()[0] > 0
+            conn.close()
+        except _sqlite3.Error:
+            pass  # DB not readable — treat as no token
+
+    if token_exists:
+        # Token exists — verify our PIN works by forcing a login.
+        # (--list-objects without --login succeeds even with wrong PIN
+        # because it only lists public objects.)
+        verify = subprocess.run(
+            [
+                "pkcs11-tool",
+                "--module", module_path,
+                "--token-label", _TOKEN_LABEL,
+                "--login",
+                "--pin", pin,
+                "--list-objects",
+            ],
             capture_output=True, text=True, check=False,
         )
-        # tpm2_ptool may output to stdout or stderr (Python logging)
-        combined_output = result.stdout + result.stderr
-        if _TOKEN_LABEL in combined_output:
-            # Token exists — verify our PIN works by forcing a login.
-            # (--list-objects without --login succeeds even with wrong PIN
-            # because it only lists public objects.)
-            verify = subprocess.run(
-                [
-                    "pkcs11-tool",
-                    "--module", module_path,
-                    "--token-label", _TOKEN_LABEL,
-                    "--login",
-                    "--pin", pin,
-                    "--list-objects",
-                ],
-                capture_output=True, text=True, check=False,
-            )
-            if verify.returncode == 0:
-                logger.info("    Token '%s' exists and PIN is valid", _TOKEN_LABEL)
-                return
+        if verify.returncode == 0:
+            logger.info("    Token '%s' exists and PIN is valid", _TOKEN_LABEL)
+            return
 
-            # PIN mismatch — remove and recreate.
-            logger.info(
-                "    Token '%s' exists but PIN is invalid (rc=%d), recreating",
-                _TOKEN_LABEL, verify.returncode,
-            )
-            rm_result = subprocess.run(
-                [tpm2_ptool, "rmtoken", "--label", _TOKEN_LABEL, "--path", tpm_store],
-                capture_output=True, text=True, check=False,
-            )
-            logger.info("    rmtoken exit=%d", rm_result.returncode)
-            # Skip init — store and primary key already exist.
-    except FileNotFoundError:
-        return
+        # PIN mismatch — remove and recreate.
+        logger.info(
+            "    Token '%s' exists but PIN is invalid (rc=%d), recreating",
+            _TOKEN_LABEL, verify.returncode,
+        )
+        rm_result = subprocess.run(
+            [tpm2_ptool, "rmtoken", "--label", _TOKEN_LABEL, "--path", tpm_store],
+            capture_output=True, text=True, check=False,
+        )
+        logger.info("    rmtoken exit=%d", rm_result.returncode)
 
     if not Path(tpm_store, "tpm2_pkcs11.sqlite3").exists():
         # Fresh store — initialize (creates primary object id=1).
