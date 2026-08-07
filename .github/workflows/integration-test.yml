@@ -426,6 +426,13 @@ jobs:
           echo "project_id=$PROJECT_ID" >> "$GITHUB_OUTPUT"
           echo "Project ID: $PROJECT_ID"
 
+      # ── Diagnostic: dump all version info early ──
+      - name: "Diagnostic: --all-versions"
+        shell: bash
+        run: |
+          WIF_CMD="${{ inputs.wif_bunker_cmd || 'python -m wif_bunker' }}"
+          $WIF_CMD --all-versions
+
       # ── Baseline: confirm GHA CI service account is working ──
       - name: "ADC Baseline: GHA CI service account"
         shell: bash

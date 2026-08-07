@@ -33,6 +33,7 @@ from wif_bunker.config import (
 from wif_bunker.gcp_client import GCPClient
 from wif_bunker.keystore import generate_os_keystore_cert
 from wif_bunker.modes import (
+    _run_all_versions,
     _run_attest,
     _run_cert_and_mtls_test,
     _run_cert_only,
@@ -92,6 +93,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "Query the active keystore (TPM, Secure Enclave, YubiKey, or soft key) "
             "for supported key algorithms and print one per line. "
             "Use with --debug for a verbose table."
+        ),
+    )
+    mode_group.add_argument(
+        "--all-versions",
+        action="store_true",
+        help=(
+            "Print all version info, dependency versions, environment variables, "
+            "and system details. Useful for bug reports and debugging."
         ),
     )
     parser.add_argument(
@@ -319,6 +328,10 @@ def _main_impl() -> None:
     _validate_and_configure(parser, args, config)
 
     # --- Mode dispatch: --status, --attest, --supported-algorithms, or --cert-only exit early ---
+    if args.all_versions:
+        _run_all_versions()
+        return
+
     if args.status:
         _run_status()
         return

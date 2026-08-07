@@ -1,4 +1,4 @@
-"""Alternate CLI modes: --cert-only, --cert-and-mtls-test, --status, --attest, and --supported-algorithms."""  # pylint: disable=duplicate-code
+"""Alternate CLI modes: --cert-only, --cert-and-mtls-test, --status, --attest, --supported-algorithms, and --all-versions."""  # pylint: disable=duplicate-code
 
 from __future__ import annotations
 
@@ -400,3 +400,143 @@ def _run_supported_algorithms(
     else:
         for algo in supported:
             print(algo)
+
+
+def _run_all_versions() -> None:  # noqa: C901 — diagnostic dump, complexity is fine
+    """Print comprehensive version, environment, and system info for debugging."""
+    import platform
+    import shutil
+    import ssl
+    import struct
+    import subprocess
+
+    from wif_bunker import __version__
+
+    def _safe_version(module_name: str) -> str:
+        """Import a module and return its version, or a fallback message."""
+        import importlib
+
+        try:
+            mod = importlib.import_module(module_name)
+            return getattr(mod, "__version__", getattr(mod, "VERSION", "(no __version__)"))
+        except ImportError:
+            return "(not installed)"
+        except Exception as exc:  # pylint: disable=broad-except
+            return f"(error: {exc})"
+
+    # ── WIF Bunker ──
+    print("WIF Bunker")
+    print(f"  wif-bunker:        {__version__}")
+
+    # ── Python ──
+    print("\nPython")
+    print(f"  Python:            {platform.python_version()}")
+    print(f"  Implementation:    {platform.python_implementation()}")
+    print(f"  Compiler:          {platform.python_compiler()}")
+    print(f"  Executable:        {sys.executable}")
+    print(f"  Prefix:            {sys.prefix}")
+    frozen = getattr(sys, "frozen", False)
+    if frozen:
+        print(f"  Frozen:            {frozen} (PyInstaller bundle)")
+
+    # ── OpenSSL (as linked by Python's ssl module) ──
+    print("\nOpenSSL")
+    print(f"  ssl.OPENSSL_VERSION:        {ssl.OPENSSL_VERSION}")
+    print(f"  ssl.OPENSSL_VERSION_INFO:   {ssl.OPENSSL_VERSION_INFO}")
+    ssl_path = shutil.which("openssl")
+    if ssl_path:
+        try:
+            result = subprocess.run(
+                [ssl_path, "version"],
+                capture_output=True, text=True, timeout=5,
+            )
+            print(f"  openssl CLI:                {result.stdout.strip()}")
+            print(f"  openssl path:               {ssl_path}")
+        except Exception:  # pylint: disable=broad-except
+            print(f"  openssl path:               {ssl_path} (version query failed)")
+    else:
+        print("  openssl CLI:                (not found on PATH)")
+    openssl_dir = os.environ.get("OPENSSL_DIR")
+    if openssl_dir:
+        print(f"  OPENSSL_DIR:                {openssl_dir}")
+
+    # ── Key Dependencies ──
+    print("\nKey Dependencies")
+    print(f"  cryptography:      {_safe_version('cryptography')}")
+    print(f"  pyOpenSSL:         {_safe_version('OpenSSL')}")
+    print(f"  google-auth:       {_safe_version('google.auth')}")
+    print(f"  requests:          {_safe_version('requests')}")
+    print(f"  cffi:              {_safe_version('cffi')}")
+    print(f"  yubikey-manager:   {_safe_version('ykman')}")
+
+    # Platform-specific deps
+    if sys.platform == "linux":
+        print(f"  tpm2-pytss:        {_safe_version('tpm2_pytss')}")
+        print(f"  python-pkcs11:     {_safe_version('pkcs11')}")
+
+    # ── hardmTLS ──
+    print("\nhardmTLS")
+    try:
+        from wif_bunker.cert import _find_hardmtls_library
+        lib_path = _find_hardmtls_library()
+        print(f"  Library:           {lib_path}")
+    except FileNotFoundError:
+        print("  Library:           (not found)")
+    except Exception as exc:  # pylint: disable=broad-except
+        print(f"  Library:           (error: {exc})")
+
+    # ── Environment Variables ──
+    print("\nEnvironment Variables")
+    env_keys = [
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_API_USE_CLIENT_CERTIFICATE",
+        "GOOGLE_API_CERTIFICATE_CONFIG",
+        "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
+        "GOOGLE_CLOUD_PROJECT",
+        "CLOUDSDK_CORE_PROJECT",
+        "OPENSSL_DIR",
+        "OPENSSL_CONF",
+        "OPENSSL_MODULES",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "ENABLE_ENTERPRISE_CERTIFICATE_LOGS",
+        "RUST_LOG",
+        "LD_LIBRARY_PATH",
+        "DYLD_LIBRARY_PATH",
+        "TPM2TOOLS_TCTI",
+        "TPM2_PKCS11_TCTI",
+        "TPM2_PKCS11_STORE",
+        "DBUS_SESSION_BUS_ADDRESS",
+    ]
+    found_any = False
+    for key in env_keys:
+        val = os.environ.get(key)
+        if val is not None:
+            found_any = True
+            print(f"  {key}={val}")
+    if not found_any:
+        print("  (none of the relevant variables are set)")
+
+    # ── System ──
+    print("\nSystem")
+    print(f"  OS:                {platform.system()} {platform.release()}")
+    print(f"  Platform:          {platform.platform()}")
+    print(f"  Machine:           {platform.machine()}")
+    print(f"  Architecture:      {struct.calcsize('P') * 8}-bit")
+    if sys.platform == "darwin":
+        print(f"  macOS version:     {platform.mac_ver()[0]}")
+    elif sys.platform == "win32":
+        ver = platform.win32_ver()
+        print(f"  Windows version:   {ver[0]} {ver[1]}")
+
+    # ── Config Files ──
+    print("\nConfig Files")
+    for fname in _CONFIG_FILES:
+        fpath = Path.cwd() / fname
+        if fpath.exists():
+            size = fpath.stat().st_size
+            print(f"  {SYM_CHECK} {fname} ({size} bytes)")
+        else:
+            print(f"  {SYM_CROSS} {fname}")
