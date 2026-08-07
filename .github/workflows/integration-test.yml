@@ -474,7 +474,18 @@ jobs:
           TPM_PROPS=$(tpm2_getcap properties-variable 2>/dev/null)
           IN_LOCKOUT=$(echo "$TPM_PROPS" | grep -oP 'inLockout:\s+\K\d+' || echo "0")
           LOCKOUT_AUTH_SET=$(echo "$TPM_PROPS" | grep -oP 'lockoutAuthSet:\s+\K\d+' || echo "0")
-          if [ "$IN_LOCKOUT" = "1" ] || [ "$LOCKOUT_AUTH_SET" = "1" ]; then
+          if [ "$IN_LOCKOUT" = "1" ] && [ "$LOCKOUT_AUTH_SET" = "0" ]; then
+            echo "TPM in DA lockout but no lockout auth set — clearing automatically."
+            tpm2_dictionarylockout --clear 2>/dev/null || true
+            # Re-check
+            TPM_PROPS=$(tpm2_getcap properties-variable 2>/dev/null)
+            IN_LOCKOUT=$(echo "$TPM_PROPS" | grep -oP 'inLockout:\s+\K\d+' || echo "0")
+            if [ "$IN_LOCKOUT" = "1" ]; then
+              echo "::error::TPM DA lockout could not be cleared automatically."
+              exit 1
+            fi
+            echo "DA lockout cleared successfully."
+          elif [ "$IN_LOCKOUT" = "1" ] || [ "$LOCKOUT_AUTH_SET" = "1" ]; then
             echo "::error::TPM is in a bad state (inLockout=$IN_LOCKOUT, lockoutAuthSet=$LOCKOUT_AUTH_SET)."
             echo "Manual recovery required on the NUC:"
             echo "  1. echo 5 | sudo tee /sys/class/tpm/tpm0/ppi/request"
@@ -483,6 +494,9 @@ jobs:
             exit 1
           fi
           echo "TPM health check passed (inLockout=$IN_LOCKOUT, lockoutAuthSet=$LOCKOUT_AUTH_SET)."
+
+          # Proactively reset DA counter to prevent lockout accumulation
+          tpm2_dictionarylockout --clear 2>/dev/null || true
 
           # 1. Evict persistent handles (tpm2-pkcs11 primary objects + test keys)
           HANDLES=$(tpm2_getcap handles-persistent 2>/dev/null | grep -oP '0x[0-9A-Fa-f]+' || true)
