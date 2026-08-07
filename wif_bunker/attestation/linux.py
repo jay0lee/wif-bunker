@@ -234,9 +234,16 @@ def _get_tpm_info(ectx) -> dict | None:
     for prop in props.data.tpmProperties:
         prop_map[prop.property] = prop.value
 
+    # TPM2_PT constants — use raw values for compatibility across
+    # tpm2-pytss versions (attribute names vary between releases).
+    _PT_FAMILY_INDICATOR = getattr(TPM2_PT, "FAMILY_INDICATOR", 0x100)
+    _PT_MANUFACTURER = getattr(TPM2_PT, "MANUFACTURER", 0x105)
+    _PT_FIRMWARE_VERSION_1 = getattr(TPM2_PT, "FIRMWARE_VERSION_1",
+                                     getattr(TPM2_PT, "FW_VERSION_1", 0x111))
+
     # Manufacturer
-    if TPM2_PT.MANUFACTURER in prop_map:
-        val = prop_map[TPM2_PT.MANUFACTURER]
+    if _PT_MANUFACTURER in prop_map:
+        val = prop_map[_PT_MANUFACTURER]
         # Manufacturer ID is a 4-byte ASCII value packed in a uint32
         try:
             mfr_bytes = val.to_bytes(4, "big")
@@ -246,15 +253,15 @@ def _get_tpm_info(ectx) -> dict | None:
             info["manufacturer"] = f"0x{val:08X}"
 
     # Firmware version
-    if TPM2_PT.FIRMWARE_VERSION_1 in prop_map:
-        val = prop_map[TPM2_PT.FIRMWARE_VERSION_1]
+    if _PT_FIRMWARE_VERSION_1 in prop_map:
+        val = prop_map[_PT_FIRMWARE_VERSION_1]
         major = val >> 16
         minor = val & 0xFFFF
         info["firmware"] = f"{major}.{minor}"
 
     # Family indicator
-    if TPM2_PT.FAMILY_INDICATOR in prop_map:
-        val = prop_map[TPM2_PT.FAMILY_INDICATOR]
+    if _PT_FAMILY_INDICATOR in prop_map:
+        val = prop_map[_PT_FAMILY_INDICATOR]
         try:
             info["family"] = val.to_bytes(4, "big").decode("ascii", errors="replace").rstrip("\x00")
         except (ValueError, OverflowError):
