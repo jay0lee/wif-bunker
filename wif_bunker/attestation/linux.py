@@ -358,10 +358,10 @@ def _credential_activation(ectx, ek_handle, ak_handle) -> AttestationCheck:
     """
     from tpm2_pytss import (  # pylint: disable=import-outside-toplevel
         ESYS_TR,
+        TPM2_ALG,
         TPM2_SE,
         TPM2B_DIGEST,
         TPM2B_NONCE,
-        TPMT_SYM_DEF,
     )
     from tpm2_pytss.utils import make_credential  # pylint: disable=import-outside-toplevel
 
@@ -381,13 +381,12 @@ def _credential_activation(ectx, ek_handle, ak_handle) -> AttestationCheck:
         # Create policy session for EK auth
         # The EK's default auth policy requires a policy session tied to
         # the endorsement hierarchy (TPM_RH_ENDORSEMENT = 0x4000000B).
-        sym = TPMT_SYM_DEF(algorithm=0x0006)  # TPM2_ALG_AES, 128, CFB
         session = ectx.start_auth_session(
             tpm_key=ESYS_TR.NONE,
             bind=ESYS_TR.NONE,
             session_type=TPM2_SE.POLICY,
-            symmetric=sym,
-            auth_hash=0x000B,  # TPM2_ALG_SHA256
+            symmetric="aes128-cfb",
+            auth_hash=TPM2_ALG.SHA256,
         )
 
         # Policy secret: authorize with endorsement hierarchy
@@ -441,7 +440,7 @@ def _certify_key(ectx, ak_handle) -> tuple[AttestationCheck, bool, bytes | None,
     keys) and has the AK certify it, proving the key hierarchy lives
     inside the TPM.
     """
-    from tpm2_pytss import ESYS_TR as _ESYS_TR  # pylint: disable=import-outside-toplevel
+    from tpm2_pytss import ESYS_TR as _ESYS_TR, TPM2_ALG  # pylint: disable=import-outside-toplevel
 
     try:
         # Create a primary in owner hierarchy (parent of tpm2-pkcs11 keys)
@@ -452,10 +451,13 @@ def _certify_key(ectx, ak_handle) -> tuple[AttestationCheck, bool, bytes | None,
         )
 
         # Certify the primary key with the AK
+        from tpm2_pytss.types import TPMT_SIG_SCHEME  # pylint: disable=import-outside-toplevel
+
         certify_info, signature = ectx.certify(
             object_handle=primary_handle,
             sign_handle=ak_handle,
             qualifying_data=b"",
+            in_scheme=TPMT_SIG_SCHEME(scheme=TPM2_ALG.NULL),
         )
 
         ectx.flush_context(primary_handle)
