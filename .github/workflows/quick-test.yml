@@ -145,16 +145,22 @@ jobs:
           pip install .
 
       # ── Build hardmTLS ──
+      - name: "Install Rust toolchain"
+        if: needs.config.outputs.install_wif_bunker == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: "Install OpenSSL (Windows)"
+        if: needs.config.outputs.install_wif_bunker == 'true' && runner.os == 'Windows'
+        run: choco install openssl -y
+
       - name: "Build hardmTLS"
         if: needs.config.outputs.install_wif_bunker == 'true'
         shell: bash
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-          source "$HOME/.cargo/env"
           cd hardmtls-native
           cargo build --release
           echo "hardmTLS library built:"
-          ls -la target/release/libhardmtls*
+          ls -la target/release/libhardmtls* target/release/hardmtls* 2>/dev/null || true
 
       # ── TPM Reset (hardware-tpm only) ──
       - name: "Reset TPM to clean state"

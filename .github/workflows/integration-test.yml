@@ -508,16 +508,22 @@ jobs:
           ls -la wif-bunker/
 
       # ── Build hardmTLS native library (source testing only — built binary has it bundled) ──
+      - name: "Install Rust toolchain"
+        if: ${{ !inputs.use_built_binary }}
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: "Install OpenSSL (Windows)"
+        if: ${{ !inputs.use_built_binary && runner.os == 'Windows' }}
+        run: choco install openssl -y
+
       - name: "Build hardmTLS"
         if: ${{ !inputs.use_built_binary }}
         shell: bash
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-          source "$HOME/.cargo/env"
           cd hardmtls-native
           cargo build --release
           echo "hardmTLS library built:"
-          ls -la target/release/libhardmtls*
+          ls -la target/release/libhardmtls* target/release/hardmtls* 2>/dev/null || true
 
 
       # ── YubiKey: Discover serials, test error handling, pick random key ──
