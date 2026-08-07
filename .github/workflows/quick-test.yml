@@ -156,6 +156,8 @@ jobs:
       - name: "Build hardmTLS"
         if: needs.config.outputs.install_wif_bunker == 'true'
         shell: bash
+        env:
+          OPENSSL_DIR: ${{ runner.os == 'Windows' && 'C:\Program Files\OpenSSL' || '' }}
         run: |
           cd hardmtls-native
           cargo build --release
