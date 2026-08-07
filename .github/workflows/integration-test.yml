@@ -475,12 +475,20 @@ jobs:
           [ -n "$HANDLES" ] && echo "Evicted $(echo "$HANDLES" | wc -w) persistent handle(s)." || echo "No stale persistent handles."
 
           # 2. Clear NV indices used by tpm2-pkcs11 (range 0x01C00000-0x01C0FFFF)
+          # Preserve EK certificates and other firmware-provisioned NV data.
           NV_INDICES=$(tpm2_getcap handles-nv-index 2>/dev/null | grep -oP '0x[0-9A-Fa-f]+' || true)
+          CLEARED=0
           for idx in $NV_INDICES; do
-            echo "  Removing NV index: $idx"
-            tpm2_nvundefine "$idx" 2>/dev/null || true
+            # Only clear tpm2-pkcs11 NV indices (0x01C00000-0x01C0FFFF)
+            if [[ "$idx" == 0x01C0* || "$idx" == 0x01c0* ]]; then
+              echo "  Removing tpm2-pkcs11 NV index: $idx"
+              tpm2_nvundefine "$idx" 2>/dev/null || true
+              CLEARED=$((CLEARED + 1))
+            else
+              echo "  Preserving NV index: $idx (not tpm2-pkcs11)"
+            fi
           done
-          [ -n "$NV_INDICES" ] && echo "Cleared $(echo "$NV_INDICES" | wc -w) NV index(es)." || echo "No stale NV indices."
+          echo "Cleared $CLEARED tpm2-pkcs11 NV index(es), preserved others."
 
           # 3. Wipe and recreate the PKCS#11 store
           rm -rf "$HOME/.tpm2_pkcs11"
