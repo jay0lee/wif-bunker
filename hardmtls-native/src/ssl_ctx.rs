@@ -69,12 +69,15 @@ pub unsafe fn configure_ssl_context(
     // ── Parse certificate ──────────────────────────────────────────────
     let x509 = openssl::x509::X509::from_pem(cert_pem.as_bytes())
         .map_err(|e| HardmtlsError::SslError(format!("failed to parse cert PEM: {e}")))?;
+    log::debug!("hardmTLS: cert PEM parsed OK ({} bytes)", cert_pem.len());
 
     // ── Register our provider ──────────────────────────────────────────
     crate::provider::register_provider()?;
+    log::debug!("hardmTLS: provider registered");
 
     // ── Load certificate into SSL_CTX ──────────────────────────────────
     let ssl_ctx = ctx.cast::<openssl_sys::SSL_CTX>();
+    log::debug!("hardmTLS: calling SSL_CTX_use_certificate (ssl_ctx={:?})", ssl_ctx);
 
     // SAFETY: ssl_ctx is valid (guaranteed by caller), x509 is valid.
     let rc = unsafe { openssl_sys::SSL_CTX_use_certificate(ssl_ctx, x509.as_ptr()) };
@@ -83,6 +86,7 @@ pub unsafe fn configure_ssl_context(
             "SSL_CTX_use_certificate failed".into(),
         ));
     }
+    log::debug!("hardmTLS: SSL_CTX_use_certificate OK");
 
     // ── Detect the cert's public key type and compute metadata ─────────
     let pub_key = x509
@@ -116,11 +120,14 @@ pub unsafe fn configure_ssl_context(
     );
 
     // ── Create custom EVP_PKEY via our provider ────────────────────────
+    log::debug!("hardmTLS: creating provider EVP_PKEY");
     let pkey = unsafe {
         create_provider_pkey(sign_func, key_type_name, key_bits, security_bits, max_sig_size)
     }?;
+    log::debug!("hardmTLS: provider EVP_PKEY created ({:?})", pkey);
 
     // SAFETY: ssl_ctx and pkey are valid.
+    log::debug!("hardmTLS: calling SSL_CTX_use_PrivateKey");
     let rc = unsafe { openssl_sys::SSL_CTX_use_PrivateKey(ssl_ctx, pkey) };
 
     // Free the EVP_PKEY (SSL_CTX_use_PrivateKey increments the refcount).
