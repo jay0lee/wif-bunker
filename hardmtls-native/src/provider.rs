@@ -1058,7 +1058,11 @@ static KEYMGMT_ALGORITHMS: [OsslAlgorithm; 3] = [
     OsslAlgorithm::end(),
 ];
 
-/// SIGNATURE algorithm table — registers RSA and EC signatures.
+/// SIGNATURE algorithm table — registers RSA and ECDSA signatures.
+///
+/// IMPORTANT: KEYMGMT uses "RSA" and "EC" (key types), but SIGNATURE must
+/// use the *signing algorithm* names: "RSA" and "ECDSA". OpenSSL's TLS
+/// stack fetches SIGNATURE by the signing algorithm name, not the key type.
 static SIGNATURE_ALGORITHMS: [OsslAlgorithm; 3] = [
     OsslAlgorithm {
         algorithm_names: c"RSA:rsaEncryption:RSA-PSS:RSASSA-PSS".as_ptr(),
@@ -1067,10 +1071,10 @@ static SIGNATURE_ALGORITHMS: [OsslAlgorithm; 3] = [
         algorithm_description: c"hardmTLS RSA signature".as_ptr(),
     },
     OsslAlgorithm {
-        algorithm_names: c"EC:id-ecPublicKey".as_ptr(),
+        algorithm_names: c"ECDSA:id-ecPublicKey:EC".as_ptr(),
         property_definition: SIGNATURE_PROPS.as_ptr(),
         implementation: SIGNATURE_DISPATCH.as_ptr(),
-        algorithm_description: c"hardmTLS EC signature".as_ptr(),
+        algorithm_description: c"hardmTLS ECDSA signature".as_ptr(),
     },
     OsslAlgorithm::end(),
 ];
