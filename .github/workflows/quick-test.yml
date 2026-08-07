@@ -144,13 +144,17 @@ jobs:
           pip install --upgrade pip
           pip install .
 
-      # ── Download ECP ──
-      - name: "Download ECP"
+      # ── Build hardmTLS ──
+      - name: "Build hardmTLS"
         if: needs.config.outputs.install_wif_bunker == 'true'
         shell: bash
-        run: python get_ecp.py
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          source "$HOME/.cargo/env"
+          cd hardmtls-native
+          cargo build --release
+          echo "hardmTLS library built:"
+          ls -la target/release/libhardmtls*
 
       # ── TPM Reset (hardware-tpm only) ──
       - name: "Reset TPM to clean state"

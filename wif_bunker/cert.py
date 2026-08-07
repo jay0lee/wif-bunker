@@ -1,4 +1,4 @@
-"""Ephemeral CA generation, workload certificate signing, and ECP binary discovery."""
+"""Ephemeral CA generation, workload certificate signing, and hardmTLS library discovery."""
 
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.x509.oid import NameOID
 
-from get_ecp import get_default_ecp_dir, get_ecp_binary_names
 from wif_bunker.config import CertificateBundle, WorkloadConfig
 from wif_bunker.utils import SYM_ARROW, write_secure_file
 
@@ -182,73 +181,83 @@ def _create_ca_and_sign(
     return bundle, workload_cert_pem
 
 
-def _find_ecp_binaries() -> tuple[Path, Path, Path]:
-    """Locates pre-installed ECP binaries.
+def _get_hardmtls_lib_name() -> str:
+    """Returns the platform-specific hardmTLS library filename."""
+    if sys.platform == "win32":
+        return "hardmtls.dll"
+    if sys.platform == "darwin":
+        return "libhardmtls.dylib"
+    return "libhardmtls.so"
+
+
+def _find_hardmtls_library() -> Path:
+    """Locates the hardmTLS native library.
 
     Search order:
-      1. Bundled alongside the wif-bunker binary (<binary_dir>/ecp/)
-      2. Default platform location (~/.config/bunker-ecp or %LOCALAPPDATA%\\Google\\ECP)
+      1. Bundled alongside the wif-bunker binary (<binary_dir>/hardmtls/)
+      2. Development build (hardmtls-native/target/release/)
 
     Returns:
-        (ecp_binary, ecp_client_lib, tls_offload_lib) paths.
+        Path to the hardmTLS shared library.
 
     Raises:
-        FileNotFoundError: if ECP binaries are not found in any location.
+        FileNotFoundError: if the library is not found in any location.
     """
-    ecp_bin_name, libecp_name, tls_offload_name = get_ecp_binary_names()
+    lib_name = _get_hardmtls_lib_name()
 
     # Determine the directory containing the wif-bunker binary.
     if getattr(sys, "frozen", False):
         binary_dir = Path(sys.executable).parent
     else:
-        binary_dir = Path(__file__).parent
+        binary_dir = Path(__file__).parent.parent  # repo root
 
     # Search locations in priority order.
     search_dirs = [
-        binary_dir / "ecp",  # Bundled alongside binary
-        get_default_ecp_dir(),  # Platform default
+        binary_dir / "hardmtls",  # Bundled (PyInstaller dist)
+        binary_dir / "hardmtls-native" / "target" / "release",  # Dev build
     ]
 
-    for ecp_dir in search_dirs:
-        ecp_bin = ecp_dir / ecp_bin_name
-        client = ecp_dir / libecp_name
-        offload = ecp_dir / tls_offload_name
-        if ecp_bin.exists() and client.exists() and offload.exists():
-            logger.info("    Using ECP binaries from %s", ecp_dir)
-            _add_ecp_to_path(ecp_dir)
-            return ecp_bin, client, offload
+    for search_dir in search_dirs:
+        lib_path = search_dir / lib_name
+        if lib_path.exists():
+            logger.info("    Using hardmTLS library: %s", lib_path)
+            _add_lib_to_path(search_dir)
+            return lib_path
 
     raise FileNotFoundError(
-        "ECP binaries not found. Install them with:\n"
-        "    python get_ecp.py\n"
+        f"hardmTLS library ({lib_name}) not found.\n"
+        "Build it with:\n"
+        "    cd hardmtls-native && cargo build --release\n"
         "\n"
         f"Searched: {[str(d) for d in search_dirs]}"
     )
 
 
-def _add_ecp_to_path(ecp_dir: Path) -> None:
-    """Ensures the ECP binary directory is discoverable for DLL loading."""
-    ecp_dir_str = str(ecp_dir)
+def _add_lib_to_path(lib_dir: Path) -> None:
+    """Ensures the library directory is discoverable for DLL loading."""
+    lib_dir_str = str(lib_dir)
 
     # os.add_dll_directory() is the ONLY mechanism that works on
     # Python 3.8+ for DLL dependency resolution on Windows.
-    if sys.platform == "win32" and ecp_dir.is_dir():
-        os.add_dll_directory(ecp_dir_str)
+    if sys.platform == "win32" and lib_dir.is_dir():
+        os.add_dll_directory(lib_dir_str)
 
     # Also add to PATH for the current process.
     current_path = os.environ.get("PATH", "")
-    if ecp_dir_str not in current_path:
-        os.environ["PATH"] = ecp_dir_str + os.pathsep + current_path
+    if lib_dir_str not in current_path:
+        os.environ["PATH"] = lib_dir_str + os.pathsep + current_path
 
 
 def build_certificate_config(
     config: WorkloadConfig,
     cert_bundle: CertificateBundle,
-    ecp_binary: Path,
-    ecp_client_lib: Path,
-    tls_offload_lib: Path,
+    hardmtls_lib: Path,
 ) -> tuple[dict, Path, Path, Path]:
-    """Build the ECP certificate_config.json and write PEM files to disk.
+    """Build the certificate_config.json and write PEM files to disk.
+
+    The hardmTLS library serves as both the signing library (ecp_client)
+    and the TLS offload library (tls_offload) — google-auth loads both
+    from the same shared library.
 
     Returns:
         Tuple of (certificate_config_dict, cert_config_path,
@@ -256,7 +265,7 @@ def build_certificate_config(
     """
     if config.use_yubikey:
         if sys.platform == "win32":
-            # On Windows, ECP uses NCrypt/CNG — not PKCS#11.
+            # On Windows, NCrypt/CNG is used — not PKCS#11.
             # The YubiKey Smart Card Minidriver makes PIV certs visible
             # in the Windows Certificate Store, so we use windows_store.
             cert_configs = {
@@ -340,14 +349,14 @@ def build_certificate_config(
     logger.info("    Workload cert PEM written: %s", workload_cert_path)
     logger.info("    Trust chain PEM written:   %s", trust_chain_path)
 
+    hardmtls_lib_str = str(hardmtls_lib)
     cert_configs["workload"] = {"cert_path": str(workload_cert_path)}
     certificate_config = {
         "version": 1,
         "cert_configs": cert_configs,
         "libs": {
-            "ecp": str(ecp_binary),
-            "ecp_client": str(ecp_client_lib),
-            "tls_offload": str(tls_offload_lib),
+            "ecp_client": hardmtls_lib_str,
+            "tls_offload": hardmtls_lib_str,
         },
     }
     cert_config_path = Path.cwd() / "certificate_config.json"
@@ -355,7 +364,7 @@ def build_certificate_config(
         cert_config_path,
         json.dumps(certificate_config, indent=2),
     )
-    logger.info("    ECP certificate_config.json written: %s", cert_config_path)
+    logger.info("    certificate_config.json written: %s", cert_config_path)
 
     return certificate_config, cert_config_path, workload_cert_path, trust_chain_path
 
@@ -398,9 +407,9 @@ def build_adc_config(
     return adc_config, adc_path
 
 
-def run_ecp_diagnostics(config_path: Path | str, log: logging.Logger) -> None:
-    """Deep ECP diagnostics."""
-    log.warning("    Running ECP diagnostics (--debug)...")
+def run_hardmtls_diagnostics(config_path: Path | str, log: logging.Logger) -> None:
+    """Deep hardmTLS diagnostics."""
+    log.warning("    Running hardmTLS diagnostics (--debug)...")
     try:
         with open(config_path, encoding="utf-8") as cfg_file:
             cfg_text = cfg_file.read()
@@ -410,31 +419,15 @@ def run_ecp_diagnostics(config_path: Path | str, log: logging.Logger) -> None:
         return
 
     try:
-        ecp_bin = Path(json.loads(cfg_text)["libs"]["ecp"])
-        if ecp_bin.exists():
-            bin_data = ecp_bin.read_bytes()
-            log.warning("    ECP binary: %s (%d KB)", ecp_bin, len(bin_data) // 1024)
-            if sys.platform == "darwin":
-                log.warning("    Contains SecCertificateCopyData (patched): %s", b"SecCertificateCopyData" in bin_data)
-                log.warning("    Contains SecItemExport (unpatched): %s", b"SecItemExport" in bin_data)
+        cfg = json.loads(cfg_text)
+        lib_path = Path(cfg["libs"]["ecp_client"])
+        if lib_path.exists():
+            lib_data = lib_path.read_bytes()
+            log.warning("    hardmTLS library: %s (%d KB)", lib_path, len(lib_data) // 1024)
         else:
-            log.warning("    ECP binary NOT FOUND: %s", ecp_bin)
+            log.warning("    hardmTLS library NOT FOUND: %s", lib_path)
     except Exception as e:
-        log.warning("    Binary check error: %s", e)
-
-    try:
-        ecp_bin_path = str(Path(json.loads(cfg_text)["libs"]["ecp"]))
-        result = subprocess.run(
-            [ecp_bin_path, str(config_path)],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        log.warning("    ECP signer stderr: %s", result.stderr[:500] if result.stderr else "(empty)")
-    except subprocess.TimeoutExpired:
-        log.warning("    ECP signer listening for RPC (OK)")
-    except Exception as e:
-        log.warning("    ECP signer error: %s", e)
+        log.warning("    Library check error: %s", e)
 
     if sys.platform == "darwin":
         try:
@@ -449,111 +442,46 @@ def run_ecp_diagnostics(config_path: Path | str, log: logging.Logger) -> None:
             log.warning("    find-identity error: %s", e)
 
 
-def ecp_get_cert_pem(ecp_client_lib: Path | str, cert_config_path: Path | str) -> bytes:
-    """Call ECP's GetCertPemForPython and return raw PEM bytes.
+def hardmtls_get_cert_pem(hardmtls_lib: Path | str, cert_config_path: Path | str) -> bytes:
+    """Call hardmTLS GetCertPemForPython and return raw PEM bytes.
 
-    On Linux, runs in a **subprocess** to avoid PKCS#11 session conflicts.
-    Loading libecp_client.so via ctypes starts a Go runtime that calls
-    C_Initialize() on libtpm2_pkcs11.so and never releases it (Go
-    shared libraries cannot unload).  If we did this in-process, the
-    subsequent mTLS handshake in step 7 would load libtls_offload.so
-    (another Go shared library) and its C_Login() would fail with
-    CKR_OPERATION_NOT_INITIALIZED because the first Go runtime still
-    owns the PKCS#11 session.
-
-    On macOS/Windows the PKCS#11 conflict doesn't apply (Keychain /
-    CNG are used instead), so we keep the faster in-process path.
+    Unlike ECP (Go shared libraries), hardmTLS is a Rust cdylib that
+    doesn't start a separate runtime or hold PKCS#11 sessions across
+    calls — so we always use the faster in-process ctypes path.
 
     Raises:
-        RuntimeError: If ECP returns cert_len <= 0.
+        RuntimeError: If hardmTLS returns cert_len <= 0.
     """
-    if sys.platform == "linux":
-        logger.debug("    ECP cert retrieval: subprocess isolation (platform=%s)", sys.platform)
-        return _ecp_get_cert_subprocess(ecp_client_lib, cert_config_path)
-    logger.debug("    ECP cert retrieval: in-process (platform=%s)", sys.platform)
-    return _ecp_get_cert_inprocess(ecp_client_lib, cert_config_path)
-
-
-def _ecp_get_cert_inprocess(ecp_client_lib: Path | str, cert_config_path: Path | str) -> bytes:
-    """In-process ctypes call to ECP."""
-    lib = ctypes.CDLL(str(ecp_client_lib))
+    lib = ctypes.CDLL(str(hardmtls_lib))
     lib.GetCertPemForPython.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
     lib.GetCertPemForPython.restype = ctypes.c_int
     cert_len = lib.GetCertPemForPython(str(cert_config_path).encode(), None, 0)
     if cert_len <= 0:
-        raise RuntimeError(f"ECP returned cert_len={cert_len}")
+        raise RuntimeError(f"hardmTLS returned cert_len={cert_len}")
     buf = ctypes.create_string_buffer(cert_len + 1)
     lib.GetCertPemForPython(str(cert_config_path).encode(), buf, cert_len + 1)
     return buf.value
 
 
-def _ecp_get_cert_subprocess(ecp_client_lib: Path | str, cert_config_path: Path | str) -> bytes:
-    """Subprocess-isolated ctypes call to ECP (Linux/PKCS#11 only).
-
-    Finds a system Python interpreter (even inside PyInstaller frozen
-    binaries where sys.executable is the frozen binary, not python3).
-    """
-    python = _find_system_python()
-    script = (
-        "import ctypes, sys;"
-        f"lib = ctypes.CDLL({str(ecp_client_lib)!r});"
-        "lib.GetCertPemForPython.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int];"
-        "lib.GetCertPemForPython.restype = ctypes.c_int;"
-        f"n = lib.GetCertPemForPython({str(cert_config_path)!r}.encode(), None, 0);"
-        "sys.exit(1) if n <= 0 else None;"
-        "buf = ctypes.create_string_buffer(n + 1);"
-        f"lib.GetCertPemForPython({str(cert_config_path)!r}.encode(), buf, n + 1);"
-        "sys.stdout.buffer.write(buf.value)"
-    )
-    result = subprocess.run(
-        [python, "-c", script],
-        capture_output=True,
-        timeout=30,
-    )
-    if result.returncode != 0:
-        detail = result.stderr.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(f"ECP returned error (rc={result.returncode}): {detail}")
-    return result.stdout
-
-
-def _find_system_python() -> str:
-    """Find a usable Python 3 interpreter, even inside a frozen binary."""
-    import shutil  # pylint: disable=import-outside-toplevel
-
-    # If we're not frozen, sys.executable is fine
-    if not getattr(sys, "frozen", False):
-        logger.debug("    _find_system_python: not frozen, using %s", sys.executable)
-        return sys.executable
-
-    # Inside a PyInstaller binary — find the system python3
-    for name in ("python3", "python"):
-        found = shutil.which(name)
-        if found:
-            logger.debug("    _find_system_python: frozen binary, using system %s", found)
-            return found
-
-    raise RuntimeError("Cannot find system python3 for subprocess ECP isolation. Ensure python3 is on PATH.")
-
-
-def verify_ecp_cert_retrieval(
+def verify_cert_retrieval(
     cert_config_path: Path | str,
-    ecp_client_lib: Path | str,
+    hardmtls_lib: Path | str,
     debug: bool = False,
 ) -> str:
-    """Verify that ECP can retrieve the certificate using the provided config.
+    """Verify that hardmTLS can retrieve the certificate using the provided config.
 
     Returns:
         The PEM-encoded certificate string.
     """
     try:
         try:
-            cert_pem_bytes = ecp_get_cert_pem(ecp_client_lib, cert_config_path)
-            logger.info("    PASS: ECP returned %d bytes of cert PEM", len(cert_pem_bytes))
+            cert_pem_bytes = hardmtls_get_cert_pem(hardmtls_lib, cert_config_path)
+            logger.info("    PASS: hardmTLS returned %d bytes of cert PEM", len(cert_pem_bytes))
         except RuntimeError as e:
             logger.error("    FAIL: %s", e)
             if debug:
-                run_ecp_diagnostics(cert_config_path, logger)
-            raise RuntimeError("ECP cert retrieval failed (cert_len=0)") from e
+                run_hardmtls_diagnostics(cert_config_path, logger)
+            raise RuntimeError("hardmTLS cert retrieval failed (cert_len=0)") from e
 
         cert_pem = cert_pem_bytes.decode("utf-8", errors="replace")
 
@@ -568,11 +496,11 @@ def verify_ecp_cert_retrieval(
         except Exception as parse_err:
             logger.warning("    Could not parse cert: %s", parse_err)
 
-        logger.debug("    ECP cert PEM:\n%s", cert_pem)
+        logger.debug("    hardmTLS cert PEM:\n%s", cert_pem)
         return cert_pem
 
     except RuntimeError:
         raise
     except Exception as exc:
-        logger.exception("ECP cert retrieval failed")
-        raise RuntimeError(f"ECP cert retrieval failed: {exc}") from exc
+        logger.exception("hardmTLS cert retrieval failed")
+        raise RuntimeError(f"hardmTLS cert retrieval failed: {exc}") from exc

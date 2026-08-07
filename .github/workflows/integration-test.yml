@@ -12,7 +12,7 @@ on:
         default: 'python -m wif_bunker'
         type: string
       use_built_binary:
-        description: 'Set true to download and test a pre-built binary artifact (ECP bundled)'
+        description: 'Set true to download and test a pre-built binary artifact (hardmTLS bundled)'
         required: false
         default: false
         type: boolean
@@ -507,13 +507,17 @@ jobs:
           chmod +x wif-bunker/wif-bunker
           ls -la wif-bunker/
 
-      # ── Download ECP binaries (source testing only — built binary has them bundled) ──
-      - name: "Download ECP binaries"
+      # ── Build hardmTLS native library (source testing only — built binary has it bundled) ──
+      - name: "Build hardmTLS"
         if: ${{ !inputs.use_built_binary }}
         shell: bash
-        run: python get_ecp.py
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          source "$HOME/.cargo/env"
+          cd hardmtls-native
+          cargo build --release
+          echo "hardmTLS library built:"
+          ls -la target/release/libhardmtls*
 
 
       # ── YubiKey: Discover serials, test error handling, pick random key ──

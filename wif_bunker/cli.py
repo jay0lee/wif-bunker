@@ -15,13 +15,12 @@ import requests
 from google.auth.exceptions import OAuthError, RefreshError
 from google.auth.transport.requests import AuthorizedSession
 
-from get_ecp import get_ecp_platform_info
 from wif_bunker import __version__
 from wif_bunker.cert import (
-    _find_ecp_binaries,
+    _find_hardmtls_library,
     build_adc_config,
     build_certificate_config,
-    verify_ecp_cert_retrieval,
+    verify_cert_retrieval,
 )
 from wif_bunker.config import (
     _CONFIG_FILES,
@@ -64,7 +63,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     mode_group.add_argument(
         "--status",
         action="store_true",
-        help=("Show current WIF Bunker configuration status, certificate expiry, and test ECP and ADC connectivity."),
+        help=("Show current WIF Bunker configuration status, certificate expiry, and test hardmTLS and ADC connectivity."),
     )
     mode_group.add_argument(
         "--attest",
@@ -344,7 +343,7 @@ def _main_impl() -> None:
 
     # Pre-flight: if using YubiKey on Linux/macOS, verify the PKCS#11
     # library exists before spending minutes on GCP project/IAM setup.
-    # On Windows, ECP uses NCrypt (via YubiKey Smart Card Minidriver).
+    # On Windows, hardmTLS uses NCrypt (via YubiKey Smart Card Minidriver).
     if config.use_yubikey and sys.platform != "win32":
         from wif_bunker.keystore.yubikey import find_pkcs11_library
         try:
@@ -472,40 +471,37 @@ def _main_impl() -> None:
             use_sa=use_sa,
         )
 
-        # --- Step 6: ECP & ADC Config Generation ---
-        logger.info("=== 6) Generating ECP Certificate Config & ADC ===")
+        # --- Step 6: hardmTLS & ADC Config Generation ---
+        logger.info("=== 6) Generating Certificate Config & ADC ===")
 
         try:
-            ecp_binary, ecp_client_lib, tls_offload_lib = _find_ecp_binaries()
-        except FileNotFoundError as ecp_err:
-            github_os, arch, _, _ = get_ecp_platform_info()
+            hardmtls_lib = _find_hardmtls_library()
+        except FileNotFoundError as lib_err:
             logger.warning(
-                "    ECP binaries not available for %s/%s — skipping ECP config and auth demo (steps 6-7).",
-                github_os,
-                arch,
+                "    hardmTLS library not found — skipping config and auth demo (steps 6-7).",
             )
-            logger.warning("    %s", ecp_err)
+            logger.warning("    %s", lib_err)
             logger.info("=== Steps 1-5 completed successfully. ===")
-            logger.info("WIF Bunker setup is complete. ECP auth demo requires a platform with ECP support.")
+            logger.info("WIF Bunker setup is complete. Auth demo requires building hardmTLS.")
             return
 
-        # Build ECP certificate_config.json — the format google-auth's
+        # Build certificate_config.json — the format google-auth's
         # _custom_tls_signer.py expects.  The "libs" section tells it where
-        # to find the C-shared libraries that perform hardware-backed signing.
-        # The "cert_configs" section tells ECP which keystore + issuer to use
-        # when locating the client certificate for the mTLS handshake.
+        # to find the hardmTLS library that performs hardware-backed signing.
+        # The "cert_configs" section tells hardmTLS which keystore + issuer
+        # to use when locating the client certificate for the mTLS handshake.
         _certificate_config, cert_config_path, _workload_cert_path, trust_chain_path = build_certificate_config(
-            config, cert_bundle, ecp_binary, ecp_client_lib, tls_offload_lib
+            config, cert_bundle, hardmtls_lib
         )
 
         # ADC config — points google-auth at the STS mTLS endpoint and
-        # references the ECP certificate config for the mTLS channel.
+        # references the certificate config for the mTLS channel.
         _adc_config, adc_path = build_adc_config(
             config, project_number, cert_config_path, trust_chain_path, sa_email, use_sa
         )
 
         logger.info("=" * 70)
-        logger.info("ECP & ADC Configuration Complete!")
+        logger.info("Certificate & ADC Configuration Complete!")
         logger.info("Set these environment variables to use ADC:")
         env_vars = {
             "GOOGLE_APPLICATION_CREDENTIALS": str(adc_path),
@@ -535,7 +531,7 @@ def _main_impl() -> None:
         logger.info("To re-run with existing infrastructure:")
         logger.info("  %s", " ".join(reuse_parts))
 
-        # --- Step 7: Full ADC Auth Flow Demo (ECP-backed mTLS) ---
+        # --- Step 7: Full ADC Auth Flow Demo (hardmTLS-backed mTLS) ---
 
         # Set environment so google-auth discovers our configs.
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(adc_path)
@@ -545,30 +541,29 @@ def _main_impl() -> None:
         if args.debug:
             os.environ["ENABLE_ENTERPRISE_CERTIFICATE_LOGS"] = "1"
 
-        # Pre-load ECP DLLs on Windows.
+        # Pre-load hardmTLS DLL on Windows.
         if sys.platform == "win32":
-            for lib in (ecp_client_lib, tls_offload_lib):
-                try:
-                    ctypes.WinDLL(str(lib))
-                except OSError:
-                    pass
+            try:
+                ctypes.WinDLL(str(hardmtls_lib))
+            except OSError:
+                pass
 
-        # ── ECP Certificate Retrieval ──
-        # Quick validation that ECP can find and return the cert before
+        # ── Certificate Retrieval ──
+        # Quick validation that hardmTLS can find and return the cert before
         # attempting the full mTLS handshake.
-        logger.info("=== 7a) ECP Certificate Retrieval ===")
+        logger.info("=== 7a) Certificate Retrieval ===")
 
         try:
-            verify_ecp_cert_retrieval(cert_config_path, ecp_client_lib, debug=args.debug)
+            verify_cert_retrieval(cert_config_path, hardmtls_lib, debug=args.debug)
         except RuntimeError:
             sys.exit(1)
 
         # ── ADC Verification (always runs) ──
-        # End-to-end proof: TPM key → ECP → mTLS → Google STS → API call.
+        # End-to-end proof: hardware key → hardmTLS → mTLS → Google STS → API call.
         logger.info("=== 7) ADC Verification ===")
 
         # On Windows + YubiKey: pre-cache the PIN via NCrypt so that
-        # ECP/tls_offload can sign silently (no PIN dialog).
+        # hardmTLS/tls_offload can sign silently (no PIN dialog).
         if sys.platform == "win32" and config.use_yubikey:
             from wif_bunker.keystore.yubikey import precache_yubikey_pin_ncrypt
             precache_yubikey_pin_ncrypt(
@@ -599,7 +594,7 @@ def _main_impl() -> None:
                 return target_api_res.json()
 
             proj_result = _verify_adc()
-            logger.info("%s API Call Successful! The OS signed the handshake via ECP.", SYM_OK)
+            logger.info("%s API Call Successful! The OS signed the handshake via hardmTLS.", SYM_OK)
             if use_sa:
                 logger.info("   Authenticated SA: %s", sa_email)
             logger.info("   Target Project:   %s", proj_result.get("name"))
@@ -626,7 +621,7 @@ def _main_impl() -> None:
         except Exception:
             logger.exception("ADC verification failed")
             logger.error(
-                "%s Re-run with --debug for detailed ECP and TLS offload diagnostics.",
+                "%s Re-run with --debug for detailed hardmTLS and TLS offload diagnostics.",
                 SYM_FAIL,
             )
             sys.exit(1)

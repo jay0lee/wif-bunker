@@ -224,7 +224,7 @@ jobs:
       - name: Clean up non-release files
         run: |
           cd artifacts
-          rm -rf lib ecp _internal
+          rm -rf lib ecp hardmtls _internal
           find . -maxdepth 1 -type f ! -name '*.tar.gz' ! -name '*-setup.exe' ! -name '*.spdx.json' -delete
           echo "Release artifacts:"
           ls -la
