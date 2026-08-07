@@ -325,6 +325,20 @@ jobs:
           echo "TPM2TOOLS_TCTI=tabrmd:bus_type=session" >> "$GITHUB_ENV"
           echo "TPM2_PKCS11_TCTI=tabrmd:bus_type=session" >> "$GITHUB_ENV"
 
+          # Initialize PKCS#11 store — same state the hardware TPM reset
+          # delivers: fresh store with primary object (pid=1), ready for
+          # WIF Bunker to addtoken.
+          rm -rf "$HOME/.tpm2_pkcs11"
+          mkdir -p "$HOME/.tpm2_pkcs11"
+          echo "TPM2_PKCS11_STORE=$HOME/.tpm2_pkcs11" >> "$GITHUB_ENV"
+          export TPM2_PKCS11_STORE="$HOME/.tpm2_pkcs11"
+          export TPM2TOOLS_TCTI="tabrmd:bus_type=session"
+          export TPM2_PKCS11_TCTI="tabrmd:bus_type=session"
+          if command -v tpm2_ptool &>/dev/null; then
+            tpm2_ptool init --path="$HOME/.tpm2_pkcs11" 2>/dev/null || true
+            echo "Initialized fresh tpm2-pkcs11 store."
+          fi
+
 
       # ══════════════════════════════════════════════════════════════════════
       # Restore pre-built OpenSSL + Python from cache

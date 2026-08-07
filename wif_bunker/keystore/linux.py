@@ -353,22 +353,19 @@ def _ensure_token_via_tpm2_ptool(pin: str, tpm_store: str, module_path: str) -> 
             logger.info("    Removed stale %s", db_path)
 
     # Create the token with both PINs.
-    # Try addtoken first; if it fails (e.g. missing primary object
-    # because the C library created an empty SQLite during pkcs11-tool
-    # probing), run init and retry.  This avoids running init
-    # unconditionally, which would waste persistent handles on
-    # hardware TPMs.
-    add_cmd = [
-        tpm2_ptool, "addtoken",
-        "--pid=1",
-        "--sopin", pin,
-        "--userpin", pin,
-        "--label", _TOKEN_LABEL,
-        "--path", tpm_store,
-    ]
+    # Assumes the PKCS#11 store is already initialized with a primary
+    # object (pid=1).  CI setup steps handle this; on production systems
+    # the admin runs tpm2_ptool init during initial provisioning.
     try:
         subprocess.run(
-            add_cmd,
+            [
+                tpm2_ptool, "addtoken",
+                "--pid=1",
+                "--sopin", pin,
+                "--userpin", pin,
+                "--label", _TOKEN_LABEL,
+                "--path", tpm_store,
+            ],
             check=True,
             capture_output=True,
             text=True,
@@ -378,32 +375,11 @@ def _ensure_token_via_tpm2_ptool(pin: str, tpm_store: str, module_path: str) -> 
             _TOKEN_LABEL,
         )
     except subprocess.CalledProcessError as exc:
-        # addtoken may fail if the store lacks a primary object (pid=1).
-        # This happens when the C library created an empty SQLite during
-        # pkcs11-tool probing but tpm2_ptool init was never run.
-        if "No primary object" in (exc.stderr or ""):
-            logger.info("    No primary object — running tpm2_ptool init")
-            subprocess.run(
-                [tpm2_ptool, "init", "--path", tpm_store],
-                capture_output=True, text=True, check=False,
-            )
-            # Retry addtoken after init
-            try:
-                subprocess.run(
-                    add_cmd, check=True, capture_output=True, text=True,
-                )
-                logger.info(
-                    "    Created PKCS#11 token '%s' via tpm2_ptool addtoken (after init)",
-                    _TOKEN_LABEL,
-                )
-                return
-            except subprocess.CalledProcessError as exc2:
-                raise RuntimeError(
-                    f"Failed to create PKCS#11 token '{_TOKEN_LABEL}' "
-                    f"(even after init):\n{exc2.stderr}"
-                ) from exc2
         raise RuntimeError(
-            f"Failed to create PKCS#11 token '{_TOKEN_LABEL}':\n{exc.stderr}"
+            f"Failed to create PKCS#11 token '{_TOKEN_LABEL}':\n"
+            f"{exc.stderr}\n"
+            "Ensure the PKCS#11 store is initialized:\n"
+            f"  tpm2_ptool init --path={tpm_store}\n"
         ) from exc
 
 
