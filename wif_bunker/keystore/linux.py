@@ -249,10 +249,10 @@ def get_supported_algorithms_linux() -> list[str]:
         if key_bits:
             try:
                 mech_info = slots[0].get_mechanism_info(pkcs11_info["mechanism"])
-                if key_bits < mech_info.min_key_size or key_bits > mech_info.max_key_size:
+                if key_bits < mech_info.ulMinKeySize or key_bits > mech_info.ulMaxKeySize:
                     logger.debug(
                         "    %s: key size %d outside mechanism range [%d, %d]",
-                        algo_name, key_bits, mech_info.min_key_size, mech_info.max_key_size,
+                        algo_name, key_bits, mech_info.ulMinKeySize, mech_info.ulMaxKeySize,
                     )
                     continue
             except pkcs11.PKCS11Error:
