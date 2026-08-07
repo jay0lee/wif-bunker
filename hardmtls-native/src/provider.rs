@@ -101,6 +101,22 @@ struct HardmtlsKey {
 // ── Signing context (stored by SIGNATURE operations) ───────────────────
 
 /// Context for an in-progress signing operation.
+
+#[allow(unsafe_code)]
+fn get_param_utf8_string(param: *const openssl_sys::OSSL_PARAM) -> Option<String> {
+    if param.is_null() {
+        return None;
+    }
+    unsafe {
+        let p = &*param;
+        if p.data_type == crate::provider_ffi::OSSL_PARAM_UTF8_STRING && !p.data.is_null() {
+            let cstr = std::ffi::CStr::from_ptr(p.data.cast::<std::ffi::c_char>());
+            return cstr.to_str().ok().map(|s| s.to_string());
+        }
+    }
+    None
+}
+
 struct HardmtlsSignCtx {
     /// Reference to the key (borrowed, not owned — OpenSSL manages lifetime).
     key: *const HardmtlsKey,
@@ -108,6 +124,7 @@ struct HardmtlsSignCtx {
     /// The sign callback handles hashing internally, so we buffer all data
     /// and pass it in one shot on `digest_sign_final`.
     tbs_buffer: Vec<u8>,
+    digest_name: String,
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -312,18 +329,19 @@ extern "C" fn keymgmt_get_params(
             if key_bytes == OSSL_PKEY_PARAM_GROUP_NAME.to_bytes() && !key.group_name.is_empty() {
                 // Write group name as a null-terminated UTF-8 string.
                 let src = &key.group_name;
-                param.return_size = src.len();
-                if !param.data.is_null() && param.data_size > src.len() {
+                let copy_len = src.len().min(param.data_size);
+                if !param.data.is_null() {
                     unsafe {
                         std::ptr::copy_nonoverlapping(
                             src.as_ptr(),
                             param.data.cast::<u8>(),
-                            src.len(),
+                            copy_len,
                         );
                         // Null-terminate.
-                        *param.data.cast::<u8>().add(src.len()) = 0;
+                        *param.data.cast::<u8>().add(copy_len) = 0;
                     }
                 }
+                param.return_size = src.len() + 1; // including null
             }
         }
 
@@ -634,6 +652,7 @@ extern "C" fn signature_newctx(_provctx: *mut c_void, _propq: *const c_char) -> 
     let ctx = Box::new(HardmtlsSignCtx {
         key: ptr::null(),
         tbs_buffer: Vec::new(),
+        digest_name: String::new(),
     });
     Box::into_raw(ctx).cast::<c_void>()
 }
@@ -659,6 +678,7 @@ extern "C" fn signature_dupctx(ctx: *mut c_void) -> *mut c_void {
     let dup = Box::new(HardmtlsSignCtx {
         key: src.key,
         tbs_buffer: src.tbs_buffer.clone(),
+        digest_name: src.digest_name.clone(),
     });
     Box::into_raw(dup).cast::<c_void>()
 }
@@ -930,11 +950,30 @@ extern "C" fn signature_get_ctx_params(
 
 /// Declare gettable signature context parameters (empty).
 #[allow(unsafe_code)]
+#[allow(unsafe_code)]
 extern "C" fn signature_gettable_ctx_params(
     _ctx: *const c_void,
     _provctx: *const c_void,
 ) -> *const openssl_sys::OSSL_PARAM {
-    empty_param_list()
+    struct SyncP([openssl_sys::OSSL_PARAM; 2]);
+    unsafe impl Sync for SyncP {}
+    static PARAMS: SyncP = SyncP([
+        openssl_sys::OSSL_PARAM {
+            key: c"digest".as_ptr(),
+            data_type: crate::provider_ffi::OSSL_PARAM_UTF8_STRING,
+            data: std::ptr::null_mut(),
+            data_size: 0,
+            return_size: 0,
+        },
+        openssl_sys::OSSL_PARAM {
+            key: std::ptr::null(),
+            data_type: 0,
+            data: std::ptr::null_mut(),
+            data_size: 0,
+            return_size: 0,
+        },
+    ]);
+    PARAMS.0.as_ptr()
 }
 
 /// Set signature context parameters (accept and log, return success).
@@ -949,11 +988,37 @@ extern "C" fn signature_set_ctx_params(
 
 /// Declare settable signature context parameters (empty).
 #[allow(unsafe_code)]
+#[allow(unsafe_code)]
 extern "C" fn signature_settable_ctx_params(
     _ctx: *const c_void,
     _provctx: *const c_void,
 ) -> *const openssl_sys::OSSL_PARAM {
-    empty_param_list()
+    struct SyncP([openssl_sys::OSSL_PARAM; 3]);
+    unsafe impl Sync for SyncP {}
+    static PARAMS: SyncP = SyncP([
+        openssl_sys::OSSL_PARAM {
+            key: c"digest".as_ptr(),
+            data_type: crate::provider_ffi::OSSL_PARAM_UTF8_STRING,
+            data: std::ptr::null_mut(),
+            data_size: 0,
+            return_size: 0,
+        },
+        openssl_sys::OSSL_PARAM {
+            key: c"properties".as_ptr(),
+            data_type: crate::provider_ffi::OSSL_PARAM_UTF8_STRING,
+            data: std::ptr::null_mut(),
+            data_size: 0,
+            return_size: 0,
+        },
+        openssl_sys::OSSL_PARAM {
+            key: std::ptr::null(),
+            data_type: 0,
+            data: std::ptr::null_mut(),
+            data_size: 0,
+            return_size: 0,
+        },
+    ]);
+    PARAMS.0.as_ptr()
 }
 
 // ═══════════════════════════════════════════════════════════════════════
