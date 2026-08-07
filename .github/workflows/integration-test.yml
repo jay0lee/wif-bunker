@@ -502,25 +502,15 @@ jobs:
             echo "Initialized fresh tpm2-pkcs11 store."
           fi
 
-          # 5. Ensure EK certificate is in NV RAM (may have been wiped by previous runs)
-          # Intel fTPMs fetch EK certs from Intel's provisioning server.
-          EK_NV_INDEX=0x01C00002
-          if ! tpm2_nvread "$EK_NV_INDEX" -C o -s 1 &>/dev/null; then
-            echo "EK certificate missing from NV — re-provisioning from Intel..."
-            tpm2_createek -c /tmp/ek.ctx -G rsa2048 -u /tmp/ek_pub.tpm2 2>/dev/null
-            if tpm2_getekcertificate -u /tmp/ek_pub.tpm2 -o /tmp/ek_cert.der 2>/dev/null; then
-              EK_SIZE=$(wc -c < /tmp/ek_cert.der)
-              tpm2_nvdefine "$EK_NV_INDEX" -C o -s "$EK_SIZE" \
-                -a "ownerread|policywrite|ownerwrite" 2>/dev/null || true
-              tpm2_nvwrite "$EK_NV_INDEX" -C o -i /tmp/ek_cert.der 2>/dev/null
-              echo "EK certificate provisioned to NV ($EK_SIZE bytes)."
-            else
-              echo "WARNING: Could not fetch EK cert from Intel provisioning."
-            fi
-            rm -f /tmp/ek.ctx /tmp/ek_pub.tpm2 /tmp/ek_cert.der
+          # 5. Verify EK certificate is fetchable from Intel provisioning
+          # (attestation code uses tpm2_getekcertificate directly, NV not required)
+          tpm2_createek -c /tmp/ek.ctx -G rsa2048 -u /tmp/ek_pub.tpm2 2>/dev/null
+          if tpm2_getekcertificate -u /tmp/ek_pub.tpm2 -o /tmp/ek_cert.der 2>/dev/null; then
+            echo "EK certificate fetchable from Intel ($(wc -c < /tmp/ek_cert.der) bytes)."
           else
-            echo "EK certificate present in NV."
+            echo "WARNING: Could not fetch EK cert — attestation may be limited."
           fi
+          rm -f /tmp/ek.ctx /tmp/ek_pub.tpm2 /tmp/ek_cert.der
 
           echo "TPM reset complete."
 
