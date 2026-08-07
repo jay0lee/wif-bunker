@@ -26,6 +26,7 @@ pub trait SigningBackend: Send + Sync {
 pub mod mac_se;
 pub mod pkcs11;
 #[cfg(target_os = "windows")]
+#[allow(unsafe_code)]
 pub mod win_ncrypt;
 
 #[cfg(test)]

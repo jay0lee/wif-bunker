@@ -138,4 +138,23 @@ mod tests {
         let backend = select_backend(&config);
         assert!(backend.is_ok(), "macOS config should select a backend");
     }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_store_config_selects_ncrypt_backend() {
+        let json = r#"{
+            "version": 1,
+            "cert_configs": {
+                "windows_store": {
+                    "store": "MY",
+                    "provider": "current_user",
+                    "issuer": "Test CA"
+                }
+            },
+            "libs": { "ecp_client": "C:\\nul", "tls_offload": "C:\\nul" }
+        }"#;
+        let config: CertificateConfig = serde_json::from_str(json).unwrap();
+        let backend = select_backend(&config);
+        assert!(backend.is_ok(), "Windows store config should select a backend");
+    }
 }
