@@ -18,7 +18,7 @@ import pkcs11
 from cryptography import x509 as cx509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
-from pkcs11 import Attribute, CertificateType, KeyType, Mechanism, ObjectClass
+from pkcs11 import Attribute, CertificateType, KeyType, Mechanism, ObjectClass, TokenFlag
 from pkcs11.util.ec import encode_named_curve_parameters
 
 from wif_bunker.cert import _create_ca_and_sign
@@ -287,8 +287,14 @@ def _init_token(lib, pin: str):
     # 2. Find an uninitialized slot
     for slot in lib.get_slots():
         try:
-            slot.get_token()
-            continue  # Slot has a token — don't touch it
+            token = slot.get_token()
+            # Slot has a token — only skip if it's been initialized
+            # (i.e. belongs to another app like disk encryption).
+            # Uninitialized tokens (e.g. from tpm2_ptool init) are
+            # fair game for us to claim.
+            if TokenFlag.TOKEN_INITIALIZED in token.flags:
+                continue
+            logger.debug("    Found uninitialized token, will init as '%s'", _TOKEN_LABEL)
         except (pkcs11.PKCS11Error, pkcs11.TokenNotPresent):
             pass
 
