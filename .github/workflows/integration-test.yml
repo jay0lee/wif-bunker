@@ -650,15 +650,25 @@ jobs:
           ALGOS=$($WIF_CMD --supported-algorithms ${{ matrix.soft_key_flag }} $YUBIKEY_FLAGS | tr -d '\r')
           echo "Supported algorithms: $(echo $ALGOS | sed 's/ /, /g')"
 
-          # Regression check: verify expected algorithms are still supported
+          # Regression check: verify expected algorithms match exactly
           EXPECTED="${{ matrix.expected_algos }}"
           if [ -n "$EXPECTED" ]; then
+            # Check for missing algorithms (regression)
             for expected_algo in $EXPECTED; do
               if ! echo "$ALGOS" | grep -q "^${expected_algo}$"; then
                 echo "REGRESSION: $expected_algo should be supported on this platform but was not detected"
                 exit 1
               fi
             done
+
+            # Check for unexpected algorithms (over-reporting)
+            for detected_algo in $ALGOS; do
+              if ! echo "$EXPECTED" | grep -q "\b${detected_algo}\b"; then
+                echo "UNEXPECTED: $detected_algo was detected but is not in expected list ($EXPECTED)"
+                exit 1
+              fi
+            done
+
             echo "All expected algorithms confirmed: $EXPECTED"
           fi
 
