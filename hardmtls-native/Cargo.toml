@@ -56,3 +56,8 @@ pedantic = { level = "warn", priority = -1 }
 # Allow these where justified — keep the list minimal
 module_name_repetitions = "allow"
 missing_errors_doc = "allow"
+
+[build-dependencies]
+# Used by build.rs to compile C stubs when OpenSSL is built with no-des.
+# See build/des_stubs.c for details.
+cc = "1"

@@ -240,6 +240,7 @@ dependencies = [
 name = "hardmtls"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "core-foundation",
  "cryptoki",
  "env_logger",
