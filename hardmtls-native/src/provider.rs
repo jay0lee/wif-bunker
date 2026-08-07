@@ -562,6 +562,7 @@ fn empty_param_list() -> *const openssl_sys::OSSL_PARAM {
 /// Allocate a new signing context.
 #[allow(unsafe_code)]
 extern "C" fn signature_newctx(_provctx: *mut c_void, _propq: *const c_char) -> *mut c_void {
+    log::debug!("hardmTLS provider: signature_newctx called");
     let ctx = Box::new(HardmtlsSignCtx {
         key: ptr::null(),
         tbs_buffer: Vec::new(),
@@ -1090,9 +1091,16 @@ extern "C" fn provider_query_operation(
     operation_id: c_int,
     _no_cache: *mut c_int,
 ) -> *const OsslAlgorithm {
+    log::debug!("hardmTLS provider: query_operation(op_id={})", operation_id);
     match operation_id {
-        x if x == OSSL_OP_KEYMGMT => KEYMGMT_ALGORITHMS.as_ptr(),
-        x if x == OSSL_OP_SIGNATURE => SIGNATURE_ALGORITHMS.as_ptr(),
+        x if x == OSSL_OP_KEYMGMT => {
+            log::debug!("hardmTLS provider: returning KEYMGMT algorithms");
+            KEYMGMT_ALGORITHMS.as_ptr()
+        }
+        x if x == OSSL_OP_SIGNATURE => {
+            log::debug!("hardmTLS provider: returning SIGNATURE algorithms");
+            SIGNATURE_ALGORITHMS.as_ptr()
+        }
         _ => ptr::null(),
     }
 }

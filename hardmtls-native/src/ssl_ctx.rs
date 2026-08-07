@@ -140,6 +140,15 @@ pub unsafe fn configure_ssl_context(
         ));
     }
 
+    // ── Enable TLS 1.3 post-handshake authentication ───────────────────
+    // In TLS 1.3, client certificates are not sent during the initial
+    // handshake. Instead, the server sends a CertificateRequest *after*
+    // the handshake via post-handshake authentication (PHA). Without
+    // enabling PHA, the client never advertises support, the server
+    // never requests the cert, and mTLS fails silently.
+    unsafe { openssl_sys::SSL_CTX_set_post_handshake_auth(ssl_ctx, 1) };
+    log::debug!("hardmTLS: TLS 1.3 post-handshake auth enabled");
+
     log::info!("hardmTLS: SSL_CTX configured with certificate and custom key");
 
     Ok(())
