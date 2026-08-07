@@ -492,47 +492,40 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
     tpm_store.mkdir(parents=True, exist_ok=True)
     os.environ["TPM2_PKCS11_STORE"] = str(tpm_store)
 
-    # Ensure our PKCS#11 token exists BEFORE loading the library.
-    # tpm2_ptool addtoken modifies the SQLite store directly, and
-    # libtpm2_pkcs11.so reads it only at C_Initialize time.  Creating
-    # the token first avoids stale-cache issues entirely.
+    # ── All subprocess/external operations BEFORE pkcs11.lib() ──
+    # libtpm2_pkcs11.so caches tokens and objects at C_Initialize time.
+    # Any modifications to the SQLite store after that are invisible.
+
+    # 1. Ensure our token exists
     _ensure_token_via_tpm2_ptool(config.linux_tpm_pin, str(tpm_store))
 
+    # 2. Generate key pair via pkcs11-tool
+    logger.debug("    Generating %s key pair in TPM...", config.key_algorithm)
+    if pkcs11_info["key_type"] == KeyType.EC:
+        ec_curve = {
+            "ecc256": "prime256v1",
+            "ecc384": "secp384r1",
+        }.get(tpm2_algo)
+        pkcs11_key_type = f"EC:{ec_curve}"
+    else:
+        pkcs11_key_type = f"RSA:{pkcs11_info['key_length']}"
+
+    _run_pkcs11_tool_keygen(
+        module_path=lib_path,
+        token_label=_TOKEN_LABEL,
+        pin=config.linux_tpm_pin,
+        key_type=pkcs11_key_type,
+        label=config.workload_cn,
+    )
+
+    # ── Now load the library — it will see our token AND keys ──
     try:
         lib = pkcs11.lib(lib_path)
-
-        # 1. Clean up any previous objects in our token
-        _cleanup_existing_token(lib, config.linux_tpm_pin)
-
-        # 2. Find or initialize our token
-        token = _init_token(lib, config.linux_tpm_pin, lib_path)
+        token = lib.get_token(token_label=_TOKEN_LABEL)
         logger.debug("    Using PKCS#11 token: %s", token)
 
-        # 3. Generate key pair via pkcs11-tool (before opening our session,
-        #    since pkcs11-tool opens its own session and tpm2-pkcs11 may not
-        #    handle concurrent sessions well)
-        logger.debug("    Generating %s key pair in TPM...", config.key_algorithm)
-
-        # Map algo config to pkcs11-tool --key-type format
-        if pkcs11_info["key_type"] == KeyType.EC:
-            ec_curve = {
-                "ecc256": "prime256v1",
-                "ecc384": "secp384r1",
-            }.get(tpm2_algo)
-            pkcs11_key_type = f"EC:{ec_curve}"
-        else:
-            pkcs11_key_type = f"RSA:{pkcs11_info['key_length']}"
-
-        _run_pkcs11_tool_keygen(
-            module_path=lib_path,
-            token_label=_TOKEN_LABEL,
-            pin=config.linux_tpm_pin,
-            key_type=pkcs11_key_type,
-            label=config.workload_cn,
-        )
-
         with token.open(user_pin=config.linux_tpm_pin, rw=True) as session:
-            # 4. Find the generated key objects
+            # 3. Find the generated key objects
             pub, _priv = _find_key_objects(session, config.workload_cn)
 
             logger.debug("    Key pair generated. Extracting public key...")
