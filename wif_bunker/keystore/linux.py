@@ -480,6 +480,59 @@ def _extract_public_key_pem(pub_key) -> str:
     ).decode("utf-8")
 
 
+# ── TPM-compatible EC key generation ──
+
+
+def _generate_ec_keypair_tpm(session, ec_params: bytes, label: str):
+    """Generate an EC key pair with a minimal template for tpm2-pkcs11.
+
+    ``python-pkcs11``'s ``generate_keypair()`` always sets capability
+    attributes (``CKA_ENCRYPT``, ``CKA_VERIFY``, ``CKA_WRAP``, etc.)
+    even when disabled (value=False). ``libtpm2_pkcs11`` rejects any
+    encryption-related attributes in EC key templates entirely — even
+    ``CKA_ENCRYPT=False`` triggers "attr mismatch".
+
+    This helper builds the bare minimum PKCS#11 templates that
+    ``tpm2-pkcs11`` accepts and calls ``_generate_keypair`` directly.
+    """
+    # Temporarily patch the attribute mapper to produce clean templates.
+    mapper = session.attribute_mapper
+    orig_pub = mapper.public_key_template
+    orig_priv = mapper.private_key_template
+
+    def _clean_pub_template(**kwargs):
+        template = orig_pub(**kwargs)
+        # Remove all capability attrs — we'll set only what we need.
+        for attr in (Attribute.ENCRYPT, Attribute.WRAP, Attribute.VERIFY):
+            template.pop(attr, None)
+        return template
+
+    def _clean_priv_template(**kwargs):
+        template = orig_priv(**kwargs)
+        for attr in (Attribute.DECRYPT, Attribute.UNWRAP, Attribute.DERIVE):
+            template.pop(attr, None)
+        return template
+
+    try:
+        mapper.public_key_template = _clean_pub_template
+        mapper.private_key_template = _clean_priv_template
+
+        return session.generate_keypair(
+            KeyType.EC,
+            key_length=None,
+            mechanism=Mechanism.EC_KEY_PAIR_GEN,
+            store=True,
+            label=label,
+            capabilities=MechanismFlag.SIGN,
+            public_template={
+                Attribute.EC_PARAMS: ec_params,
+            },
+        )
+    finally:
+        mapper.public_key_template = orig_pub
+        mapper.private_key_template = orig_priv
+
+
 # ── Main certificate generation ──
 
 
@@ -524,19 +577,10 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
             logger.debug("    Generating %s key pair in TPM...", config.key_algorithm)
 
             if pkcs11_info["key_type"] == KeyType.EC:
-                pub, _priv = session.generate_keypair(
-                    KeyType.EC,
-                    key_length=None,
-                    mechanism=Mechanism.EC_KEY_PAIR_GEN,
-                    store=True,
+                pub, _priv = _generate_ec_keypair_tpm(
+                    session,
+                    ec_params=pkcs11_info["params"],
                     label=config.workload_cn,
-                    # tpm2-pkcs11 rejects CKA_VERIFY in the public
-                    # template for EC keys ("attr mismatch: 0x10a").
-                    # Use SIGN-only capabilities.
-                    capabilities=MechanismFlag.SIGN,
-                    public_template={
-                        Attribute.EC_PARAMS: pkcs11_info["params"],
-                    },
                 )
             else:
                 pub, _priv = session.generate_keypair(
