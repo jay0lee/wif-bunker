@@ -299,7 +299,7 @@ def _create_ek_and_ak(ectx) -> tuple[AttestationCheck, bool, object, object, byt
         )
         from tpm2_pytss.types import (  # pylint: disable=import-outside-toplevel
             TPM2B_PUBLIC, TPMT_PUBLIC, TPMU_PUBLIC_PARMS,
-            TPMS_RSA_PARMS, TPMT_SYM_DEF_OBJECT,
+            TPMS_RSA_PARMS, TPMT_RSA_SCHEME, TPMT_SYM_DEF_OBJECT,
         )
 
         ak_attrs = (
@@ -321,7 +321,7 @@ def _create_ek_and_ak(ectx) -> tuple[AttestationCheck, bool, object, object, byt
                 parameters=TPMU_PUBLIC_PARMS(
                     rsaDetail=TPMS_RSA_PARMS(
                         symmetric=TPMT_SYM_DEF_OBJECT(algorithm=TPM2_ALG.NULL),
-                        scheme=TPM2_ALG.NULL,
+                        scheme=TPMT_RSA_SCHEME(scheme=TPM2_ALG.NULL),
                         keyBits=2048,
                         exponent=0,
                     )
