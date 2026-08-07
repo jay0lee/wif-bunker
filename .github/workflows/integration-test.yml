@@ -792,6 +792,7 @@ jobs:
             echo "Dialog auto-accept PID: $DIALOG_PID"
           fi
           ${{ inputs.wif_bunker_cmd || 'python -m wif_bunker' }} \
+            --debug \
             --use-adc \
             --create-project="${{ steps.config.outputs.project_id }}" \
             --folder="$TESTS_FOLDER" \
