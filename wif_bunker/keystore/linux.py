@@ -315,12 +315,15 @@ def _ensure_token_via_tpm2_ptool(pin: str, tpm_store: str, module_path: str) -> 
             capture_output=True, text=True, check=False,
         )
         if _TOKEN_LABEL in result.stdout:
-            # Token exists — verify our PIN works.
+            # Token exists — verify our PIN works by forcing a login.
+            # (--list-objects without --login succeeds even with wrong PIN
+            # because it only lists public objects.)
             verify = subprocess.run(
                 [
                     "pkcs11-tool",
                     "--module", module_path,
                     "--token-label", _TOKEN_LABEL,
+                    "--login",
                     "--pin", pin,
                     "--list-objects",
                 ],
