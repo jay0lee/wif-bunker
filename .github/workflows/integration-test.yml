@@ -325,6 +325,15 @@ jobs:
           echo "TPM2TOOLS_TCTI=tabrmd:bus_type=session" >> "$GITHUB_ENV"
           echo "TPM2_PKCS11_TCTI=tabrmd:bus_type=session" >> "$GITHUB_ENV"
 
+          # Relax DA lockout parameters — CI tests multiple algorithms,
+          # each triggering a PIN check that increments the DA counter.
+          export TPM2TOOLS_TCTI="tabrmd:bus_type=session"
+          export TPM2_PKCS11_TCTI="tabrmd:bus_type=session"
+          tpm2_dictionarylockout --setup \
+            --max-tries=1000 \
+            --recovery-time=1 \
+            --lockout-recovery-time=1
+
           # Initialize PKCS#11 store — same state the hardware TPM reset
           # delivers: fresh store with primary object (pid=1), ready for
           # WIF Bunker to addtoken.
@@ -332,8 +341,6 @@ jobs:
           mkdir -p "$HOME/.tpm2_pkcs11"
           echo "TPM2_PKCS11_STORE=$HOME/.tpm2_pkcs11" >> "$GITHUB_ENV"
           export TPM2_PKCS11_STORE="$HOME/.tpm2_pkcs11"
-          export TPM2TOOLS_TCTI="tabrmd:bus_type=session"
-          export TPM2_PKCS11_TCTI="tabrmd:bus_type=session"
           if command -v tpm2_ptool &>/dev/null; then
             tpm2_ptool init --path="$HOME/.tpm2_pkcs11" 2>/dev/null || true
             echo "Initialized fresh tpm2-pkcs11 store."
@@ -509,8 +516,13 @@ jobs:
           fi
           echo "TPM health check passed (inLockout=$IN_LOCKOUT, lockoutAuthSet=$LOCKOUT_AUTH_SET)."
 
-          # Proactively reset DA counter to prevent lockout accumulation
+          # Proactively reset DA counter and relax lockout parameters
+          # for CI — tests iterate multiple algorithms, each with PIN checks.
           tpm2_dictionarylockout --clear 2>/dev/null || true
+          tpm2_dictionarylockout --setup \
+            --max-tries=1000 \
+            --recovery-time=1 \
+            --lockout-recovery-time=1 2>/dev/null || true
 
           # 1. Evict persistent handles (tpm2-pkcs11 primary objects + test keys)
           HANDLES=$(tpm2_getcap handles-persistent 2>/dev/null | grep -oP '0x[0-9A-Fa-f]+' || true)
