@@ -104,8 +104,9 @@ jobs:
         run: |
           mkdir -vp "${GITHUB_WORKSPACE}/src"
           cd "${GITHUB_WORKSPACE}/src"
-          git clone --depth 50 https://github.com/openssl/openssl.git
+          git clone --depth 1 --no-checkout https://github.com/openssl/openssl.git
           cd "${OPENSSL_SOURCE_PATH}"
+          git fetch --tags --depth 1
           LATEST_STABLE_TAG=$(git tag --list openssl-* | grep -v alpha | grep -v beta | sort -Vr | head -n1)
           echo "Checking out OpenSSL ${LATEST_STABLE_TAG}"
           git checkout "${LATEST_STABLE_TAG}"
@@ -161,8 +162,9 @@ jobs:
         shell: bash
         run: |
           cd "${GITHUB_WORKSPACE}/src"
-          git clone --depth 50 https://github.com/python/cpython.git
+          git clone --depth 1 --no-checkout https://github.com/python/cpython.git
           cd "${PYTHON_SOURCE_PATH}"
+          git fetch --tags --depth 1
           LATEST_STABLE_TAG=$(git tag --list | grep -v a | grep -v rc | grep -v b | sort -Vr | head -n1)
           echo "Checking out Python ${LATEST_STABLE_TAG}"
           git checkout "${LATEST_STABLE_TAG}"
