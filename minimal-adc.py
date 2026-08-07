@@ -9,7 +9,10 @@ import google.auth.transport.requests
 
 # Load and use ADC
 creds, project = google.auth.default(
-    scopes=["https://www.googleapis.com/auth/cloud-platform"],
+    scopes=[
+        "https://www.googleapis.com/auth/cloud-platform",
+        "email",
+    ],
 )
 authed_session = google.auth.transport.requests.AuthorizedSession(creds)
 

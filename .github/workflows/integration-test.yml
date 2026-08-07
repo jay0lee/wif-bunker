@@ -410,7 +410,8 @@ jobs:
         shell: bash
         run: |
           echo "=== ADC baseline with GHA CI credentials ==="
-          python minimal-adc.py | tee /tmp/adc_baseline.txt
+          # -u: unbuffered stdout so tee captures the complete output
+          python -u minimal-adc.py | tee /tmp/adc_baseline.txt
 
           # Confirm we see the expected CI service account
           GHA_SA="$RUNNER_SA"
@@ -418,6 +419,8 @@ jobs:
             echo "✓ Baseline ADC working as CI SA: $GHA_SA"
           else
             echo "✗ FAIL: Expected CI SA $GHA_SA not found in output!"
+            echo "--- Captured output ---"
+            cat /tmp/adc_baseline.txt
             exit 1
           fi
 
