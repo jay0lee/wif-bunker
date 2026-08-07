@@ -274,8 +274,10 @@ def _cleanup_existing_token(lib, pin: str) -> None:
 def _init_token(lib, pin: str, module_path: str):
     """Initialize or find our PKCS#11 token.
 
-    If our token exists, returns it. Otherwise finds an uninitialized
-    slot and creates a new token. Never overwrites other tokens.
+    If our token exists, returns it. Otherwise finds a usable slot
+    and creates a new token. We re-initialize slots whose token has
+    a default/empty label (e.g. from ``tpm2_ptool init``), but never
+    overwrite tokens that clearly belong to another application.
 
     Token initialization uses ``pkcs11-tool`` because ``python-pkcs11``
     removed ``Slot.init_token()`` from its high-level API — token admin
@@ -289,17 +291,33 @@ def _init_token(lib, pin: str, module_path: str):
     except (pkcs11.NoSuchToken, pkcs11.PKCS11Error):
         pass
 
-    # 2. Find an uninitialized slot
+    # 2. Find a slot we can (re-)initialize.
+    #    A slot is usable if:
+    #      - its token is NOT initialized, OR
+    #      - its token has a default/empty label (fresh tpm2-pkcs11 store)
+    #    We skip slots whose token has a specific, non-empty label that
+    #    isn't ours — those belong to other applications.
     for slot in lib.get_slots():
         try:
             token = slot.get_token()
-            # Slot has a token — only skip if it's been initialized
-            # (i.e. belongs to another app like disk encryption).
-            # Uninitialized tokens (e.g. from tpm2_ptool init) are
-            # fair game for us to claim.
             if TokenFlag.TOKEN_INITIALIZED in token.flags:
-                continue
-            logger.debug("    Found uninitialized token, will init as '%s'", _TOKEN_LABEL)
+                label = (token.label or "").strip()
+                if label and label != _TOKEN_LABEL:
+                    # Token belongs to another app — don't touch it.
+                    logger.debug(
+                        "    Skipping slot %s: token '%s' belongs to another app",
+                        slot.slot_id, label,
+                    )
+                    continue
+                logger.debug(
+                    "    Found slot %s with default/empty token, will re-init as '%s'",
+                    slot.slot_id, _TOKEN_LABEL,
+                )
+            else:
+                logger.debug(
+                    "    Found uninitialized slot %s, will init as '%s'",
+                    slot.slot_id, _TOKEN_LABEL,
+                )
         except (pkcs11.PKCS11Error, pkcs11.TokenNotPresent):
             pass
 
