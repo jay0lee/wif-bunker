@@ -470,6 +470,20 @@ jobs:
           # firmware-provisioned data live there and require platform auth
           # (locked after boot) to restore.
 
+          # 0. TPM health check — fail fast if TPM is in a bad state
+          TPM_PROPS=$(tpm2_getcap properties-variable 2>/dev/null)
+          IN_LOCKOUT=$(echo "$TPM_PROPS" | grep -oP 'inLockout:\s+\K\d+' || echo "0")
+          LOCKOUT_AUTH_SET=$(echo "$TPM_PROPS" | grep -oP 'lockoutAuthSet:\s+\K\d+' || echo "0")
+          if [ "$IN_LOCKOUT" = "1" ] || [ "$LOCKOUT_AUTH_SET" = "1" ]; then
+            echo "::error::TPM is in a bad state (inLockout=$IN_LOCKOUT, lockoutAuthSet=$LOCKOUT_AUTH_SET)."
+            echo "Manual recovery required on the NUC:"
+            echo "  1. echo 5 | sudo tee /sys/class/tpm/tpm0/ppi/request"
+            echo "  2. sudo reboot"
+            echo "  3. Press F12 when prompted to clear TPM"
+            exit 1
+          fi
+          echo "TPM health check passed (inLockout=$IN_LOCKOUT, lockoutAuthSet=$LOCKOUT_AUTH_SET)."
+
           # 1. Evict persistent handles (tpm2-pkcs11 primary objects + test keys)
           HANDLES=$(tpm2_getcap handles-persistent 2>/dev/null | grep -oP '0x[0-9A-Fa-f]+' || true)
           for h in $HANDLES; do
