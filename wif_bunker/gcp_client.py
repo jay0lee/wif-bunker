@@ -433,17 +433,9 @@ class GCPClient:
             else:
                 raise
 
-        # Step 3: fetch project number (brief retry for propagation).
-        for attempt in range(5):
-            try:
-                return self.api_call("GET", project_url)["projectNumber"]
-            except requests.exceptions.HTTPError:
-                if attempt < 4:
-                    sleep_time = min(2**attempt, 10)
-                    logger.info("    Waiting for project propagation (%d/5), %ds...", attempt + 1, sleep_time)
-                    time.sleep(sleep_time)
-                else:
-                    raise
+        # Step 3: fetch project number (retry for IAM propagation after creation).
+        result = self.api_call_with_iam_retry("GET", project_url)
+        return result["projectNumber"]
 
     def enable_apis(self, project_number: str, api_list: list[str]) -> None:
         """Batch-enables the given APIs for the project."""
