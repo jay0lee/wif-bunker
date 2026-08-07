@@ -232,6 +232,7 @@ jobs:
       WIF_PROVIDER: ${{ secrets.WIF_PROVIDER }}
       WIF_SERVICE_ACCOUNT: ${{ secrets.WIF_SERVICE_ACCOUNT }}
       SANDBOX_FOLDER_ID: ${{ secrets.SANDBOX_FOLDER_ID }}
+      WIF_POOL_NAME: ${{ secrets.WIF_POOL_NAME }}
 
   # ── Job 3: Tag + Release (only if tests pass) ──
   release:
