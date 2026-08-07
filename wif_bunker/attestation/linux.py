@@ -111,42 +111,31 @@ def _extract_ek_certificate_cli_fallback(work_dir: Path, ectx) -> tuple[Attestat
     This is the only CLI fallback — no library equivalent exists for this
     command (it makes HTTP calls to Intel/AMD provisioning servers).
     """
-    from tpm2_pytss import TPM2B_PUBLIC  # pylint: disable=import-outside-toplevel
-
-    if not shutil.which("tpm2_getekcertificate"):
-        logger.debug("tpm2_getekcertificate not found — skipping manufacturer fetch")
+    if not shutil.which("tpm2_getekcertificate") or not shutil.which("tpm2_createek"):
+        logger.debug("tpm2_getekcertificate or tpm2_createek not found — skipping")
         return None, None
 
-    from tpm2_pytss import ESYS_TR as _ESYS_TR  # pylint: disable=import-outside-toplevel
+    # Use tpm2_createek CLI to create EK and export pub key in native format
+    ek_ctx = work_dir / "ek.ctx"
+    ek_pub = work_dir / "ek_pub.tpm2"
+    ek_cert_path = work_dir / "ek_cert_fetched.pem"
 
-    # Create EK for pub key export (native TPM2B_PUBLIC format needed by CLI)
-    try:
-        ek_handle, ek_pub, _, _, _ = ectx.create_primary(
-            in_sensitive=None,
-            in_public="rsa2048",
-            primary_handle=_ESYS_TR.RH_ENDORSEMENT,
-        )
-
-        # Export pub key in native format for tpm2_getekcertificate
-        ek_pub_path = work_dir / "ek_pub_native.tpm2"
-        ek_pub_path.write_bytes(bytes(TPM2B_PUBLIC.marshal(ek_pub)))
-
-        ectx.flush_context(ek_handle)
-    except Exception as exc:
-        logger.debug("Could not create EK for getekcertificate: %s", exc)
+    result = subprocess.run(
+        ["tpm2_createek", "-c", str(ek_ctx), "-G", "rsa2048", "-u", str(ek_pub)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        logger.debug("tpm2_createek failed (rc=%d): %s", result.returncode, result.stderr.strip()[:200])
         return None, None
 
     result = subprocess.run(
-        ["tpm2_getekcertificate", "-u", str(ek_pub_path), "-o", str(work_dir / "ek_cert_fetched.pem")],
-        capture_output=True,
-        text=True,
-        cwd=work_dir,
+        ["tpm2_getekcertificate", "-u", str(ek_pub), "-o", str(ek_cert_path)],
+        capture_output=True, text=True, cwd=work_dir,
     )
     if result.returncode != 0:
         logger.debug(
             "tpm2_getekcertificate failed (rc=%d): %s",
-            result.returncode,
-            result.stderr.strip()[:200],
+            result.returncode, result.stderr.strip()[:200],
         )
         return None, None
 
@@ -157,7 +146,7 @@ def _extract_ek_certificate_cli_fallback(work_dir: Path, ectx) -> tuple[Attestat
         load_certificate,
     )
 
-    raw = (work_dir / "ek_cert_fetched.pem").read_bytes().lstrip()
+    raw = ek_cert_path.read_bytes().lstrip()
     try:
         if raw.startswith(b"-----BEGIN"):
             ossl_cert = load_certificate(FILETYPE_PEM, raw)
