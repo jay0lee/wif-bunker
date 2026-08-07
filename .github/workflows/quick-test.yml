@@ -137,7 +137,6 @@ jobs:
       # ══════════════════════════════════════════════════════════════════════
 
       - name: "Restore compiled OpenSSL + Python"
-        if: needs.config.outputs.runner != 'hardware-tpm' && needs.config.outputs.runner != 'yubikey'
         uses: actions/cache/restore@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         id: cache-python-ssl
         with:
@@ -150,7 +149,6 @@ jobs:
           fail-on-cache-miss: true
 
       - name: "Add compiled Python to PATH"
-        if: needs.config.outputs.runner != 'hardware-tpm' && needs.config.outputs.runner != 'yubikey'
         shell: bash
         run: |
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
@@ -166,7 +164,6 @@ jobs:
           fi
 
       - name: "Verify compiled Python + OpenSSL"
-        if: needs.config.outputs.runner != 'hardware-tpm' && needs.config.outputs.runner != 'yubikey'
         shell: bash
         run: |
           echo "Python: $(python3 --version)"
@@ -198,7 +195,7 @@ jobs:
         if: needs.config.outputs.install_wif_bunker == 'true'
         shell: bash
         env:
-          OPENSSL_DIR: ${{ needs.config.outputs.runner != 'hardware-tpm' && needs.config.outputs.runner != 'yubikey' && format('{0}/bin/ssl', github.workspace) || '' }}
+          OPENSSL_DIR: ${{ github.workspace }}/bin/ssl
         run: |
           cd hardmtls-native
           cargo build --release
