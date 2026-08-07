@@ -1,8 +1,12 @@
 # GitHub Actions Workflow Rules
 
+These rules apply to `.github/workflows/*.yml` files only — not to Python, Rust, or other application code.
+
 ## Paths and Variables
 
-- **NEVER** use hard-coded paths like `/tmp`, `/home`, or `/usr` in workflow steps.
+In workflow `run:` blocks:
+
+- **NEVER** use hard-coded paths like `/tmp`, `/home`, or `/usr`.
 - **ALWAYS** use GitHub Actions runner variables:
   - `$RUNNER_TEMP` — temporary directory for the current job
   - `$GITHUB_WORKSPACE` — the workspace/checkout directory
