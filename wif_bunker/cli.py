@@ -574,14 +574,10 @@ def _main_impl() -> None:
 
         try:
             # Allow IAM bindings to propagate before attempting auth.
-            logger.info("    Waiting 15s for IAM propagation...")
-            time.sleep(15)
+            # Allow IAM bindings to propagate before attempting auth.
+            logger.info("    Waiting 180s for IAM propagation...")
+            time.sleep(180)
 
-            @with_retries(
-                max_attempts=API_RETRY_ATTEMPTS,
-                retryable_exceptions=(RefreshError, OAuthError, TypeError),
-                retry_msg="Waiting for STS propagation",
-            )
             def _verify_adc():
                 adc_creds, _ = google.auth.default(
                     scopes=["https://www.googleapis.com/auth/cloud-platform"],
