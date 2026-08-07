@@ -455,21 +455,28 @@ def _run_pkcs11_tool_keygen(
     """
     import subprocess
 
-    result = subprocess.run(
-        [
-            "pkcs11-tool",
-            "--module", module_path,
-            "--token-label", token_label,
-            "--pin", pin,
-            "--keypairgen",
-            "--key-type", key_type,
-            "--label", label,
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    logger.debug("    pkcs11-tool keygen output: %s", result.stdout.strip())
+    try:
+        result = subprocess.run(
+            [
+                "pkcs11-tool",
+                "--module", module_path,
+                "--token-label", token_label,
+                "--pin", pin,
+                "--keypairgen",
+                "--key-type", key_type,
+                "--label", label,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        logger.debug("    pkcs11-tool keygen output: %s", result.stdout.strip())
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"pkcs11-tool --keypairgen failed for {key_type}:\n"
+            f"  stdout: {exc.stdout.strip()}\n"
+            f"  stderr: {exc.stderr.strip()}"
+        ) from exc
 
 
 def _find_key_objects(session, label: str):
