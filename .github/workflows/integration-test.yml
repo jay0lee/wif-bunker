@@ -271,6 +271,9 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       RUNNER_SA: ${{ fromJSON(needs.bootstrap.outputs.runner_map)[matrix.runner_id].sa }}
       TESTS_FOLDER: ${{ fromJSON(needs.bootstrap.outputs.runner_map)[matrix.runner_id].tests_folder }}
+      # Paths to pre-built OpenSSL + Python (from build-python-ssl.yml cache)
+      OPENSSL_INSTALL_PATH: ${{ github.workspace }}/bin/ssl
+      PYTHON_INSTALL_PATH: ${{ github.workspace }}/bin/python
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -323,11 +326,45 @@ jobs:
           echo "TPM2_PKCS11_TCTI=tabrmd:bus_type=session" >> "$GITHUB_ENV"
 
 
-      # ── Setup: Python (skip on self-hosted — system python3 pre-installed) ──
-      - if: ${{ !matrix.self_hosted }}
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      # ══════════════════════════════════════════════════════════════════════
+      # Restore pre-built OpenSSL + Python from cache
+      # Built daily by build-python-ssl.yml — restore-keys prefix match
+      # falls back to the most recent successful build.
+      # ══════════════════════════════════════════════════════════════════════
+
+      - name: "Restore compiled OpenSSL + Python"
+        uses: actions/cache/restore@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        id: cache-python-ssl
         with:
-          python-version: "3.x"
+          path: |
+            bin/ssl
+            bin/python
+          restore-keys: |
+            python-ssl-${{ runner.os }}-${{ runner.arch }}-v1-
+          fail-on-cache-miss: true
+
+      - name: "Add compiled Python to PATH"
+        shell: bash
+        run: |
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            echo "${PYTHON_INSTALL_PATH}" >> "$GITHUB_PATH"
+            echo "${PYTHON_INSTALL_PATH}/Scripts" >> "$GITHUB_PATH"
+          else
+            echo "${PYTHON_INSTALL_PATH}/bin" >> "$GITHUB_PATH"
+            if [[ "${RUNNER_OS}" == "Linux" ]]; then
+              echo "LD_LIBRARY_PATH=${PYTHON_INSTALL_PATH}/lib:${OPENSSL_INSTALL_PATH}/lib:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+            elif [[ "${RUNNER_OS}" == "macOS" ]]; then
+              echo "DYLD_LIBRARY_PATH=${PYTHON_INSTALL_PATH}/lib:${OPENSSL_INSTALL_PATH}/lib:${DYLD_LIBRARY_PATH}" >> $GITHUB_ENV
+            fi
+          fi
+
+      - name: "Verify compiled Python + OpenSSL"
+        shell: bash
+        run: |
+          echo "Python: $(python3 --version)"
+          python3 -c "import ssl; print(f'Python ssl module OpenSSL: {ssl.OPENSSL_VERSION}')"
+
+
 
       - name: Create venv and install dependencies
         shell: bash
@@ -512,18 +549,17 @@ jobs:
         if: ${{ !inputs.use_built_binary }}
         uses: dtolnay/rust-toolchain@stable
 
-      - name: "Install OpenSSL (Windows)"
+      - name: "Windows: Configure MSVC for hardmTLS"
         if: ${{ !inputs.use_built_binary && runner.os == 'Windows' }}
-        shell: pwsh
-        run: |
-          choco install openssl -y
-          echo "OPENSSL_DIR=C:\Program Files\OpenSSL" >> $env:GITHUB_ENV
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          arch: ${{ runner.arch }}
 
       - name: "Build hardmTLS"
         if: ${{ !inputs.use_built_binary }}
         shell: bash
         env:
-          OPENSSL_DIR: ${{ runner.os == 'Windows' && 'C:\Program Files\OpenSSL' || '' }}
+          OPENSSL_DIR: ${{ github.workspace }}/bin/ssl
         run: |
           cd hardmtls-native
           cargo build --release

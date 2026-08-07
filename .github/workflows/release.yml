@@ -44,24 +44,50 @@ jobs:
 
     env:
       VERSION: ${{ needs.version.outputs.version }}
+      # Paths to pre-built OpenSSL + Python (from build-python-ssl.yml cache)
+      OPENSSL_INSTALL_PATH: ${{ github.workspace }}/bin/ssl
+      PYTHON_INSTALL_PATH: ${{ github.workspace }}/bin/python
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      # ══════════════════════════════════════════════════════════════════════
+      # Restore pre-built OpenSSL + Python from cache
+      # Built daily by build-python-ssl.yml — restore-keys prefix match
+      # falls back to the most recent successful build.
+      # ══════════════════════════════════════════════════════════════════════
+
+      - name: "Restore compiled OpenSSL + Python"
+        uses: actions/cache/restore@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        id: cache-python-ssl
         with:
-          python-version: '3.x'
+          path: |
+            bin/ssl
+            bin/python
+          restore-keys: |
+            python-ssl-${{ runner.os }}-${{ runner.arch }}-v1-
+          fail-on-cache-miss: true
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: "Add compiled Python to PATH"
+        shell: bash
+        run: |
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            echo "${PYTHON_INSTALL_PATH}" >> "$GITHUB_PATH"
+            echo "${PYTHON_INSTALL_PATH}/Scripts" >> "$GITHUB_PATH"
+          else
+            echo "${PYTHON_INSTALL_PATH}/bin" >> "$GITHUB_PATH"
+            if [[ "${RUNNER_OS}" == "Linux" ]]; then
+              echo "LD_LIBRARY_PATH=${PYTHON_INSTALL_PATH}/lib:${OPENSSL_INSTALL_PATH}/lib:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+            elif [[ "${RUNNER_OS}" == "macOS" ]]; then
+              echo "DYLD_LIBRARY_PATH=${PYTHON_INSTALL_PATH}/lib:${OPENSSL_INSTALL_PATH}/lib:${DYLD_LIBRARY_PATH}" >> $GITHUB_ENV
+            fi
+          fi
 
-      - name: Install OpenSSL (Windows)
-        if: matrix.platform_name == 'windows'
-        run: choco install openssl -y
-
-      - name: Build hardmTLS
-        working-directory: hardmtls-native
-        run: cargo build --release
+      - name: "Verify compiled Python + OpenSSL"
+        shell: bash
+        run: |
+          echo "Python: $(python3 --version)"
+          python3 -c "import ssl; print(f'Python ssl module OpenSSL: {ssl.OPENSSL_VERSION}')"
 
       - name: Inject version
         shell: bash
@@ -75,7 +101,6 @@ jobs:
         shell: bash
         run: |
           IFS='.' read -r YEAR MONTH DAY HHMM <<< "$VERSION"
-          # Strip leading zeros — Python rejects 08/09/0003 as invalid octal
           MONTH=$((10#$MONTH))
           DAY=$((10#$DAY))
           HHMM=$((10#$HHMM))
@@ -87,15 +112,34 @@ jobs:
               packaging/windows/version_info.txt.in > version_info.txt
           cat version_info.txt
 
+      # ══════════════════════════════════════════════════════════════════════
+      # Build hardmTLS + package
+      # ══════════════════════════════════════════════════════════════════════
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: "Windows: Configure MSVC for hardmTLS"
+        if: matrix.platform_name == 'windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          arch: ${{ runner.arch }}
+
+      - name: Build hardmTLS
+        working-directory: hardmtls-native
+        env:
+          OPENSSL_DIR: ${{ github.workspace }}/bin/ssl
+        run: cargo build --release
+
       - name: Install system dependencies (Linux)
         if: matrix.platform_name == 'linux'
         run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install pyinstaller
-          python -m pip install --only-deps ".[yubikey]"
+          python3 -m pip install --upgrade pip
+          python3 -m pip install pyinstaller
+          python3 -m pip install --only-deps ".[yubikey]"
 
       - name: Run PyInstaller
         run: pyinstaller wif-bunker.spec

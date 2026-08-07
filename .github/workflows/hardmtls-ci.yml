@@ -12,6 +12,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Path to pre-built OpenSSL (from build-python-ssl.yml cache)
+  OPENSSL_INSTALL_PATH: ${{ github.workspace }}/bin/ssl
 
 jobs:
   check:
@@ -30,30 +32,54 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Install OpenSSL (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          choco install openssl -y
-          echo "OPENSSL_DIR=C:\Program Files\OpenSSL" >> $env:GITHUB_ENV
+      # ── Restore pre-built OpenSSL from cache ──
+      - name: "Restore compiled OpenSSL"
+        uses: actions/cache/restore@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: bin/ssl
+          restore-keys: |
+            python-ssl-${{ runner.os }}-${{ runner.arch }}-v1-
+          fail-on-cache-miss: true
 
+      - name: "Verify OpenSSL"
+        shell: bash
+        run: |
+          "${OPENSSL_INSTALL_PATH}/bin/openssl" version -a
+
+      # ── Windows: MSVC for cargo build ──
+      - name: "Windows: Configure MSVC"
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          arch: ${{ runner.arch }}
+
+      # ── Cargo checks ──
       - name: Formatting
         working-directory: hardmtls-native
         run: cargo fmt --all -- --check
 
       - name: Linting
         working-directory: hardmtls-native
+        env:
+          OPENSSL_DIR: ${{ github.workspace }}/bin/ssl
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Tests
         working-directory: hardmtls-native
+        env:
+          OPENSSL_DIR: ${{ github.workspace }}/bin/ssl
         run: cargo test --all-features
 
       - name: Documentation
         working-directory: hardmtls-native
+        env:
+          OPENSSL_DIR: ${{ github.workspace }}/bin/ssl
         run: cargo doc --no-deps
 
       - name: Build release
         working-directory: hardmtls-native
+        env:
+          OPENSSL_DIR: ${{ github.workspace }}/bin/ssl
         run: cargo build --release
 
       - name: Upload native library
