@@ -319,10 +319,10 @@ def _create_ek_and_ak(ectx) -> tuple[AttestationCheck, bool, object, object, byt
 
         # Export AK public key as PEM
         from tpm2_pytss.internal.crypto import (  # pylint: disable=import-outside-toplevel
-            public_to_crypto_key,
+            public_to_key,
         )
 
-        crypto_pub = public_to_crypto_key(ak_pub)
+        crypto_pub = public_to_key(ak_pub)
         ak_pub_pem = crypto_pub.public_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo,
