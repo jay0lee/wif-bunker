@@ -396,7 +396,7 @@ def _credential_activation(ectx, ek_handle, ak_handle) -> AttestationCheck:
             policy_session=session,
             nonce_tpm=TPM2B_NONCE(),
             cp_hash_a=TPM2B_DIGEST(),
-            policy_ref=TPM2B_DIGEST(),
+            policy_ref=TPM2B_NONCE(),
             expiration=0,
         )
 
