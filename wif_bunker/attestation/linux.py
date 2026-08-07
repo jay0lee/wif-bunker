@@ -362,6 +362,7 @@ def _credential_activation(ectx, ek_handle, ak_handle) -> AttestationCheck:
         TPM2_SE,
         TPM2B_DIGEST,
         TPM2B_NONCE,
+        TPMT_SYM_DEF,
     )
     from tpm2_pytss.utils import make_credential  # pylint: disable=import-outside-toplevel
 
@@ -385,7 +386,7 @@ def _credential_activation(ectx, ek_handle, ak_handle) -> AttestationCheck:
             tpm_key=ESYS_TR.NONE,
             bind=ESYS_TR.NONE,
             session_type=TPM2_SE.POLICY,
-            symmetric="aes128-cfb",
+            symmetric=TPMT_SYM_DEF.parse("aes128cfb"),
             auth_hash=TPM2_ALG.SHA256,
         )
 
