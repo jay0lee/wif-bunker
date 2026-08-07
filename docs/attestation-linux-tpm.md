@@ -48,6 +48,8 @@ Extract the certificate provisioned by the manufacturer that vouches for the End
 - NVRAM Read: Use `ESAPI.nv_read()` on the NV index.
 - Manufacturer Fetch: *No direct TSS library equivalent.* Rely on `tpm2_getekcertificate` as an external process.
 
+**Intel PTT Note:** Intel firmware TPMs (PTT) on consumer devices (e.g., NUC8) do NOT store EK certificates in NV RAM. The NV indices `0x01C00002` (RSA) and `0x01C0000A` (ECC) will return `TPM_RC_HANDLE` (0x18b). This is normal — Intel's design is to fetch EK certs at runtime from Intel's Endorsement Provisioning Service (EPS) via `tpm2_getekcertificate`. The returned cert is PEM format with a leading newline; strip before parsing.
+
 ### Step 2: Verify EK Certificate Chain
 
 Verify the EK certificate against known Manufacturer Root CAs.
@@ -68,6 +70,26 @@ tpm2_createak -C ek.ctx -c ak.ctx -G rsa -g sha256 -n ak.name
 **Library (`tpm2-pytss`):**
 Use `ESAPI.create_primary()` to create the EK in the endorsement hierarchy.
 Use `ESAPI.create()` and `ESAPI.load()` to create and load the AK bound to the EK.
+
+**Critical: TCG Standard EK Template.** The EK MUST be created with the TCG standard template, not a generic `"rsa2048"` string. The standard EK template requires:
+- `objectAttributes`: `fixedtpm|fixedparent|sensitivedataorigin|adminwithpolicy|restricted|decrypt`
+- `authPolicy`: The SHA-256 digest of `PolicySecret(TPM_RH_ENDORSEMENT)` = `837197674484b3f81a90cc8d46a5d724fd52d76e06520b64f2a1da1b331469aa`
+
+A generic `"rsa2048"` template has `USERWITHAUTH` instead of `adminWithPolicy` and no auth policy digest, which causes credential activation to fail with `TPM_RC_POLICY_FAIL`.
+
+**Critical: Policy Sessions for EK Operations.** Because the TCG EK uses `adminWithPolicy`, EVERY operation that uses the EK as a handle requires a fresh `PolicySecret(endorsement)` session:
+- `ectx.create()` — pass `session1=session` to authorize EK as parent
+- `ectx.load()` — pass `session1=session` to authorize EK as parent
+- `ectx.activate_credential()` — pass `session2=session` for EK key_handle
+
+Policy sessions are single-use. Create a new session for each operation.
+
+**Critical: AK Template.** The AK must be a restricted signing key:
+- `objectAttributes`: `fixedtpm|fixedparent|sensitivedataorigin|userwithauth|restricted|sign` (no `decrypt`)
+- `symmetric`: must be `TPM2_ALG.NULL` (signing keys don't use symmetric encryption)
+- `scheme`: `RSASSA-SHA256`
+
+Use `TPM2B_PUBLIC.parse("rsa2048:rsassa-sha256", objectAttributes=...)` and then override `symmetric.algorithm = TPM2_ALG.NULL`. The parse method correctly constructs the RSASSA scheme union types, avoiding complex manual struct assembly.
 
 ### Step 4: Credential Activation
 
@@ -100,6 +122,8 @@ tpm2_certify -c owner_primary.ctx -C ak.ctx -g sha256 -o attest.bin -s sig.bin
 - Setup: Use `ESAPI.create_primary()` in the owner hierarchy.
 - Certification: Use `ESAPI.certify()` with the target key and the AK.
 
+**Note:** Some versions of `tpm2-pytss` require an explicit `in_scheme` parameter for `certify()`. Use `TPMT_SIG_SCHEME(scheme=TPM2_ALG.NULL)` to let the AK use its built-in signing scheme.
+
 ### Step 6: PKCS#11 Store Query
 
 Find the relevant keys that a workload is using.
@@ -116,7 +140,7 @@ Use the `python-pkcs11` library to interface with the PKCS#11 token directly and
 - **AK (Attestation Key)**: An ephemeral key created per-session, bound to the EK hierarchy. It is used to sign attestation data because the EK itself cannot be used for generic signing.
 - **Credential Activation**: A cryptographic challenge-response protocol proving that an AK resides on the same TPM hardware as a specific EK.
 - **TPM2_Certify**: A TPM command where an AK generates a signed structure (`TPM2B_ATTEST`) proving that another specified key currently resides in the TPM and has specific properties (like non-exportability).
-- **Policy Sessions**: Advanced authorization sessions. Required because using the Endorsement hierarchy (for `activatecredential`) requires a `PolicySecret` authorization rather than simple password auth.
+- **Policy Sessions**: Advanced authorization sessions. Required because using the Endorsement hierarchy (for `activatecredential`) requires a `PolicySecret` authorization rather than simple password auth. Sessions are single-use; create a fresh session for each TPM operation requiring EK authorization.
 
 ## 5. Python Libraries
 
@@ -139,14 +163,61 @@ A major recurring issue when verifying TPM certificates.
 
 **Solution:** You MUST use `pyOpenSSL` (`OpenSSL.crypto`) for DER↔PEM conversion and certificate chain verification. It leverages the C OpenSSL library which is far more lenient with non-compliant ASN.1 structures.
 
-## 7. Dead Ends
+## 7. `tpm2-pytss` API Gotchas
+
+Version-specific quirks encountered on real hardware:
+
+| Gotcha | Details |
+|---|---|
+| **Type-strict unions** | `TPMS_RSA_PARMS.scheme` must be a `TPMT_RSA_SCHEME` struct, not a raw `TPM2_ALG`. `TPMT_RSA_SCHEME.details` must be `TPMU_ASYM_SCHEME`, not `TPMS_SCHEME_HASH`. Use `TPM2B_PUBLIC.parse()` to avoid these. |
+| **String template conflicts** | `TPM2B_PUBLIC.parse("rsa2048:rsassa-sha256")` raises `ParserAttributeError` because it sets both SIGN and DECRYPT. Pass explicit `objectAttributes=` to prevent this. |
+| **`certify()` signature** | Some versions require `in_scheme` as a positional/required argument. Pass `TPMT_SIG_SCHEME(scheme=TPM2_ALG.NULL)`. |
+| **`start_auth_session()` symmetric** | The string `"aes128-cfb"` parses incorrectly (mode becomes `"-cfb"`). Use `TPMT_SYM_DEF.parse("aes128cfb")`. |
+| **`policy_secret()` types** | `policy_ref` expects `TPM2B_NONCE`, not `TPM2B_DIGEST`. Both are structurally identical but type-checked. |
+| **PEM export** | `public_to_crypto_key()` may not exist. Use `_public_to_pem(ak_pub.publicArea)` — pass the inner `TPMT_PUBLIC`, not the `TPM2B_PUBLIC` wrapper. |
+
+## 8. Intel PTT (Firmware TPM) Specifics
+
+Intel Platform Trust Technology (PTT) is a firmware-based TPM implementation found on Intel NUC, consumer PCs, and embedded platforms. Key differences from discrete TPMs:
+
+| Aspect | Discrete TPM | Intel PTT (fTPM) |
+|---|---|---|
+| EK cert in NV | Yes (factory provisioned) | No — fetched from Intel EPS at runtime |
+| NV index `0x01C0xxxx` | Writable with platform auth | **Platform auth only**, locked after boot |
+| Platform auth | Available after boot on some | **Locked once OS boots** — firmware only |
+| TPM clear | BIOS menu or `tpm2_clear` | PPI via sysfs (see below) |
+
+**NV RAM Restrictions:** Intel PTT hardware-locks the TCG reserved NV range (`0x01C00000–0x01C07FFF`) to platform auth. Since platform auth is only available during the BIOS/firmware boot phase (locked once the OS loads), these indices cannot be written from userspace. This is a hardware restriction, not a software issue.
+
+**TPM Clear/Reset Procedure (Intel NUC):**
+Intel NUC BIOS typically does not have an explicit "Clear TPM" option. Use the Physical Presence Interface (PPI) via sysfs:
+```bash
+# Queue a TPM clear request
+echo 5 | sudo tee /sys/class/tpm/tpm0/ppi/request
+sudo reboot
+# Press F12 when prompted during boot to confirm the clear
+```
+After clearing: all hierarchy auths reset to empty, all NV indices removed, lockout counter reset.
+
+**Verifying TPM Health:**
+```bash
+tpm2_getcap properties-variable | grep -i "lockoutAuthSet\|inLockout\|LOCKOUT_COUNTER"
+```
+- `lockoutAuthSet: 1` — someone set a lockout password; TPM clear required
+- `inLockout: 1` — TPM is in DA lockout mode
+- `LOCKOUT_COUNTER > 0` — failed auth attempts have accumulated
+
+## 9. Dead Ends
 
 Avoid these architectural approaches:
 - **Credential activation via subprocess**: Highly fragile. Requires managing temporary files, correctly formatting binary blobs, and specifically hex-encoding the AK name.
 - **`tpm2_getekcertificate` pure library equivalent**: None exists in standard TSS. The tool performs HTTP fetches to manufacturer servers which the low-level TSS spec doesn't cover. Use the CLI tool via subprocess for this one step.
 - **Direct SQLite queries**: Parsing `tpm2_pkcs11.sqlite3` directly breaks frequently because the database schema changes between tpm2-pkcs11 versions. Use `python-pkcs11` instead.
+- **Generic `"rsa2048"` for EK**: The string template creates a key with `USERWITHAUTH` and no auth policy, which breaks credential activation. Always use the TCG standard EK template with `adminWithPolicy` and the correct auth policy digest.
+- **Manual TPMT_RSA_SCHEME construction**: Building the scheme union types by hand is fragile across tpm2-pytss versions. Use `TPM2B_PUBLIC.parse()` with explicit `objectAttributes` and post-parse fixups.
+- **Writing EK cert to NV on Intel PTT**: The `0x01C0xxxx` range is platform-auth-only; platform auth is locked after boot. Intel's supported approach is runtime fetch via `tpm2_getekcertificate`.
 
-## 8. Key Differences from Windows
+## 10. Key Differences from Windows
 
 | Aspect | Linux | Windows |
 |---|---|---|
@@ -157,7 +228,7 @@ Avoid these architectural approaches:
 | EK cert retrieval | `tpm2_getekcertificate` or NV read | PowerShell `Get-TpmEndorsementKeyInfo` |
 | Admin required | Access to `/dev/tpmrm0` (usually `tss` group) | Usually non-admin works |
 
-## 9. Error Reference
+## 11. Error Reference
 
 When using `tpm2-pytss`, errors surface as `TSS2_Exception`. You must check the return codes.
 
@@ -165,5 +236,10 @@ When using `tpm2-pytss`, errors surface as `TSS2_Exception`. You must check the 
 |---|---|---|
 | Permissions | `Could not open /dev/tpmrm0` | Add user to `tss` group or run as root. |
 | Command not supported | `TPM2_RC_COMMAND_CODE` | Firmware is too old to support the command. |
-| NV index empty | `TPM2_RC_NV_UNINITIALIZED` | The NVRAM index doesn't have a certificate. Fallback to `tpm2_getekcertificate`. |
-| Bad session | `TPM2_RC_POLICY_FAIL` | Policy session expired or was set up incorrectly (e.g., missing policy_secret). |
+| NV index empty | `TPM_RC_HANDLE` (0x18b) | NV index doesn't exist (normal for Intel PTT). Fallback to `tpm2_getekcertificate`. |
+| Bad session | `TPM_RC_POLICY_FAIL` (0x09d) | Policy session expired or was set up incorrectly (e.g., missing policy_secret). |
+| Auth unavailable | `TPM_RC_AUTH_UNAVAILABLE` (0x12f) | EK has `adminWithPolicy` but no policy session was provided. Add PolicySecret session. |
+| Scheme mismatch | `TPM_RC_SCHEME` (0x2d2) | Restricted signing key requires explicit scheme (not NULL). Use `rsassa-sha256`. |
+| Symmetric mismatch | `TPM_RC_SYMMETRIC` (0x2d6) | Signing key has `symmetric=AES` but needs `NULL`. Override after `parse()`. |
+| Inconsistent attributes | `TPM_RC_ATTRIBUTES` (0x082) | NV index in `0x01C0xxxx` range requires platform auth. Cannot define with owner auth. |
+| DA lockout | `lockoutAuthSet: 1` | TPM clear required via PPI (see Intel PTT section). |
