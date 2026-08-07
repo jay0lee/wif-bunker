@@ -299,8 +299,7 @@ def _create_ek_and_ak(ectx) -> tuple[AttestationCheck, bool, object, object, byt
         )
         from tpm2_pytss.types import (  # pylint: disable=import-outside-toplevel
             TPM2B_PUBLIC, TPMT_PUBLIC, TPMU_PUBLIC_PARMS,
-            TPMS_RSA_PARMS, TPMT_RSA_SCHEME, TPMS_SCHEME_HASH,
-            TPMT_SYM_DEF_OBJECT,
+            TPMS_RSA_PARMS, TPMT_SYM_DEF_OBJECT,
         )
 
         ak_attrs = (
@@ -312,6 +311,8 @@ def _create_ek_and_ak(ectx) -> tuple[AttestationCheck, bool, object, object, byt
             | TPMA_OBJECT.SIGN_ENCRYPT
         )
 
+        # Build RSA signing scheme using NV template approach:
+        # Set scheme to NULL and let TPM use default for restricted signing.
         ak_template = TPM2B_PUBLIC(
             publicArea=TPMT_PUBLIC(
                 type=TPM2_ALG.RSA,
@@ -320,10 +321,7 @@ def _create_ek_and_ak(ectx) -> tuple[AttestationCheck, bool, object, object, byt
                 parameters=TPMU_PUBLIC_PARMS(
                     rsaDetail=TPMS_RSA_PARMS(
                         symmetric=TPMT_SYM_DEF_OBJECT(algorithm=TPM2_ALG.NULL),
-                        scheme=TPMT_RSA_SCHEME(
-                            scheme=TPM2_ALG.RSASSA,
-                            details=TPMS_SCHEME_HASH(hashAlg=TPM2_ALG.SHA256),
-                        ),
+                        scheme=TPM2_ALG.NULL,
                         keyBits=2048,
                         exponent=0,
                     )
