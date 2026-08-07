@@ -1223,7 +1223,7 @@ static EC_KEYMGMT_DISPATCH: [OsslDispatch; 16] = [
 /// RSA SIGNATURE dispatch table — matches tpm2-openssl pattern.
 /// 16 functions + sentinel.
 #[allow(unsafe_code)]
-static RSA_SIGNATURE_DISPATCH: [OsslDispatch; 13] = [
+static RSA_SIGNATURE_DISPATCH: [OsslDispatch; 17] = [
     dispatch_entry!(
         OSSL_FUNC_SIGNATURE_NEWCTX,
         signature_newctx,
@@ -1293,6 +1293,26 @@ static RSA_SIGNATURE_DISPATCH: [OsslDispatch; 13] = [
         OSSL_FUNC_SIGNATURE_DIGEST_VERIFY_FINAL,
         signature_digest_verify_final,
         extern "C" fn(*mut c_void, *const c_uchar, usize) -> c_int
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_SIGNATURE_GET_CTX_PARAMS,
+        signature_get_ctx_params,
+        extern "C" fn(*mut c_void, *mut openssl_sys::OSSL_PARAM) -> c_int
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_SIGNATURE_GETTABLE_CTX_PARAMS,
+        signature_gettable_ctx_params,
+        extern "C" fn(*const c_void, *const c_void) -> *const openssl_sys::OSSL_PARAM
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_SIGNATURE_SET_CTX_PARAMS,
+        signature_set_ctx_params,
+        extern "C" fn(*mut c_void, *const openssl_sys::OSSL_PARAM) -> c_int
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_SIGNATURE_SETTABLE_CTX_PARAMS,
+        signature_settable_ctx_params,
+        extern "C" fn(*const c_void, *const c_void) -> *const openssl_sys::OSSL_PARAM
     ),
     OsslDispatch::end(),
 ];
@@ -1300,7 +1320,7 @@ static RSA_SIGNATURE_DISPATCH: [OsslDispatch; 13] = [
 /// ECDSA SIGNATURE dispatch table — matches tpm2-openssl pattern.
 /// 16 functions + sentinel.
 #[allow(unsafe_code)]
-static ECDSA_SIGNATURE_DISPATCH: [OsslDispatch; 13] = [
+static ECDSA_SIGNATURE_DISPATCH: [OsslDispatch; 17] = [
     dispatch_entry!(
         OSSL_FUNC_SIGNATURE_NEWCTX,
         signature_newctx,
@@ -1370,6 +1390,26 @@ static ECDSA_SIGNATURE_DISPATCH: [OsslDispatch; 13] = [
         OSSL_FUNC_SIGNATURE_DIGEST_VERIFY_FINAL,
         signature_digest_verify_final,
         extern "C" fn(*mut c_void, *const c_uchar, usize) -> c_int
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_SIGNATURE_GET_CTX_PARAMS,
+        signature_get_ctx_params,
+        extern "C" fn(*mut c_void, *mut openssl_sys::OSSL_PARAM) -> c_int
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_SIGNATURE_GETTABLE_CTX_PARAMS,
+        signature_gettable_ctx_params,
+        extern "C" fn(*const c_void, *const c_void) -> *const openssl_sys::OSSL_PARAM
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_SIGNATURE_SET_CTX_PARAMS,
+        signature_set_ctx_params,
+        extern "C" fn(*mut c_void, *const openssl_sys::OSSL_PARAM) -> c_int
+    ),
+    dispatch_entry!(
+        OSSL_FUNC_SIGNATURE_SETTABLE_CTX_PARAMS,
+        signature_settable_ctx_params,
+        extern "C" fn(*const c_void, *const c_void) -> *const openssl_sys::OSSL_PARAM
     ),
     OsslDispatch::end(),
 ];
@@ -1577,15 +1617,15 @@ mod tests {
         assert_eq!(EC_KEYMGMT_DISPATCH.len(), 16);
         assert_eq!(EC_KEYMGMT_DISPATCH[15].function_id, 0);
 
-        // RSA SIGNATURE has 12 entries + sentinel.
-        assert_eq!(RSA_SIGNATURE_DISPATCH.len(), 13);
-        assert_eq!(RSA_SIGNATURE_DISPATCH[12].function_id, 0);
-        assert_eq!(RSA_SIGNATURE_DISPATCH[12].function.is_none(), true);
+        // RSA SIGNATURE has 16 entries + sentinel.
+        assert_eq!(RSA_SIGNATURE_DISPATCH.len(), 17);
+        assert_eq!(RSA_SIGNATURE_DISPATCH[16].function_id, 0);
+        assert_eq!(RSA_SIGNATURE_DISPATCH[16].function.is_none(), true);
 
-        // ECDSA SIGNATURE has 12 entries + sentinel.
-        assert_eq!(ECDSA_SIGNATURE_DISPATCH.len(), 13);
-        assert_eq!(ECDSA_SIGNATURE_DISPATCH[12].function_id, 0);
-        assert_eq!(ECDSA_SIGNATURE_DISPATCH[12].function.is_none(), true);
+        // ECDSA SIGNATURE has 16 entries + sentinel.
+        assert_eq!(ECDSA_SIGNATURE_DISPATCH.len(), 17);
+        assert_eq!(ECDSA_SIGNATURE_DISPATCH[16].function_id, 0);
+        assert_eq!(ECDSA_SIGNATURE_DISPATCH[16].function.is_none(), true);
 
         // Provider dispatch has 2 entries + sentinel.
         assert_eq!(PROVIDER_DISPATCH.len(), 3);
