@@ -175,6 +175,9 @@ jobs:
         shell: bash
         run: |
           cd "${PYTHON_SOURCE_PATH}"
+          export LDFLAGS="-L${OPENSSL_INSTALL_PATH}/lib"
+          export CPPFLAGS="-I${OPENSSL_INSTALL_PATH}/include"
+          export PKG_CONFIG_PATH="${OPENSSL_INSTALL_PATH}/lib/pkgconfig"
           ./configure --with-openssl="${OPENSSL_INSTALL_PATH}" \
                       --prefix="${PYTHON_INSTALL_PATH}" \
                       --enable-shared \
