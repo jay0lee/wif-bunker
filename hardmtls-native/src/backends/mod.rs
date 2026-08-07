@@ -1,7 +1,11 @@
 //! Backend module for different keystore implementations.
 
+#[cfg(target_os = "macos")]
 pub mod mac_se;
+
 pub mod pkcs11;
+
+#[cfg(target_os = "windows")]
 pub mod win_ncrypt;
 
 use crate::error::HardmtlsError;

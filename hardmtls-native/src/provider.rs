@@ -1577,13 +1577,15 @@ mod tests {
         assert_eq!(EC_KEYMGMT_DISPATCH.len(), 16);
         assert_eq!(EC_KEYMGMT_DISPATCH[15].function_id, 0);
 
-        // RSA SIGNATURE has 16 entries + sentinel.
-        assert_eq!(RSA_SIGNATURE_DISPATCH.len(), 17);
-        assert_eq!(RSA_SIGNATURE_DISPATCH[16].function_id, 0);
+        // RSA SIGNATURE has 12 entries + sentinel.
+        assert_eq!(RSA_SIGNATURE_DISPATCH.len(), 13);
+        assert_eq!(RSA_SIGNATURE_DISPATCH[12].function_id, 0);
+        assert_eq!(RSA_SIGNATURE_DISPATCH[12].function.is_none(), true);
 
-        // ECDSA SIGNATURE has 16 entries + sentinel.
-        assert_eq!(ECDSA_SIGNATURE_DISPATCH.len(), 17);
-        assert_eq!(ECDSA_SIGNATURE_DISPATCH[16].function_id, 0);
+        // ECDSA SIGNATURE has 12 entries + sentinel.
+        assert_eq!(ECDSA_SIGNATURE_DISPATCH.len(), 13);
+        assert_eq!(ECDSA_SIGNATURE_DISPATCH[12].function_id, 0);
+        assert_eq!(ECDSA_SIGNATURE_DISPATCH[12].function.is_none(), true);
 
         // Provider dispatch has 2 entries + sentinel.
         assert_eq!(PROVIDER_DISPATCH.len(), 3);
