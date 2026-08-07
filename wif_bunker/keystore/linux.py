@@ -271,15 +271,16 @@ def _cleanup_existing_token(lib, pin: str) -> None:
     except pkcs11.PKCS11Error as exc:
         logger.debug("    Could not open token for cleanup: %s", exc)
 
-def _ensure_token_via_tpm2_ptool(pin: str, tpm_store: str) -> None:
+def _ensure_token_via_tpm2_ptool(pin: str, tpm_store: str, module_path: str) -> None:
     """Create our PKCS#11 token via ``tpm2_ptool`` if it doesn't exist.
 
     Must be called **before** ``pkcs11.lib()`` loads the module, because
     ``tpm2_ptool addtoken`` modifies the SQLite store directly and the
     in-process ``libtpm2_pkcs11.so`` only reads it at ``C_Initialize`` time.
 
-    This is a no-op if ``tpm2_ptool`` is not available (non-TPM setups)
-    or if a token with our label already exists in the store.
+    If the token exists but the PIN doesn't match (e.g. from a previous
+    run that used a different random PIN), the token is removed and
+    recreated. This is safe because ``bunker-wif`` is our own token.
     """
     import shutil
     import subprocess
@@ -295,8 +296,30 @@ def _ensure_token_via_tpm2_ptool(pin: str, tpm_store: str) -> None:
             capture_output=True, text=True, check=False,
         )
         if _TOKEN_LABEL in result.stdout:
-            logger.debug("    Token '%s' already exists in tpm2-pkcs11 store", _TOKEN_LABEL)
-            return
+            # Token exists — verify our PIN works.
+            verify = subprocess.run(
+                [
+                    "pkcs11-tool",
+                    "--module", module_path,
+                    "--token-label", _TOKEN_LABEL,
+                    "--pin", pin,
+                    "--list-objects",
+                ],
+                capture_output=True, text=True, check=False,
+            )
+            if verify.returncode == 0:
+                logger.debug("    Token '%s' exists and PIN is valid", _TOKEN_LABEL)
+                return
+
+            # PIN mismatch — remove and recreate.
+            logger.debug(
+                "    Token '%s' exists but PIN is invalid, recreating",
+                _TOKEN_LABEL,
+            )
+            subprocess.run(
+                [tpm2_ptool, "rmtoken", "--label", _TOKEN_LABEL, "--path", tpm_store],
+                capture_output=True, text=True, check=False,
+            )
     except FileNotFoundError:
         return
 
@@ -327,7 +350,7 @@ def _ensure_token_via_tpm2_ptool(pin: str, tpm_store: str) -> None:
         )
     except subprocess.CalledProcessError as exc:
         logger.debug(
-            "    tpm2_ptool addtoken failed (will try pkcs11-tool later): %s\n"
+            "    tpm2_ptool addtoken failed: %s\n"
             "    stderr: %s",
             exc, exc.stderr,
         )
@@ -497,7 +520,7 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
     # Any modifications to the SQLite store after that are invisible.
 
     # 1. Ensure our token exists
-    _ensure_token_via_tpm2_ptool(config.linux_tpm_pin, str(tpm_store))
+    _ensure_token_via_tpm2_ptool(config.linux_tpm_pin, str(tpm_store), lib_path)
 
     # 2. Generate key pair via pkcs11-tool
     logger.debug("    Generating %s key pair in TPM...", config.key_algorithm)
