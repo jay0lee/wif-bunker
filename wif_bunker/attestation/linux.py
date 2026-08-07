@@ -313,9 +313,14 @@ def _create_ek_and_ak(ectx) -> tuple[AttestationCheck, bool, object, object, byt
 
     # Create AK bound to EK — must be a restricted signing key
     # (SIGN only, no DECRYPT; symmetric=NULL for signing keys)
+    # The TCG EK has adminWithPolicy, so we need a policy session to use
+    # the EK as parent (see docs/attestation-linux-tpm.md).
     try:
         from tpm2_pytss.constants import TPM2_ALG  # pylint: disable=import-outside-toplevel
         from tpm2_pytss.types import TPM2B_PUBLIC  # pylint: disable=import-outside-toplevel
+        from tpm2_pytss import (  # pylint: disable=import-outside-toplevel
+            TPM2_SE, TPM2B_DIGEST, TPM2B_NONCE, TPMT_SYM_DEF,
+        )
 
         # Use parse() for correct RSASSA scheme union types, then fix
         # symmetric (parse defaults to AES-128-CFB for storage keys).
@@ -328,14 +333,49 @@ def _create_ek_and_ak(ectx) -> tuple[AttestationCheck, bool, object, object, byt
         )
         ak_template.publicArea.parameters.rsaDetail.symmetric.algorithm = TPM2_ALG.NULL
 
+        # Policy session to authorize EK as parent
+        session = ectx.start_auth_session(
+            tpm_key=_ESYS_TR.NONE,
+            bind=_ESYS_TR.NONE,
+            session_type=TPM2_SE.POLICY,
+            symmetric=TPMT_SYM_DEF.parse("aes128cfb"),
+            auth_hash=TPM2_ALG.SHA256,
+        )
+        ectx.policy_secret(
+            auth_handle=_ESYS_TR.RH_ENDORSEMENT,
+            policy_session=session,
+            nonce_tpm=TPM2B_NONCE(),
+            cp_hash_a=TPM2B_DIGEST(),
+            policy_ref=TPM2B_NONCE(),
+            expiration=0,
+        )
+
         ak_priv, ak_pub, _, _, _ = ectx.create(
             parent_handle=ek_handle,
             in_sensitive=TPM2B_SENSITIVE_CREATE(),
             in_public=ak_template,
+            session1=session,
         )
+        ectx.flush_context(session)
 
-        # Load the AK
-        ak_handle = ectx.load(ek_handle, ak_priv, ak_pub)
+        # Load the AK (also needs policy session for EK parent)
+        session = ectx.start_auth_session(
+            tpm_key=_ESYS_TR.NONE,
+            bind=_ESYS_TR.NONE,
+            session_type=TPM2_SE.POLICY,
+            symmetric=TPMT_SYM_DEF.parse("aes128cfb"),
+            auth_hash=TPM2_ALG.SHA256,
+        )
+        ectx.policy_secret(
+            auth_handle=_ESYS_TR.RH_ENDORSEMENT,
+            policy_session=session,
+            nonce_tpm=TPM2B_NONCE(),
+            cp_hash_a=TPM2B_DIGEST(),
+            policy_ref=TPM2B_NONCE(),
+            expiration=0,
+        )
+        ak_handle = ectx.load(ek_handle, ak_priv, ak_pub, session1=session)
+        ectx.flush_context(session)
 
         # Export AK public key as PEM
         from tpm2_pytss.internal.crypto import (  # pylint: disable=import-outside-toplevel
