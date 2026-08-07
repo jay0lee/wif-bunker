@@ -638,7 +638,11 @@ jobs:
         shell: bash
         env:
           OPENSSL_DIR: ${{ github.workspace }}/bin/ssl
-          OPENSSL_STATIC: "1"
+          # NOTE: Do NOT set OPENSSL_STATIC=1 here. When loaded into
+          # the same process as Python, hardmTLS must dynamically link
+          # against the same OpenSSL that Python uses. Static linking
+          # creates a separate OSSL_LIB_CTX, making our provider
+          # invisible to Python's SSL_CTX during TLS handshakes.
         run: |
           cd hardmtls-native
           cargo build --release
