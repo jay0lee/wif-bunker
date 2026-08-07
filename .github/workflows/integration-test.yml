@@ -496,10 +496,10 @@ jobs:
           else
             echo "EK certificate not in NV (normal for Intel PTT)."
             echo "Verifying EK cert is fetchable from Intel provisioning..."
-            tpm2_createek -c /tmp/ek.ctx -G rsa2048 -u /tmp/ek_pub.tpm2
-            tpm2_getekcertificate -u /tmp/ek_pub.tpm2 -o /tmp/ek_cert.der
-            echo "EK certificate fetchable from Intel ($(wc -c < /tmp/ek_cert.der) bytes)."
-            rm -f /tmp/ek.ctx /tmp/ek_pub.tpm2 /tmp/ek_cert.der
+            tpm2_createek -c "$RUNNER_TEMP/ek.ctx" -G rsa2048 -u "$RUNNER_TEMP/ek_pub.tpm2"
+            tpm2_getekcertificate -u "$RUNNER_TEMP/ek_pub.tpm2" -o "$RUNNER_TEMP/ek_cert.der"
+            echo "EK certificate fetchable from Intel ($(wc -c < "$RUNNER_TEMP/ek_cert.der") bytes)."
+            rm -f "$RUNNER_TEMP/ek.ctx" "$RUNNER_TEMP/ek_pub.tpm2" "$RUNNER_TEMP/ek_cert.der"
           fi
 
           echo "TPM reset complete."
