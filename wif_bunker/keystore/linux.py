@@ -352,12 +352,14 @@ def _ensure_token_via_tpm2_ptool(pin: str, tpm_store: str, module_path: str) -> 
             db_path.unlink()
             logger.info("    Removed stale %s", db_path)
 
-    if not Path(tpm_store, "tpm2_pkcs11.sqlite3").exists():
-        # Fresh store — initialize (creates primary object id=1).
-        subprocess.run(
-            [tpm2_ptool, "init", "--path", tpm_store],
-            capture_output=True, text=True, check=False,
-        )
+    # Ensure the store is initialized (creates primary object id=1).
+    # Always run — the C library may have created an empty SQLite
+    # during pkcs11-tool probing, but without the primary object.
+    # tpm2_ptool init is safe to re-run (fails silently if already done).
+    subprocess.run(
+        [tpm2_ptool, "init", "--path", tpm_store],
+        capture_output=True, text=True, check=False,
+    )
 
     # Create the token with both PINs.
     try:
