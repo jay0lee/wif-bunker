@@ -494,8 +494,8 @@ jobs:
           if tpm2_nvread "$EK_NV" -C o -s 1 &>/dev/null; then
             echo "EK certificate present in NV at $EK_NV."
           else
-            echo "EK certificate not in NV — attestation will use tpm2_getekcertificate."
-            tpm2_createek -c /tmp/ek.ctx -G rsa2048 -u /tmp/ek_pub.tpm2 2>/dev/null
+            echo "EK certificate not in NV (normal for Intel PTT)."
+            tpm2_createek -c /tmp/ek.ctx -G rsa2048 -u /tmp/ek_pub.tpm2 2>/dev/null || true
             if tpm2_getekcertificate -u /tmp/ek_pub.tpm2 -o /tmp/ek_cert.der 2>/dev/null; then
               echo "EK certificate fetchable from Intel ($(wc -c < /tmp/ek_cert.der) bytes)."
             else
