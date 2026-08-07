@@ -308,20 +308,12 @@ def _ensure_token_via_tpm2_ptool(pin: str, tpm_store: str, module_path: str) -> 
     if not tpm2_ptool:
         return
 
-    # Check if our token already exists via the SQLite store.
-    db_path = Path(tpm_store) / "tpm2_pkcs11.sqlite3"
-    token_exists = False
-    if db_path.exists():
-        import sqlite3 as _sqlite3
-        try:
-            conn = _sqlite3.connect(str(db_path))
-            cursor = conn.execute(
-                "SELECT COUNT(*) FROM tokens WHERE label = ?", (_TOKEN_LABEL,)
-            )
-            token_exists = cursor.fetchone()[0] > 0
-            conn.close()
-        except _sqlite3.Error:
-            pass  # DB not readable — treat as no token
+    # Check if our token already exists via standard PKCS#11 API.
+    result = subprocess.run(
+        ["pkcs11-tool", "--module", module_path, "--list-token-slots"],
+        capture_output=True, text=True, check=False,
+    )
+    token_exists = _TOKEN_LABEL in (result.stdout + result.stderr)
 
     if token_exists:
         # Token exists — verify our PIN works by forcing a login.
