@@ -32,11 +32,13 @@ logger = logging.getLogger(__name__)
 _ALGO_TO_PKCS11 = {
     "ecc256": {
         "key_type": KeyType.EC,
+        "key_length": 256,
         "params": encode_named_curve_parameters("secp256r1"),
         "mechanism": Mechanism.ECDSA,
     },
     "ecc384": {
         "key_type": KeyType.EC,
+        "key_length": 384,
         "params": encode_named_curve_parameters("secp384r1"),
         "mechanism": Mechanism.ECDSA,
     },
@@ -238,8 +240,25 @@ def get_supported_algorithms_linux() -> list[str]:
             continue
         tpm2_algo = algo_info["linux_tpm2"]
         pkcs11_info = _ALGO_TO_PKCS11.get(tpm2_algo)
-        if pkcs11_info and pkcs11_info["mechanism"] in mechs:
-            supported.append(algo_name)
+        if not pkcs11_info or pkcs11_info["mechanism"] not in mechs:
+            continue
+
+        # Check key size limits — some TPMs support the mechanism
+        # (e.g. ECDSA) but only for specific key sizes (e.g. 256-bit only).
+        key_bits = pkcs11_info.get("key_length", 0)
+        if key_bits:
+            try:
+                mech_info = slots[0].get_mechanism_info(pkcs11_info["mechanism"])
+                if key_bits < mech_info.min_key_size or key_bits > mech_info.max_key_size:
+                    logger.debug(
+                        "    %s: key size %d outside mechanism range [%d, %d]",
+                        algo_name, key_bits, mech_info.min_key_size, mech_info.max_key_size,
+                    )
+                    continue
+            except pkcs11.PKCS11Error:
+                pass  # Can't query info — assume supported
+
+        supported.append(algo_name)
 
     return supported
 
