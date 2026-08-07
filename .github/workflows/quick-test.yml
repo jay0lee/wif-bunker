@@ -240,6 +240,19 @@ jobs:
           pkcs11-tool --module /usr/lib/x86_64-linux-gnu/pkcs11/libtpm2_pkcs11.so -T 2>&1 || true
 
           echo ""
+          echo "=== Initialize tpm2-pkcs11 store and create token ==="
+          if command -v tpm2_ptool &>/dev/null; then
+            tpm2_ptool init --path="$HOME/.tpm2_pkcs11" 2>/dev/null || true
+            tpm2_ptool addtoken \
+              --pid=1 \
+              --sopin=12345678 \
+              --userpin=12345678 \
+              --label=bunker-wif \
+              --path="$HOME/.tpm2_pkcs11" 2>/dev/null || true
+            echo "Initialized fresh tpm2-pkcs11 store with bunker-wif token."
+          fi
+
+          echo ""
           echo "=== Verify PKCS#11 store ==="
           ls -la "$HOME/.tpm2_pkcs11/"
 

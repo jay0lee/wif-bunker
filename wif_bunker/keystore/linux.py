@@ -1,10 +1,11 @@
 """Linux/TPM 2.0 keystore: PKCS#11 key generation and certificate management.
 
-Uses ``python-pkcs11`` to interact with the TPM via ``libtpm2_pkcs11.so``
-directly. Token initialization uses ``pkcs11-tool`` (from OpenSC); all
-other operations use the PKCS#11 C API with no subprocess calls.
+Uses ``python-pkcs11`` to interact with the TPM via ``libtpm2_pkcs11.so``.
+Key pair generation uses ``pkcs11-tool`` for compatibility with
+``libtpm2_pkcs11``'s strict template requirements.
 
-System requirements: ``libtpm2_pkcs11.so`` and ``pkcs11-tool``.
+System requirements: ``libtpm2_pkcs11.so``, ``pkcs11-tool``, and
+optionally ``tpm2_ptool`` (for automatic token creation).
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import pkcs11
 from cryptography import x509 as cx509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
-from pkcs11 import Attribute, CertificateType, KeyType, Mechanism, MechanismFlag, ObjectClass, TokenFlag
+from pkcs11 import Attribute, CertificateType, KeyType, Mechanism, ObjectClass, TokenFlag
 from pkcs11.util.ec import encode_named_curve_parameters
 
 from wif_bunker.cert import _create_ca_and_sign
@@ -333,100 +334,26 @@ def _ensure_token_via_tpm2_ptool(pin: str, tpm_store: str) -> None:
 
 
 def _init_token(lib, pin: str, module_path: str):
-    """Initialize or find our PKCS#11 token.
+    """Find our PKCS#11 token.
 
-    If our token exists, returns it. Otherwise finds a usable slot
-    and creates a new token via ``pkcs11-tool`` (fallback for non-TPM
-    PKCS#11 modules).
-
-    On tpm2-pkcs11, ``_ensure_token_via_tpm2_ptool`` should have already
-    created the token before the library was loaded.
+    The token should already exist — created by either:
+      - CI's 'Reset TPM to clean state' step (via tpm2_ptool addtoken)
+      - ``_ensure_token_via_tpm2_ptool`` (called before lib was loaded)
+      - Manual setup by the user
     """
-    import subprocess
-
-    # 1. Check if our token already exists (normal path after tpm2_ptool)
     try:
         return lib.get_token(token_label=_TOKEN_LABEL)
-    except (pkcs11.NoSuchToken, pkcs11.PKCS11Error):
-        pass
-
-    # 2. Fallback: find a usable slot and use pkcs11-tool.
-    #    A slot is usable if:
-    #      - its token is NOT initialized, OR
-    #      - its token has a default/empty label (fresh store)
-    #    We skip slots whose token has a non-empty label that
-    #    isn't ours — those belong to other applications.
-    for slot in lib.get_slots():
-        try:
-            token = slot.get_token()
-            if TokenFlag.TOKEN_INITIALIZED in token.flags:
-                label = (token.label or "").strip()
-                if label and label != _TOKEN_LABEL:
-                    logger.debug(
-                        "    Skipping slot %s: token '%s' belongs to another app",
-                        slot.slot_id, label,
-                    )
-                    continue
-                logger.debug(
-                    "    Found slot %s with default/empty token, will re-init as '%s'",
-                    slot.slot_id, _TOKEN_LABEL,
-                )
-            else:
-                logger.debug(
-                    "    Found uninitialized slot %s, will init as '%s'",
-                    slot.slot_id, _TOKEN_LABEL,
-                )
-        except (pkcs11.PKCS11Error, pkcs11.TokenNotPresent):
-            pass
-
-        try:
-            slot_id = slot.slot_id
-            subprocess.run(
-                [
-                    "pkcs11-tool",
-                    "--module", module_path,
-                    "--init-token",
-                    "--slot", str(slot_id),
-                    "--label", _TOKEN_LABEL,
-                    "--so-pin", pin,
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            logger.debug("    Initialized PKCS#11 token '%s' via pkcs11-tool", _TOKEN_LABEL)
-
-            # Initialize the user PIN — may fail on libtpm2_pkcs11
-            # (CKR_SESSION_READ_ONLY) but works on OpenSC/SoftHSM.
-            subprocess.run(
-                [
-                    "pkcs11-tool",
-                    "--module", module_path,
-                    "--init-pin",
-                    "--token-label", _TOKEN_LABEL,
-                    "--so-pin", pin,
-                    "--new-pin", pin,
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-
-            return lib.get_token(token_label=_TOKEN_LABEL)
-        except subprocess.CalledProcessError as exc:
-            logger.debug(
-                "    pkcs11-tool init failed on slot %s: %s\n"
-                "    stderr: %s",
-                slot.slot_id, exc, getattr(exc, "stderr", ""),
-            )
-            continue
-
-    raise RuntimeError(
-        "No available PKCS#11 slot for token initialization.\n"
-        "\n"
-        "  All slots are occupied by other tokens.\n"
-        "  Verify the TPM PKCS#11 store is not corrupted."
-    )
+    except (pkcs11.NoSuchToken, pkcs11.PKCS11Error) as exc:
+        raise RuntimeError(
+            f"PKCS#11 token '{_TOKEN_LABEL}' not found.\n"
+            "\n"
+            "  The TPM PKCS#11 store must be initialized with a token\n"
+            "  before WIF Bunker can generate keys.  Run:\n"
+            "\n"
+            "    tpm2_ptool init --path=~/.tpm2_pkcs11\n"
+            "    tpm2_ptool addtoken --pid=1 --sopin=PIN --userpin=PIN "
+            "--label=bunker-wif --path=~/.tpm2_pkcs11\n"
+        ) from exc
 
 
 # ── Public key extraction ──
@@ -480,57 +407,64 @@ def _extract_public_key_pem(pub_key) -> str:
     ).decode("utf-8")
 
 
-# ── TPM-compatible EC key generation ──
+# ── TPM-compatible key generation via pkcs11-tool ──
 
 
-def _generate_ec_keypair_tpm(session, ec_params: bytes, label: str):
-    """Generate an EC key pair with a minimal template for tpm2-pkcs11.
+def _generate_keypair_via_pkcs11_tool(
+    session, module_path: str, token_label: str, pin: str,
+    key_type: str, label: str,
+):
+    """Generate a key pair using ``pkcs11-tool`` and return PKCS#11 handles.
 
-    ``python-pkcs11``'s ``generate_keypair()`` always sets capability
-    attributes (``CKA_ENCRYPT``, ``CKA_VERIFY``, ``CKA_WRAP``, etc.)
-    even when disabled (value=False). ``libtpm2_pkcs11`` rejects any
-    encryption-related attributes in EC key templates entirely — even
-    ``CKA_ENCRYPT=False`` triggers "attr mismatch".
+    ``python-pkcs11``'s ``generate_keypair()`` sets capability attributes
+    (``CKA_ENCRYPT``, ``CKA_VERIFY``, etc.) that ``libtpm2_pkcs11`` rejects
+    for EC keys.  Using ``pkcs11-tool --keypairgen`` avoids this entirely.
 
-    This helper builds the bare minimum PKCS#11 templates that
-    ``tpm2-pkcs11`` accepts and calls ``_generate_keypair`` directly.
+    After generation, the key objects are looked up via the PKCS#11 session.
+
+    Args:
+        session: An open PKCS#11 session.
+        module_path: Path to libtpm2_pkcs11.so.
+        token_label: PKCS#11 token label.
+        pin: User PIN for the token.
+        key_type: pkcs11-tool key type string (e.g. 'EC:prime256v1', 'RSA:2048').
+        label: Label to assign to the generated key objects.
     """
-    # Temporarily patch the attribute mapper to produce clean templates.
-    mapper = session.attribute_mapper
-    orig_pub = mapper.public_key_template
-    orig_priv = mapper.private_key_template
+    import subprocess
 
-    def _clean_pub_template(**kwargs):
-        template = orig_pub(**kwargs)
-        # Remove all capability attrs — we'll set only what we need.
-        for attr in (Attribute.ENCRYPT, Attribute.WRAP, Attribute.VERIFY):
-            template.pop(attr, None)
-        return template
+    result = subprocess.run(
+        [
+            "pkcs11-tool",
+            "--module", module_path,
+            "--token-label", token_label,
+            "--pin", pin,
+            "--keypairgen",
+            "--key-type", key_type,
+            "--label", label,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    logger.debug("    pkcs11-tool keygen output: %s", result.stdout.strip())
 
-    def _clean_priv_template(**kwargs):
-        template = orig_priv(**kwargs)
-        for attr in (Attribute.DECRYPT, Attribute.UNWRAP, Attribute.DERIVE):
-            template.pop(attr, None)
-        return template
+    # Find the generated key objects by label
+    pub = None
+    priv = None
+    for obj in session.get_objects({Attribute.LABEL: label}):
+        obj_class = obj[Attribute.CLASS]
+        if obj_class == ObjectClass.PUBLIC_KEY:
+            pub = obj
+        elif obj_class == ObjectClass.PRIVATE_KEY:
+            priv = obj
 
-    try:
-        mapper.public_key_template = _clean_pub_template
-        mapper.private_key_template = _clean_priv_template
-
-        return session.generate_keypair(
-            KeyType.EC,
-            key_length=None,
-            mechanism=Mechanism.EC_KEY_PAIR_GEN,
-            store=True,
-            label=label,
-            capabilities=MechanismFlag.SIGN,
-            public_template={
-                Attribute.EC_PARAMS: ec_params,
-            },
+    if pub is None or priv is None:
+        raise RuntimeError(
+            f"Key pair generated by pkcs11-tool but not found in session "
+            f"(pub={pub}, priv={priv})"
         )
-    finally:
-        mapper.public_key_template = orig_pub
-        mapper.private_key_template = orig_priv
+
+    return pub, priv
 
 
 # ── Main certificate generation ──
@@ -576,19 +510,24 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
             # 3. Generate key pair in the TPM
             logger.debug("    Generating %s key pair in TPM...", config.key_algorithm)
 
+            # Map algo config to pkcs11-tool --key-type format
             if pkcs11_info["key_type"] == KeyType.EC:
-                pub, _priv = _generate_ec_keypair_tpm(
-                    session,
-                    ec_params=pkcs11_info["params"],
-                    label=config.workload_cn,
-                )
+                ec_curve = {
+                    "ecc256": "prime256v1",
+                    "ecc384": "secp384r1",
+                }.get(tpm2_algo)
+                pkcs11_key_type = f"EC:{ec_curve}"
             else:
-                pub, _priv = session.generate_keypair(
-                    KeyType.RSA,
-                    key_length=pkcs11_info["key_length"],
-                    store=True,
-                    label=config.workload_cn,
-                )
+                pkcs11_key_type = f"RSA:{pkcs11_info['key_length']}"
+
+            pub, _priv = _generate_keypair_via_pkcs11_tool(
+                session,
+                module_path=lib_path,
+                token_label=_TOKEN_LABEL,
+                pin=config.linux_tpm_pin,
+                key_type=pkcs11_key_type,
+                label=config.workload_cn,
+            )
 
             logger.debug("    Key pair generated. Extracting public key...")
 

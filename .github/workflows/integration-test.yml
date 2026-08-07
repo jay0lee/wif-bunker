@@ -488,10 +488,16 @@ jobs:
           echo "TPM2_PKCS11_STORE=$HOME/.tpm2_pkcs11" >> "$GITHUB_ENV"
           export TPM2_PKCS11_STORE="$HOME/.tpm2_pkcs11"
 
-          # 4. Initialize a fresh tpm2-pkcs11 store if tpm2_ptool is available
+          # 4. Initialize a fresh tpm2-pkcs11 store and create token
           if command -v tpm2_ptool &>/dev/null; then
             tpm2_ptool init --path="$HOME/.tpm2_pkcs11" 2>/dev/null || true
-            echo "Initialized fresh tpm2-pkcs11 store."
+            tpm2_ptool addtoken \
+              --pid=1 \
+              --sopin=12345678 \
+              --userpin=12345678 \
+              --label=bunker-wif \
+              --path="$HOME/.tpm2_pkcs11" 2>/dev/null || true
+            echo "Initialized fresh tpm2-pkcs11 store with bunker-wif token."
           fi
 
           echo "TPM reset complete."
