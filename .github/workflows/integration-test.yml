@@ -514,7 +514,10 @@ jobs:
 
       - name: "Install OpenSSL (Windows)"
         if: ${{ !inputs.use_built_binary && runner.os == 'Windows' }}
-        run: choco install openssl -y
+        shell: pwsh
+        run: |
+          choco install openssl -y
+          echo "OPENSSL_DIR=C:\Program Files\OpenSSL" >> $env:GITHUB_ENV
 
       - name: "Build hardmTLS"
         if: ${{ !inputs.use_built_binary }}

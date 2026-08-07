@@ -151,7 +151,10 @@ jobs:
 
       - name: "Install OpenSSL (Windows)"
         if: needs.config.outputs.install_wif_bunker == 'true' && runner.os == 'Windows'
-        run: choco install openssl -y
+        shell: pwsh
+        run: |
+          choco install openssl -y
+          echo "OPENSSL_DIR=C:\Program Files\OpenSSL" >> $env:GITHUB_ENV
 
       - name: "Build hardmTLS"
         if: needs.config.outputs.install_wif_bunker == 'true'
