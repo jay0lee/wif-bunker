@@ -1222,13 +1222,13 @@ static KEYMGMT_ALGORITHMS: [OsslAlgorithm; 3] = [
 /// stack fetches SIGNATURE by the signing algorithm name, not the key type.
 static SIGNATURE_ALGORITHMS: [OsslAlgorithm; 3] = [
     OsslAlgorithm {
-        algorithm_names: c"RSA:rsaEncryption:1.2.840.113549.1.1.1:RSA-SHA256:RSA-SHA384:RSA-PSS:RSASSA-PSS:1.2.840.113549.1.1.10".as_ptr(),
+        algorithm_names: c"RSA:rsaEncryption:RSA-SHA256:RSA-SHA384:RSA-PSS:RSASSA-PSS".as_ptr(),
         property_definition: SIGNATURE_PROPS.as_ptr(),
         implementation: RSA_SIGNATURE_DISPATCH.as_ptr(),
         algorithm_description: c"hardmTLS RSA signature".as_ptr(),
     },
     OsslAlgorithm {
-        algorithm_names: c"ECDSA:id-ecPublicKey:1.2.840.10045.2.1:ECDSA-SHA256:ECDSA-SHA384".as_ptr(),
+        algorithm_names: c"ECDSA:ECDSA-SHA256:ECDSA-SHA384".as_ptr(),
         property_definition: SIGNATURE_PROPS.as_ptr(),
         implementation: ECDSA_SIGNATURE_DISPATCH.as_ptr(),
         algorithm_description: c"hardmTLS ECDSA signature".as_ptr(),

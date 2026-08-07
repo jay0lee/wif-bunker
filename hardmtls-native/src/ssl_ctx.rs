@@ -141,6 +141,20 @@ pub unsafe fn configure_ssl_context(
     log::debug!("hardmTLS: calling SSL_CTX_use_PrivateKey");
     let rc = unsafe { openssl_sys::SSL_CTX_use_PrivateKey(ssl_ctx, pkey) };
 
+    extern "C" {
+        fn SSL_CTX_set_client_cert_cb(
+            ctx: *mut openssl_sys::SSL_CTX,
+            cb: Option<
+                unsafe extern "C" fn(
+                    ssl: *mut openssl_sys::SSL,
+                    x509: *mut *mut openssl_sys::X509,
+                    pkey: *mut *mut openssl_sys::EVP_PKEY,
+                ) -> c_int,
+            >,
+        );
+    }
+    unsafe { SSL_CTX_set_client_cert_cb(ssl_ctx, Some(client_cert_cb)); }
+
     // Free the EVP_PKEY (SSL_CTX_use_PrivateKey increments the refcount).
     // SAFETY: pkey is valid.
     unsafe { openssl_sys::EVP_PKEY_free(pkey) };
@@ -498,5 +512,33 @@ mod tests {
         if let Ok(pkey) = result {
             unsafe { openssl_sys::EVP_PKEY_free(pkey) };
         }
+    }
+}
+
+#[allow(unsafe_code)]
+extern "C" fn client_cert_cb(
+    ssl: *mut openssl_sys::SSL,
+    x509: *mut *mut openssl_sys::X509,
+    pkey: *mut *mut openssl_sys::EVP_PKEY,
+) -> std::ffi::c_int {
+    unsafe {
+        let ssl_ctx = openssl_sys::SSL_get_SSL_CTX(ssl);
+        if ssl_ctx.is_null() { return 0; }
+        
+        let cert = openssl_sys::SSL_CTX_get0_certificate(ssl_ctx);
+        let private_key = openssl_sys::SSL_CTX_get0_privatekey(ssl_ctx);
+
+        if cert.is_null() || private_key.is_null() {
+            return 0;
+        }
+
+        openssl_sys::X509_up_ref(cert);
+        openssl_sys::EVP_PKEY_up_ref(private_key);
+
+        *x509 = cert;
+        *pkey = private_key;
+
+        log::debug!("hardmTLS: client_cert_cb invoked, forcing client cert selection");
+        1
     }
 }

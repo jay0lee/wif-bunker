@@ -575,8 +575,8 @@ def _main_impl() -> None:
         try:
             # Allow IAM bindings to propagate before attempting auth.
             # Allow IAM bindings to propagate before attempting auth.
-            logger.info("    Waiting 180s for IAM propagation...")
-            time.sleep(180)
+            logger.info("    Waiting 10s for IAM propagation...")
+            time.sleep(10)
 
             def _verify_adc():
                 adc_creds, _ = google.auth.default(
