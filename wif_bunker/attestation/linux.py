@@ -292,42 +292,21 @@ def _create_ek_and_ak(ectx) -> tuple[AttestationCheck, bool, object, object, byt
         )
 
     # Create AK bound to EK — must be a restricted signing key
-    # (SIGN only, no DECRYPT; string templates may set both which the TPM rejects)
+    # (SIGN only, no DECRYPT; symmetric=NULL for signing keys)
     try:
-        from tpm2_pytss.constants import (  # pylint: disable=import-outside-toplevel
-            TPMA_OBJECT, TPM2_ALG,
-        )
-        from tpm2_pytss.types import (  # pylint: disable=import-outside-toplevel
-            TPM2B_PUBLIC, TPMT_PUBLIC, TPMU_PUBLIC_PARMS,
-            TPMS_RSA_PARMS, TPMT_RSA_SCHEME, TPMT_SYM_DEF_OBJECT,
-        )
+        from tpm2_pytss.constants import TPM2_ALG  # pylint: disable=import-outside-toplevel
+        from tpm2_pytss.types import TPM2B_PUBLIC  # pylint: disable=import-outside-toplevel
 
-        ak_attrs = (
-            TPMA_OBJECT.FIXEDTPM
-            | TPMA_OBJECT.FIXEDPARENT
-            | TPMA_OBJECT.SENSITIVEDATAORIGIN
-            | TPMA_OBJECT.USERWITHAUTH
-            | TPMA_OBJECT.RESTRICTED
-            | TPMA_OBJECT.SIGN_ENCRYPT
+        # Use parse() for correct RSASSA scheme union types, then fix
+        # symmetric (parse defaults to AES-128-CFB for storage keys).
+        ak_template = TPM2B_PUBLIC.parse(
+            "rsa2048:rsassa-sha256",
+            objectAttributes=(
+                "fixedtpm|fixedparent|sensitivedataorigin"
+                "|userwithauth|restricted|sign"
+            ),
         )
-
-        # Build RSA signing scheme using NV template approach:
-        # Set scheme to NULL and let TPM use default for restricted signing.
-        ak_template = TPM2B_PUBLIC(
-            publicArea=TPMT_PUBLIC(
-                type=TPM2_ALG.RSA,
-                nameAlg=TPM2_ALG.SHA256,
-                objectAttributes=ak_attrs,
-                parameters=TPMU_PUBLIC_PARMS(
-                    rsaDetail=TPMS_RSA_PARMS(
-                        symmetric=TPMT_SYM_DEF_OBJECT(algorithm=TPM2_ALG.NULL),
-                        scheme=TPMT_RSA_SCHEME(scheme=TPM2_ALG.NULL),
-                        keyBits=2048,
-                        exponent=0,
-                    )
-                ),
-            )
-        )
+        ak_template.publicArea.parameters.rsaDetail.symmetric.algorithm = TPM2_ALG.NULL
 
         ak_priv, ak_pub, _, _, _ = ectx.create(
             parent_handle=ek_handle,
