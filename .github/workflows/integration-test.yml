@@ -465,52 +465,44 @@ jobs:
       - name: "Reset TPM to clean state"
         if: matrix.self_hosted && !matrix.use_yubikey
         run: |
-          # CI owns this TPM — nuke everything for a clean slate.
+          # Clean up tpm2-pkcs11 state from previous CI runs.
+          # IMPORTANT: Do NOT touch NV indices — EK certificates and other
+          # firmware-provisioned data live there and require platform auth
+          # (locked after boot) to restore.
 
-          # 1. Evict ALL persistent handles
+          # 1. Evict persistent handles (tpm2-pkcs11 primary objects + test keys)
           HANDLES=$(tpm2_getcap handles-persistent 2>/dev/null | grep -oP '0x[0-9A-Fa-f]+' || true)
           for h in $HANDLES; do
             tpm2_evictcontrol -c "$h" 2>/dev/null || true
           done
           [ -n "$HANDLES" ] && echo "Evicted $(echo "$HANDLES" | wc -w) persistent handle(s)." || echo "No stale persistent handles."
 
-          # 2. Clear NV indices used by tpm2-pkcs11 (range 0x01C00000-0x01C0FFFF)
-          # Preserve EK certificates and other firmware-provisioned NV data.
-          NV_INDICES=$(tpm2_getcap handles-nv-index 2>/dev/null | grep -oP '0x[0-9A-Fa-f]+' || true)
-          CLEARED=0
-          for idx in $NV_INDICES; do
-            # Only clear tpm2-pkcs11 NV indices (0x01C00000-0x01C0FFFF)
-            if [[ "$idx" == 0x01C0* || "$idx" == 0x01c0* ]]; then
-              echo "  Removing tpm2-pkcs11 NV index: $idx"
-              tpm2_nvundefine "$idx" 2>/dev/null || true
-              CLEARED=$((CLEARED + 1))
-            else
-              echo "  Preserving NV index: $idx (not tpm2-pkcs11)"
-            fi
-          done
-          echo "Cleared $CLEARED tpm2-pkcs11 NV index(es), preserved others."
-
-          # 3. Wipe and recreate the PKCS#11 store
+          # 2. Wipe and recreate the PKCS#11 SQLite store
           rm -rf "$HOME/.tpm2_pkcs11"
           mkdir -p "$HOME/.tpm2_pkcs11"
           echo "TPM2_PKCS11_STORE=$HOME/.tpm2_pkcs11" >> "$GITHUB_ENV"
           export TPM2_PKCS11_STORE="$HOME/.tpm2_pkcs11"
 
-          # 4. Initialize a fresh tpm2-pkcs11 store (token is created by WIF Bunker)
+          # 3. Initialize a fresh tpm2-pkcs11 store (token is created by WIF Bunker)
           if command -v tpm2_ptool &>/dev/null; then
             tpm2_ptool init --path="$HOME/.tpm2_pkcs11" 2>/dev/null || true
             echo "Initialized fresh tpm2-pkcs11 store."
           fi
 
-          # 5. Verify EK certificate is fetchable from Intel provisioning
-          # (attestation code uses tpm2_getekcertificate directly, NV not required)
-          tpm2_createek -c /tmp/ek.ctx -G rsa2048 -u /tmp/ek_pub.tpm2 2>/dev/null
-          if tpm2_getekcertificate -u /tmp/ek_pub.tpm2 -o /tmp/ek_cert.der 2>/dev/null; then
-            echo "EK certificate fetchable from Intel ($(wc -c < /tmp/ek_cert.der) bytes)."
+          # 4. Verify EK certificate is accessible
+          EK_NV=0x01C00002
+          if tpm2_nvread "$EK_NV" -C o -s 1 &>/dev/null; then
+            echo "EK certificate present in NV at $EK_NV."
           else
-            echo "WARNING: Could not fetch EK cert — attestation may be limited."
+            echo "EK certificate not in NV — attestation will use tpm2_getekcertificate."
+            tpm2_createek -c /tmp/ek.ctx -G rsa2048 -u /tmp/ek_pub.tpm2 2>/dev/null
+            if tpm2_getekcertificate -u /tmp/ek_pub.tpm2 -o /tmp/ek_cert.der 2>/dev/null; then
+              echo "EK certificate fetchable from Intel ($(wc -c < /tmp/ek_cert.der) bytes)."
+            else
+              echo "WARNING: EK cert unavailable — attestation will be limited."
+            fi
+            rm -f /tmp/ek.ctx /tmp/ek_pub.tpm2 /tmp/ek_cert.der
           fi
-          rm -f /tmp/ek.ctx /tmp/ek_pub.tpm2 /tmp/ek_cert.der
 
           echo "TPM reset complete."
 
