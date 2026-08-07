@@ -524,14 +524,14 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
             logger.debug("    Generating %s key pair in TPM...", config.key_algorithm)
 
             if pkcs11_info["key_type"] == KeyType.EC:
-                parameters = session.create_domain_parameters(
+                pub, _priv = session.generate_keypair(
                     KeyType.EC,
-                    {Attribute.EC_PARAMS: pkcs11_info["params"]},
-                    local=True,
-                )
-                pub, _priv = parameters.generate_keypair(
+                    key_length=None,
                     store=True,
                     label=config.workload_cn,
+                    public_template={
+                        Attribute.EC_PARAMS: pkcs11_info["params"],
+                    },
                 )
             else:
                 pub, _priv = session.generate_keypair(
