@@ -1,11 +1,10 @@
 """Linux/TPM 2.0 keystore: PKCS#11 key generation and certificate management.
 
 Uses ``python-pkcs11`` to interact with the TPM via ``libtpm2_pkcs11.so``
-directly, eliminating all CLI subprocess calls (tpm2_ptool, certtool,
-pkcs11-tool, p11tool, tpm2_testparms, tpm2_getcap, tpm2_evictcontrol).
+directly. Token initialization uses ``pkcs11-tool`` (from OpenSC); all
+other operations use the PKCS#11 C API with no subprocess calls.
 
-The only system requirement is ``libtpm2_pkcs11.so`` — the PKCS#11 shared
-library that bridges PKCS#11 operations to the TPM hardware.
+System requirements: ``libtpm2_pkcs11.so`` and ``pkcs11-tool``.
 """
 
 from __future__ import annotations
@@ -272,12 +271,18 @@ def _cleanup_existing_token(lib, pin: str) -> None:
         logger.debug("    Could not open token for cleanup: %s", exc)
 
 
-def _init_token(lib, pin: str):
+def _init_token(lib, pin: str, module_path: str):
     """Initialize or find our PKCS#11 token.
 
     If our token exists, returns it. Otherwise finds an uninitialized
     slot and creates a new token. Never overwrites other tokens.
+
+    Token initialization uses ``pkcs11-tool`` because ``python-pkcs11``
+    removed ``Slot.init_token()`` from its high-level API — token admin
+    is an out-of-scope operation for the library.
     """
+    import subprocess
+
     # 1. Check if our token already exists
     try:
         return lib.get_token(token_label=_TOKEN_LABEL)
@@ -299,12 +304,40 @@ def _init_token(lib, pin: str):
             pass
 
         try:
-            token = slot.init_token(pin, _TOKEN_LABEL)
-            logger.debug("    Initialized new PKCS#11 token '%s'", _TOKEN_LABEL)
-            with token.open(so_pin=pin, rw=True) as session:
-                session.init_pin(pin)
-            return token
-        except pkcs11.PKCS11Error as exc:
+            # Use pkcs11-tool for token initialization (admin operation)
+            slot_id = slot.slot_id
+            subprocess.run(
+                [
+                    "pkcs11-tool",
+                    "--module", module_path,
+                    "--init-token",
+                    "--slot", str(slot_id),
+                    "--label", _TOKEN_LABEL,
+                    "--so-pin", pin,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            logger.debug("    Initialized new PKCS#11 token '%s' via pkcs11-tool", _TOKEN_LABEL)
+
+            # Initialize the user PIN
+            subprocess.run(
+                [
+                    "pkcs11-tool",
+                    "--module", module_path,
+                    "--init-pin",
+                    "--token-label", _TOKEN_LABEL,
+                    "--so-pin", pin,
+                    "--new-pin", pin,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            return lib.get_token(token_label=_TOKEN_LABEL)
+        except (subprocess.CalledProcessError, pkcs11.PKCS11Error) as exc:
             logger.debug("    Could not init token on slot: %s", exc)
             continue
 
@@ -374,7 +407,8 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
     """Generate a TPM 2.0-backed certificate via PKCS#11.
 
     Uses ``python-pkcs11`` to interact with ``libtpm2_pkcs11.so`` directly.
-    No CLI tools required — all operations happen via the PKCS#11 C API.
+    Token initialization uses ``pkcs11-tool``; all other operations happen
+    via the PKCS#11 C API.
     """
     _check_tpm_linux()
     lib_path = _find_pkcs11_lib()
@@ -396,7 +430,7 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
         _cleanup_existing_token(lib, config.linux_tpm_pin)
 
         # 2. Find or initialize our token
-        token = _init_token(lib, config.linux_tpm_pin)
+        token = _init_token(lib, config.linux_tpm_pin, lib_path)
         logger.debug("    Using PKCS#11 token: %s", token)
 
         with token.open(user_pin=config.linux_tpm_pin, rw=True) as session:
