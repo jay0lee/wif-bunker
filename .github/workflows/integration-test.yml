@@ -563,7 +563,7 @@ jobs:
         if: ${{ !inputs.use_built_binary }}
         shell: bash
         env:
-          OPENSSL_DIR: ${{ github.workspace }}/bin/ssl
+          OPENSSL_DIR: ${{ !matrix.self_hosted && format('{0}/bin/ssl', github.workspace) || '' }}
         run: |
           cd hardmtls-native
           cargo build --release

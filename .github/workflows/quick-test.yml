@@ -198,7 +198,7 @@ jobs:
         if: needs.config.outputs.install_wif_bunker == 'true'
         shell: bash
         env:
-          OPENSSL_DIR: ${{ github.workspace }}/bin/ssl
+          OPENSSL_DIR: ${{ needs.config.outputs.runner != 'hardware-tpm' && needs.config.outputs.runner != 'yubikey' && format('{0}/bin/ssl', github.workspace) || '' }}
         run: |
           cd hardmtls-native
           cargo build --release
