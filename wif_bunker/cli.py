@@ -32,7 +32,13 @@ from wif_bunker.config import (
 )
 from wif_bunker.gcp_client import GCPClient
 from wif_bunker.keystore import generate_os_keystore_cert
-from wif_bunker.modes import _run_attest, _run_cert_only, _run_status, _run_supported_algorithms
+from wif_bunker.modes import (
+    _run_attest,
+    _run_cert_and_mtls_test,
+    _run_cert_only,
+    _run_status,
+    _run_supported_algorithms,
+)
 from wif_bunker.utils import (
     SYM_FAIL,
     SYM_OK,
@@ -58,6 +64,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "Generate a hardware-backed certificate without setting up WIF or "
             "GCP resources. Useful for testing key algorithm and platform combinations."
+        ),
+    )
+    mode_group.add_argument(
+        "--cert-and-mtls-test",
+        action="store_true",
+        help=(
+            "Generate a hardware-backed certificate and test mTLS handshakes "
+            "against certauth.idrix.fr and sts.mtls.googleapis.com. "
+            "Validates the full hardmTLS signing pipeline without GCP setup."
         ),
     )
     mode_group.add_argument(
@@ -279,9 +294,9 @@ def _validate_and_configure(parser: argparse.ArgumentParser, args: argparse.Name
             )
         config.key_algorithm = args.key_algorithm
 
-    # Validate --output-dir is only used with --cert-only or --attest
-    if args.output_dir and not (args.cert_only or args.attest):
-        parser.error("--output-dir can only be used with --cert-only or --attest")
+    # Validate --output-dir is only used with --cert-only, --cert-and-mtls-test, or --attest
+    if args.output_dir and not (args.cert_only or args.cert_and_mtls_test or args.attest):
+        parser.error("--output-dir can only be used with --cert-only, --cert-and-mtls-test, or --attest")
 
     # Validate --cert-file is only used with --attest
     if args.cert_file and not args.attest:
@@ -319,6 +334,11 @@ def _main_impl() -> None:
 
     if args.attest:
         _run_attest(config, args.output_dir, args.cert_file)
+        return
+
+    if args.cert_and_mtls_test:
+        output_dir = args.output_dir or os.getcwd()
+        _run_cert_and_mtls_test(config, output_dir, debug=args.debug)
         return
 
     if args.cert_only:

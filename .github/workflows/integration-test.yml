@@ -703,6 +703,41 @@ jobs:
           # (clears any leftover management key, PIN, PUK from previous runs)
           python3 -c "import sys; from ykman.device import list_all_devices; from yubikit.core.smartcard import SmartCardConnection; from yubikit.piv import PivSession; serial=int(sys.argv[1]); [PivSession(dev.open_connection(SmartCardConnection)).reset() or print('YubiKey', serial, 'PIV reset to factory defaults') for dev, info in list_all_devices() if info.serial == serial]" "$SERIAL"
 
+      # ── Test --cert-and-mtls-test (hardmTLS mTLS smoke test) ──
+      # This tests the full hardware-backed signing → mTLS pipeline WITHOUT
+      # needing GCP project/WIF infrastructure, so it's immune to IAM
+      # propagation delays.  It provisions a cert and tests mTLS handshakes
+      # against certauth.idrix.fr (requires client cert) and
+      # sts.mtls.googleapis.com (recommends client cert).
+      - name: "Test --cert-and-mtls-test (mTLS smoke test)"
+        shell: bash
+        run: |
+          echo "=== Testing --cert-and-mtls-test ==="
+          WIF_CMD="${{ inputs.wif_bunker_cmd || 'python -m wif_bunker' }}"
+          outdir=$(mktemp -d)
+
+          # Each cert generation triggers CA store dialogs on Windows
+          DIALOG_PID=""
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            powershell -NoProfile -File .github/scripts/win_dialog_accept.ps1 &
+            DIALOG_PID=$!
+          fi
+
+          $WIF_CMD \
+            --cert-and-mtls-test \
+            --output-dir "$outdir" \
+            --debug \
+            ${{ matrix.soft_key_flag }} $YUBIKEY_FLAGS
+
+          echo "✓ --cert-and-mtls-test passed"
+
+          if [[ -n "$DIALOG_PID" ]]; then
+            kill "$DIALOG_PID" 2>/dev/null || true
+            wait "$DIALOG_PID" 2>/dev/null || true
+          fi
+
+          rm -rf "$outdir"
+
       # ── Test --cert-only for all supported algorithms ──
       - name: "Test --cert-only (all algorithms)"
         shell: bash
