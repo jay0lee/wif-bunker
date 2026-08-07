@@ -271,11 +271,31 @@ def _create_ek_and_ak(ectx) -> tuple[AttestationCheck, bool, object, object, byt
 
     from tpm2_pytss import ESYS_TR as _ESYS_TR  # pylint: disable=import-outside-toplevel
 
-    # Create EK in endorsement hierarchy
+    # Create EK in endorsement hierarchy using TCG standard template.
+    # The standard EK has adminWithPolicy requiring PolicySecret(endorsement),
+    # which is needed for credential activation (see docs/attestation-linux-tpm.md).
     try:
+        from tpm2_pytss.constants import TPM2_ALG  # pylint: disable=import-outside-toplevel
+        from tpm2_pytss.types import TPM2B_PUBLIC  # pylint: disable=import-outside-toplevel
+
+        # Parse RSA 2048 storage key, then set proper EK attributes + auth policy.
+        # TCG EK Credential Profile §2.3.1: auth policy = PolicySecret(endorsement)
+        ek_template = TPM2B_PUBLIC.parse(
+            "rsa2048",
+            objectAttributes=(
+                "fixedtpm|fixedparent|sensitivedataorigin"
+                "|adminwithpolicy|restricted|decrypt"
+            ),
+        )
+        # TCG standard auth policy digest for PolicySecret(TPM_RH_ENDORSEMENT)
+        ek_template.publicArea.authPolicy = bytes.fromhex(
+            "837197674484b3f81a90cc8d46a5d724"
+            "fd52d76e06520b64f2a1da1b331469aa"
+        )
+
         ek_handle, _ek_pub, _, _, _ = ectx.create_primary(
             in_sensitive=None,
-            in_public="rsa2048",
+            in_public=ek_template,
             primary_handle=_ESYS_TR.RH_ENDORSEMENT,
         )
     except Exception as exc:
@@ -380,8 +400,8 @@ def _credential_activation(ectx, ek_handle, ak_handle) -> AttestationCheck:
         credential_blob, secret = make_credential(ek_pub, challenge, ak_name)
 
         # Create policy session for EK auth
-        # The EK's default auth policy requires a policy session tied to
-        # the endorsement hierarchy (TPM_RH_ENDORSEMENT = 0x4000000B).
+        # The TCG EK template requires PolicySecret(endorsement) authorization
+        # (see docs/attestation-linux-tpm.md Step 4).
         session = ectx.start_auth_session(
             tpm_key=ESYS_TR.NONE,
             bind=ESYS_TR.NONE,
