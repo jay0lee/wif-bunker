@@ -495,12 +495,10 @@ jobs:
             echo "EK certificate present in NV at $EK_NV."
           else
             echo "EK certificate not in NV (normal for Intel PTT)."
-            tpm2_createek -c /tmp/ek.ctx -G rsa2048 -u /tmp/ek_pub.tpm2 2>/dev/null || true
-            if tpm2_getekcertificate -u /tmp/ek_pub.tpm2 -o /tmp/ek_cert.der 2>/dev/null; then
-              echo "EK certificate fetchable from Intel ($(wc -c < /tmp/ek_cert.der) bytes)."
-            else
-              echo "WARNING: EK cert unavailable — attestation will be limited."
-            fi
+            echo "Verifying EK cert is fetchable from Intel provisioning..."
+            tpm2_createek -c /tmp/ek.ctx -G rsa2048 -u /tmp/ek_pub.tpm2
+            tpm2_getekcertificate -u /tmp/ek_pub.tpm2 -o /tmp/ek_cert.der
+            echo "EK certificate fetchable from Intel ($(wc -c < /tmp/ek_cert.der) bytes)."
             rm -f /tmp/ek.ctx /tmp/ek_pub.tpm2 /tmp/ek_cert.der
           fi
 
