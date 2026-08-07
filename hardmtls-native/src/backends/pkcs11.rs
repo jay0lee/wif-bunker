@@ -65,9 +65,18 @@ impl Pkcs11Backend {
         // already initialized by another caller in this process (e.g., Python's
         // python-pkcs11 loaded the same .so during cert generation).
         // Per PKCS#11 spec §5.4, we can safely proceed.
+        //
+        // Two error paths exist in the cryptoki crate:
+        //   - AlreadyInitialized: same Pkcs11 instance re-initialized
+        //   - Pkcs11(CryptokiAlreadyInitialized, _): new instance, but the
+        //     underlying C library was already initialized by another caller
         match pkcs11.initialize(CInitializeArgs::OsThreads) {
             Ok(()) => {}
-            Err(cryptoki::error::Error::AlreadyInitialized) => {
+            Err(cryptoki::error::Error::AlreadyInitialized)
+            | Err(cryptoki::error::Error::Pkcs11(
+                cryptoki::error::RvError::CryptokiAlreadyInitialized,
+                _,
+            )) => {
                 log::debug!("PKCS#11 already initialized — reusing existing session");
             }
             Err(e) => {
