@@ -17,7 +17,7 @@ import pkcs11
 from cryptography import x509 as cx509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
-from pkcs11 import Attribute, CertificateType, KeyType, Mechanism, ObjectClass, TokenFlag
+from pkcs11 import Attribute, CertificateType, KeyType, Mechanism, MechanismFlag, ObjectClass, TokenFlag
 from pkcs11.util.ec import encode_named_curve_parameters
 
 from wif_bunker.cert import _create_ca_and_sign
@@ -527,8 +527,13 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
                 pub, _priv = session.generate_keypair(
                     KeyType.EC,
                     key_length=None,
+                    mechanism=Mechanism.EC_KEY_PAIR_GEN,
                     store=True,
                     label=config.workload_cn,
+                    # tpm2-pkcs11 rejects CKA_VERIFY in the public
+                    # template for EC keys ("attr mismatch: 0x10a").
+                    # Use SIGN-only capabilities.
+                    capabilities=MechanismFlag.SIGN,
                     public_template={
                         Attribute.EC_PARAMS: pkcs11_info["params"],
                     },
