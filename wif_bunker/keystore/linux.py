@@ -279,10 +279,16 @@ def _init_token(lib, pin: str, module_path: str):
     a default/empty label (e.g. from ``tpm2_ptool init``), but never
     overwrite tokens that clearly belong to another application.
 
-    Token initialization uses ``pkcs11-tool`` because ``python-pkcs11``
-    removed ``Slot.init_token()`` from its high-level API — token admin
-    is an out-of-scope operation for the library.
+    Token initialization strategy:
+      1. ``tpm2_ptool addtoken`` — canonical tool for tpm2-pkcs11,
+         sets both SO and user PINs atomically.
+      2. ``pkcs11-tool`` — fallback for non-TPM PKCS#11 modules.
+
+    ``pkcs11-tool --init-pin`` fails on ``libtpm2_pkcs11`` with
+    ``CKR_SESSION_READ_ONLY``, so ``tpm2_ptool`` is strongly preferred
+    when available.
     """
+    import shutil
     import subprocess
 
     # 1. Check if our token already exists
@@ -291,11 +297,47 @@ def _init_token(lib, pin: str, module_path: str):
     except (pkcs11.NoSuchToken, pkcs11.PKCS11Error):
         pass
 
-    # 2. Find a slot we can (re-)initialize.
+    # 2. Try tpm2_ptool addtoken first (canonical for tpm2-pkcs11).
+    #    This requires a prior `tpm2_ptool init` which CI does in the
+    #    "Reset TPM to clean state" step. The primary object ID is
+    #    always 1 after a fresh init.
+    tpm2_ptool = shutil.which("tpm2_ptool")
+    if tpm2_ptool:
+        tpm_store = os.environ.get(
+            "TPM2_PKCS11_STORE",
+            str(Path.home() / ".tpm2_pkcs11"),
+        )
+        try:
+            subprocess.run(
+                [
+                    tpm2_ptool, "addtoken",
+                    "--pid=1",
+                    "--sopin", pin,
+                    "--userpin", pin,
+                    "--label", _TOKEN_LABEL,
+                    "--path", tpm_store,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            logger.debug(
+                "    Created PKCS#11 token '%s' via tpm2_ptool addtoken",
+                _TOKEN_LABEL,
+            )
+            return lib.get_token(token_label=_TOKEN_LABEL)
+        except subprocess.CalledProcessError as exc:
+            logger.debug(
+                "    tpm2_ptool addtoken failed (will try pkcs11-tool): %s\n"
+                "    stderr: %s",
+                exc, exc.stderr,
+            )
+
+    # 3. Fallback: find a usable slot and use pkcs11-tool.
     #    A slot is usable if:
     #      - its token is NOT initialized, OR
-    #      - its token has a default/empty label (fresh tpm2-pkcs11 store)
-    #    We skip slots whose token has a specific, non-empty label that
+    #      - its token has a default/empty label (fresh store)
+    #    We skip slots whose token has a non-empty label that
     #    isn't ours — those belong to other applications.
     for slot in lib.get_slots():
         try:
@@ -303,7 +345,6 @@ def _init_token(lib, pin: str, module_path: str):
             if TokenFlag.TOKEN_INITIALIZED in token.flags:
                 label = (token.label or "").strip()
                 if label and label != _TOKEN_LABEL:
-                    # Token belongs to another app — don't touch it.
                     logger.debug(
                         "    Skipping slot %s: token '%s' belongs to another app",
                         slot.slot_id, label,
@@ -322,7 +363,6 @@ def _init_token(lib, pin: str, module_path: str):
             pass
 
         try:
-            # Use pkcs11-tool for token initialization (admin operation)
             slot_id = slot.slot_id
             subprocess.run(
                 [
@@ -337,9 +377,10 @@ def _init_token(lib, pin: str, module_path: str):
                 capture_output=True,
                 text=True,
             )
-            logger.debug("    Initialized new PKCS#11 token '%s' via pkcs11-tool", _TOKEN_LABEL)
+            logger.debug("    Initialized PKCS#11 token '%s' via pkcs11-tool", _TOKEN_LABEL)
 
-            # Initialize the user PIN
+            # Initialize the user PIN — may fail on libtpm2_pkcs11
+            # (CKR_SESSION_READ_ONLY) but works on OpenSC/SoftHSM.
             subprocess.run(
                 [
                     "pkcs11-tool",
@@ -355,8 +396,12 @@ def _init_token(lib, pin: str, module_path: str):
             )
 
             return lib.get_token(token_label=_TOKEN_LABEL)
-        except (subprocess.CalledProcessError, pkcs11.PKCS11Error) as exc:
-            logger.debug("    Could not init token on slot: %s", exc)
+        except subprocess.CalledProcessError as exc:
+            logger.debug(
+                "    pkcs11-tool init failed on slot %s: %s\n"
+                "    stderr: %s",
+                slot.slot_id, exc, getattr(exc, "stderr", ""),
+            )
             continue
 
     raise RuntimeError(
