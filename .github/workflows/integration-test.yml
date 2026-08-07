@@ -411,16 +411,16 @@ jobs:
         run: |
           echo "=== ADC baseline with GHA CI credentials ==="
           # -u: unbuffered stdout so tee captures the complete output
-          python -u minimal-adc.py | tee /tmp/adc_baseline.txt
+          python -u minimal-adc.py | tee "$RUNNER_TEMP/adc_baseline.txt"
 
           # Confirm we see the expected CI service account
           GHA_SA="$RUNNER_SA"
-          if grep -q "$GHA_SA" /tmp/adc_baseline.txt; then
+          if grep -q "$GHA_SA" "$RUNNER_TEMP/adc_baseline.txt"; then
             echo "✓ Baseline ADC working as CI SA: $GHA_SA"
           else
             echo "✗ FAIL: Expected CI SA $GHA_SA not found in output!"
             echo "--- Captured output ---"
-            cat /tmp/adc_baseline.txt
+            cat "$RUNNER_TEMP/adc_baseline.txt"
             exit 1
           fi
 
@@ -827,18 +827,18 @@ jobs:
           # Clear GHA's OIDC credential file to prove we're using bunker creds
           unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE 2>/dev/null || true
 
-          python minimal-adc.py | tee /tmp/adc_output.txt
+          python minimal-adc.py | tee "$RUNNER_TEMP/adc_output.txt"
 
           # Validate we're NOT accidentally using the GHA CI service account
           echo ""
           echo "=== CI Validation ==="
           GHA_SA="$RUNNER_SA"
-          if grep -q "$GHA_SA" /tmp/adc_output.txt; then
+          if grep -q "$GHA_SA" "$RUNNER_TEMP/adc_output.txt"; then
             echo "✗ FAIL: Using GHA CI service account, not bunker creds!"
             exit 1
           fi
           EXPECTED_SA="bunker-wif-sa@${{ steps.config.outputs.project_id }}.iam.gserviceaccount.com"
-          if grep -q "$EXPECTED_SA" /tmp/adc_output.txt; then
+          if grep -q "$EXPECTED_SA" "$RUNNER_TEMP/adc_output.txt"; then
             echo "✓ Authenticated as bunker SA: $EXPECTED_SA"
           else
             echo "✓ Not using GHA CI SA (bunker SA not shown — may be no-impersonation mode)"
@@ -870,13 +870,13 @@ jobs:
           export GOOGLE_API_CERTIFICATE_CONFIG="$PWD/certificate_config.json"
           unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE 2>/dev/null || true
 
-          python minimal-adc.py | tee /tmp/adc_output_nosa.txt
+          python minimal-adc.py | tee "$RUNNER_TEMP/adc_output_nosa.txt"
 
           # Validate we're NOT accidentally using the GHA CI service account
           echo ""
           echo "=== CI Validation ==="
           GHA_SA="$RUNNER_SA"
-          if grep -q "$GHA_SA" /tmp/adc_output_nosa.txt; then
+          if grep -q "$GHA_SA" "$RUNNER_TEMP/adc_output_nosa.txt"; then
             echo "✗ FAIL: Using GHA CI service account, not bunker creds!"
             exit 1
           fi
@@ -921,7 +921,7 @@ jobs:
       - name: "Cleanup workspace"
         if: always() && matrix.self_hosted
         run: |
-          rm -rf .venv /tmp/adc_*.txt
+          rm -rf .venv "$RUNNER_TEMP/adc_"*.txt
           # Nuke TPM state — CI owns this device.
           HANDLES=$(tpm2_getcap handles-persistent 2>/dev/null | grep -oP '0x[0-9A-Fa-f]+' || true)
           for h in $HANDLES; do tpm2_evictcontrol -c "$h" 2>/dev/null || true; done
