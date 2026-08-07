@@ -61,14 +61,21 @@ const RSA_ALG_NAME: &std::ffi::CStr = c"RSA";
 /// Algorithm name for EC key type.
 const EC_ALG_NAME: &std::ffi::CStr = c"EC";
 
-/// Property definition for our algorithms.
+/// Property definition for KEYMGMT algorithms.
 ///
-/// The `hardmtls.sign=yes` property prevents our RSA/EC implementations from
-/// being returned for default lookups (e.g., cert generation). OpenSSL only
-/// returns our implementations when the property query explicitly includes
-/// `hardmtls.sign=yes` or when looking up from our provider specifically
-/// (which happens automatically for keys created by our keymgmt).
-const PROVIDER_PROPS: &std::ffi::CStr = c"provider=hardmtls,hardmtls.sign=yes";
+/// Includes `hardmtls.sign=yes` so we can target our KEYMGMT via
+/// `EVP_PKEY_CTX_new_from_name(..., "provider=hardmtls,hardmtls.sign=yes")`
+/// without conflicting with the default provider's RSA/EC KEYMGMT.
+const KEYMGMT_PROPS: &std::ffi::CStr = c"provider=hardmtls,hardmtls.sign=yes";
+
+/// Property definition for SIGNATURE algorithms.
+///
+/// Uses only `provider=hardmtls` (no custom properties) so the TLS stack
+/// can discover our SIGNATURE via its default NULL property query during
+/// the CertificateVerify handshake. With `hardmtls.sign=yes`, OpenSSL's
+/// default lookup skipped our SIGNATURE entirely, causing "No client cert
+/// found in mTLS handshake" errors.
+const SIGNATURE_PROPS: &std::ffi::CStr = c"provider=hardmtls";
 
 // ── Key data (stored inside EVP_PKEY via KEYMGMT) ──────────────────────
 
@@ -1038,13 +1045,13 @@ static SIGNATURE_DISPATCH: [OsslDispatch; 22] = [
 static KEYMGMT_ALGORITHMS: [OsslAlgorithm; 3] = [
     OsslAlgorithm {
         algorithm_names: RSA_ALG_NAME.as_ptr(),
-        property_definition: PROVIDER_PROPS.as_ptr(),
+        property_definition: KEYMGMT_PROPS.as_ptr(),
         implementation: KEYMGMT_DISPATCH.as_ptr(),
         algorithm_description: c"hardmTLS RSA key".as_ptr(),
     },
     OsslAlgorithm {
         algorithm_names: EC_ALG_NAME.as_ptr(),
-        property_definition: PROVIDER_PROPS.as_ptr(),
+        property_definition: KEYMGMT_PROPS.as_ptr(),
         implementation: KEYMGMT_DISPATCH.as_ptr(),
         algorithm_description: c"hardmTLS EC key".as_ptr(),
     },
@@ -1055,13 +1062,13 @@ static KEYMGMT_ALGORITHMS: [OsslAlgorithm; 3] = [
 static SIGNATURE_ALGORITHMS: [OsslAlgorithm; 3] = [
     OsslAlgorithm {
         algorithm_names: c"RSA:rsaEncryption:RSA-PSS:RSASSA-PSS".as_ptr(),
-        property_definition: PROVIDER_PROPS.as_ptr(),
+        property_definition: SIGNATURE_PROPS.as_ptr(),
         implementation: SIGNATURE_DISPATCH.as_ptr(),
         algorithm_description: c"hardmTLS RSA signature".as_ptr(),
     },
     OsslAlgorithm {
         algorithm_names: c"EC:id-ecPublicKey".as_ptr(),
-        property_definition: PROVIDER_PROPS.as_ptr(),
+        property_definition: SIGNATURE_PROPS.as_ptr(),
         implementation: SIGNATURE_DISPATCH.as_ptr(),
         algorithm_description: c"hardmTLS EC signature".as_ptr(),
     },
