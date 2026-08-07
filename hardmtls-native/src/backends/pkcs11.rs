@@ -61,9 +61,21 @@ impl Pkcs11Backend {
         let pkcs11 = Pkcs11::new(&self.module)
             .map_err(|e| HardmtlsError::Pkcs11Error(format!("Failed to load module: {e}")))?;
 
-        pkcs11.initialize(CInitializeArgs::OsThreads).map_err(|e| {
-            HardmtlsError::Pkcs11Error(format!("Failed to initialize PKCS#11: {e}"))
-        })?;
+        // CKR_CRYPTOKI_ALREADY_INITIALIZED is non-fatal — the module was
+        // already initialized by another caller in this process (e.g., Python's
+        // python-pkcs11 loaded the same .so during cert generation).
+        // Per PKCS#11 spec §5.4, we can safely proceed.
+        match pkcs11.initialize(CInitializeArgs::OsThreads) {
+            Ok(()) => {}
+            Err(cryptoki::error::Error::AlreadyInitialized) => {
+                log::debug!("PKCS#11 already initialized — reusing existing session");
+            }
+            Err(e) => {
+                return Err(HardmtlsError::Pkcs11Error(format!(
+                    "Failed to initialize PKCS#11: {e}"
+                )));
+            }
+        }
 
         let slot_id = self.slot.parse::<u64>().map_err(|_| {
             HardmtlsError::Pkcs11Error(format!("Invalid slot number: {}", self.slot))

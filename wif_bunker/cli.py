@@ -540,6 +540,7 @@ def _main_impl() -> None:
 
         if args.debug:
             os.environ["ENABLE_ENTERPRISE_CERTIFICATE_LOGS"] = "1"
+            os.environ["RUST_LOG"] = os.environ.get("RUST_LOG", "hardmtls=debug")
 
         # Pre-load hardmTLS DLL on Windows.
         if sys.platform == "win32":
