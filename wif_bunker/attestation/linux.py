@@ -302,12 +302,50 @@ def _create_ek_and_ak(ectx) -> tuple[AttestationCheck, bool, object, object, byt
             None,
         )
 
-    # Create AK bound to EK in endorsement hierarchy
+    # Create AK bound to EK — must be a restricted signing key
+    # (SIGN only, no DECRYPT; string templates may set both which the TPM rejects)
     try:
+        from tpm2_pytss.constants import (  # pylint: disable=import-outside-toplevel
+            TPMA_OBJECT, TPM2_ALG,
+        )
+        from tpm2_pytss.types import (  # pylint: disable=import-outside-toplevel
+            TPM2B_PUBLIC, TPMT_PUBLIC, TPMU_PUBLIC_PARMS,
+            TPMS_RSA_PARMS, TPMT_RSA_SCHEME, TPMS_SCHEME_HASH,
+            TPMT_SYM_DEF_OBJECT,
+        )
+
+        ak_attrs = (
+            TPMA_OBJECT.FIXEDTPM
+            | TPMA_OBJECT.FIXEDPARENT
+            | TPMA_OBJECT.SENSITIVEDATAORIGIN
+            | TPMA_OBJECT.USERWITHAUTH
+            | TPMA_OBJECT.RESTRICTED
+            | TPMA_OBJECT.SIGN_ENCRYPT
+        )
+
+        ak_template = TPM2B_PUBLIC(
+            publicArea=TPMT_PUBLIC(
+                type=TPM2_ALG.RSA,
+                nameAlg=TPM2_ALG.SHA256,
+                objectAttributes=ak_attrs,
+                parameters=TPMU_PUBLIC_PARMS(
+                    rsaDetail=TPMS_RSA_PARMS(
+                        symmetric=TPMT_SYM_DEF_OBJECT(algorithm=TPM2_ALG.NULL),
+                        scheme=TPMT_RSA_SCHEME(
+                            scheme=TPM2_ALG.RSASSA,
+                            details=TPMS_SCHEME_HASH(hashAlg=TPM2_ALG.SHA256),
+                        ),
+                        keyBits=2048,
+                        exponent=0,
+                    )
+                ),
+            )
+        )
+
         ak_priv, ak_pub, _, _, _ = ectx.create(
             parent_handle=ek_handle,
             in_sensitive=TPM2B_SENSITIVE_CREATE(),
-            in_public="rsa2048:rsassa-sha256",
+            in_public=ak_template,
         )
 
         # Load the AK
