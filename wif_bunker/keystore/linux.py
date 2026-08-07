@@ -316,34 +316,19 @@ def _ensure_token_via_tpm2_ptool(pin: str, tpm_store: str, module_path: str) -> 
     token_exists = _TOKEN_LABEL in (result.stdout + result.stderr)
 
     if token_exists:
-        # Token exists — verify our PIN works by forcing a login.
-        # (--list-objects without --login succeeds even with wrong PIN
-        # because it only lists public objects.)
-        verify = subprocess.run(
-            [
-                "pkcs11-tool",
-                "--module", module_path,
-                "--token-label", _TOKEN_LABEL,
-                "--login",
-                "--pin", pin,
-                "--list-objects",
-            ],
-            capture_output=True, text=True, check=False,
-        )
-        if verify.returncode == 0:
-            logger.info("    Token '%s' exists and PIN is valid", _TOKEN_LABEL)
-            return
-
-        # PIN mismatch — remove and recreate.
-        logger.info(
-            "    Token '%s' exists but PIN is invalid (rc=%d), recreating",
-            _TOKEN_LABEL, verify.returncode,
-        )
+        # Token exists from a previous run — remove it so we can
+        # recreate with our (randomly generated) PIN.  We skip PIN
+        # verification because each invocation generates a new random
+        # PIN, so login would always fail and needlessly increment the
+        # TPM's DA lockout counter.
         rm_result = subprocess.run(
             [tpm2_ptool, "rmtoken", "--label", _TOKEN_LABEL, "--path", tpm_store],
             capture_output=True, text=True, check=False,
         )
-        logger.info("    rmtoken exit=%d", rm_result.returncode)
+        logger.info(
+            "    Token '%s' existed, removed (rc=%d)",
+            _TOKEN_LABEL, rm_result.returncode,
+        )
 
     # Create the token with both PINs.
     # Assumes the PKCS#11 store is already initialized with a primary
