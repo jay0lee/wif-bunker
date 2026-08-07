@@ -117,12 +117,14 @@ def _extract_ek_certificate_cli_fallback(work_dir: Path, ectx) -> tuple[Attestat
         logger.debug("tpm2_getekcertificate not found — skipping manufacturer fetch")
         return None, None
 
+    from tpm2_pytss import ESYS_TR as _ESYS_TR  # pylint: disable=import-outside-toplevel
+
     # Create EK for pub key export (native TPM2B_PUBLIC format needed by CLI)
     try:
         ek_handle, ek_pub, _, _, _ = ectx.create_primary(
             in_sensitive=None,
             in_public="rsa2048",
-            primary_handle=0x40000001,  # RH_ENDORSEMENT
+            primary_handle=_ESYS_TR.RH_ENDORSEMENT,
         )
 
         # Export pub key in native format for tpm2_getekcertificate
@@ -278,12 +280,14 @@ def _create_ek_and_ak(ectx) -> tuple[AttestationCheck, bool, object, object, byt
     from cryptography.hazmat.primitives import serialization  # pylint: disable=import-outside-toplevel
     from tpm2_pytss import TPM2B_SENSITIVE_CREATE  # pylint: disable=import-outside-toplevel
 
+    from tpm2_pytss import ESYS_TR as _ESYS_TR  # pylint: disable=import-outside-toplevel
+
     # Create EK in endorsement hierarchy
     try:
         ek_handle, _ek_pub, _, _, _ = ectx.create_primary(
             in_sensitive=None,
             in_public="rsa2048",
-            primary_handle=0x40000001,  # RH_ENDORSEMENT
+            primary_handle=_ESYS_TR.RH_ENDORSEMENT,
         )
     except Exception as exc:
         return (
