@@ -270,73 +270,87 @@ def _cleanup_existing_token(lib, pin: str) -> None:
     except pkcs11.PKCS11Error as exc:
         logger.debug("    Could not open token for cleanup: %s", exc)
 
+def _ensure_token_via_tpm2_ptool(pin: str, tpm_store: str) -> None:
+    """Create our PKCS#11 token via ``tpm2_ptool`` if it doesn't exist.
+
+    Must be called **before** ``pkcs11.lib()`` loads the module, because
+    ``tpm2_ptool addtoken`` modifies the SQLite store directly and the
+    in-process ``libtpm2_pkcs11.so`` only reads it at ``C_Initialize`` time.
+
+    This is a no-op if ``tpm2_ptool`` is not available (non-TPM setups)
+    or if a token with our label already exists in the store.
+    """
+    import shutil
+    import subprocess
+
+    tpm2_ptool = shutil.which("tpm2_ptool")
+    if not tpm2_ptool:
+        return
+
+    # Check if our token already exists by listing tokens.
+    try:
+        result = subprocess.run(
+            [tpm2_ptool, "listtokens", "--path", tpm_store],
+            capture_output=True, text=True, check=False,
+        )
+        if _TOKEN_LABEL in result.stdout:
+            logger.debug("    Token '%s' already exists in tpm2-pkcs11 store", _TOKEN_LABEL)
+            return
+    except FileNotFoundError:
+        return
+
+    # Ensure the store is initialized (creates primary object id=1).
+    subprocess.run(
+        [tpm2_ptool, "init", "--path", tpm_store],
+        capture_output=True, text=True, check=False,
+    )
+
+    # Create the token with both PINs.
+    try:
+        subprocess.run(
+            [
+                tpm2_ptool, "addtoken",
+                "--pid=1",
+                "--sopin", pin,
+                "--userpin", pin,
+                "--label", _TOKEN_LABEL,
+                "--path", tpm_store,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        logger.debug(
+            "    Created PKCS#11 token '%s' via tpm2_ptool addtoken",
+            _TOKEN_LABEL,
+        )
+    except subprocess.CalledProcessError as exc:
+        logger.debug(
+            "    tpm2_ptool addtoken failed (will try pkcs11-tool later): %s\n"
+            "    stderr: %s",
+            exc, exc.stderr,
+        )
+
 
 def _init_token(lib, pin: str, module_path: str):
     """Initialize or find our PKCS#11 token.
 
     If our token exists, returns it. Otherwise finds a usable slot
-    and creates a new token. We re-initialize slots whose token has
-    a default/empty label (e.g. from ``tpm2_ptool init``), but never
-    overwrite tokens that clearly belong to another application.
+    and creates a new token via ``pkcs11-tool`` (fallback for non-TPM
+    PKCS#11 modules).
 
-    Token initialization strategy:
-      1. ``tpm2_ptool addtoken`` — canonical tool for tpm2-pkcs11,
-         sets both SO and user PINs atomically.
-      2. ``pkcs11-tool`` — fallback for non-TPM PKCS#11 modules.
-
-    ``pkcs11-tool --init-pin`` fails on ``libtpm2_pkcs11`` with
-    ``CKR_SESSION_READ_ONLY``, so ``tpm2_ptool`` is strongly preferred
-    when available.
+    On tpm2-pkcs11, ``_ensure_token_via_tpm2_ptool`` should have already
+    created the token before the library was loaded.
     """
-    import shutil
     import subprocess
 
-    # 1. Check if our token already exists
+    # 1. Check if our token already exists (normal path after tpm2_ptool)
     try:
         return lib.get_token(token_label=_TOKEN_LABEL)
     except (pkcs11.NoSuchToken, pkcs11.PKCS11Error):
         pass
 
-    # 2. Try tpm2_ptool addtoken first (canonical for tpm2-pkcs11).
-    #    This requires a prior `tpm2_ptool init` which CI does in the
-    #    "Reset TPM to clean state" step. The primary object ID is
-    #    always 1 after a fresh init.
-    tpm2_ptool = shutil.which("tpm2_ptool")
-    if tpm2_ptool:
-        tpm_store = os.environ.get(
-            "TPM2_PKCS11_STORE",
-            str(Path.home() / ".tpm2_pkcs11"),
-        )
-        try:
-            subprocess.run(
-                [
-                    tpm2_ptool, "addtoken",
-                    "--pid=1",
-                    "--sopin", pin,
-                    "--userpin", pin,
-                    "--label", _TOKEN_LABEL,
-                    "--path", tpm_store,
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            logger.debug(
-                "    Created PKCS#11 token '%s' via tpm2_ptool addtoken",
-                _TOKEN_LABEL,
-            )
-            # tpm2_ptool modifies the SQLite store directly — the
-            # already-loaded lib has stale cached state.  Reload.
-            lib = pkcs11.lib(module_path)
-            return lib.get_token(token_label=_TOKEN_LABEL)
-        except subprocess.CalledProcessError as exc:
-            logger.debug(
-                "    tpm2_ptool addtoken failed (will try pkcs11-tool): %s\n"
-                "    stderr: %s",
-                exc, exc.stderr,
-            )
-
-    # 3. Fallback: find a usable slot and use pkcs11-tool.
+    # 2. Fallback: find a usable slot and use pkcs11-tool.
     #    A slot is usable if:
     #      - its token is NOT initialized, OR
     #      - its token has a default/empty label (fresh store)
@@ -488,6 +502,12 @@ def _generate_cert_linux(config: WorkloadConfig) -> CertificateBundle:
     tpm_store = Path.home() / ".tpm2_pkcs11"
     tpm_store.mkdir(parents=True, exist_ok=True)
     os.environ["TPM2_PKCS11_STORE"] = str(tpm_store)
+
+    # Ensure our PKCS#11 token exists BEFORE loading the library.
+    # tpm2_ptool addtoken modifies the SQLite store directly, and
+    # libtpm2_pkcs11.so reads it only at C_Initialize time.  Creating
+    # the token first avoids stale-cache issues entirely.
+    _ensure_token_via_tpm2_ptool(config.linux_tpm_pin, str(tpm_store))
 
     try:
         lib = pkcs11.lib(lib_path)
