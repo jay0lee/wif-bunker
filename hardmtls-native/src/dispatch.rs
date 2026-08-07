@@ -18,8 +18,16 @@ use crate::error::HardmtlsError;
 pub fn select_backend(
     config: &CertificateConfig,
 ) -> Result<Box<dyn SigningBackend>, HardmtlsError> {
+    log::debug!("hardmTLS: selecting signing backend from cert_configs...");
+
     // PKCS#11 is cross-platform — check first.
     if let Some(ref pkcs11_config) = config.cert_configs.pkcs11 {
+        log::info!(
+            "hardmTLS: using PKCS#11 backend (module={}, slot={}, label={})",
+            pkcs11_config.module,
+            pkcs11_config.slot,
+            pkcs11_config.label,
+        );
         let backend = crate::backends::pkcs11::Pkcs11Backend::new(pkcs11_config)?;
         return Ok(Box::new(backend));
     }
@@ -27,6 +35,11 @@ pub fn select_backend(
     // Windows NCrypt — only available on Windows.
     #[cfg(target_os = "windows")]
     if let Some(ref win_config) = config.cert_configs.windows_store {
+        log::info!(
+            "hardmTLS: using Windows NCrypt backend (store={}, issuer={})",
+            win_config.store,
+            win_config.issuer,
+        );
         let backend = crate::backends::win_ncrypt::NcryptBackend::new(win_config)?;
         return Ok(Box::new(backend));
     }
@@ -34,10 +47,20 @@ pub fn select_backend(
     // macOS Security.framework — only available on macOS.
     #[cfg(target_os = "macos")]
     if let Some(ref mac_config) = config.cert_configs.macos_keychain {
+        log::info!(
+            "hardmTLS: using macOS Keychain backend (issuer={})",
+            mac_config.issuer,
+        );
         let backend = crate::backends::mac_se::MacSeBackend::new(mac_config)?;
         return Ok(Box::new(backend));
     }
 
+    log::error!(
+        "hardmTLS: no matching backend found (pkcs11={}, windows_store={}, macos_keychain={})",
+        config.cert_configs.pkcs11.is_some(),
+        config.cert_configs.windows_store.is_some(),
+        config.cert_configs.macos_keychain.is_some(),
+    );
     Err(HardmtlsError::BackendNotFound)
 }
 

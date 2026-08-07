@@ -573,6 +573,7 @@ jobs:
         shell: bash
         env:
           OPENSSL_DIR: ${{ github.workspace }}/bin/ssl
+          OPENSSL_STATIC: "1"
         run: |
           cd hardmtls-native
           cargo build --release
@@ -813,6 +814,8 @@ jobs:
         shell: bash
         run: |
           echo "=== Testing ADC with X.509 WIF (service account) ==="
+          # Enable hardmTLS diagnostic output for mTLS debugging
+          export RUST_LOG=hardmtls=debug
           # Point ADC to WIF Bunker's credentials, NOT the GHA OIDC creds
           export GOOGLE_APPLICATION_CREDENTIALS="$PWD/adc.json"
           export GOOGLE_API_USE_CLIENT_CERTIFICATE=true
@@ -857,6 +860,7 @@ jobs:
         shell: bash
         run: |
           echo "=== Testing ADC with X.509 WIF (no service account) ==="
+          export RUST_LOG=hardmtls=debug
           export GOOGLE_APPLICATION_CREDENTIALS="$PWD/adc.json"
           export GOOGLE_API_USE_CLIENT_CERTIFICATE=true
           export GOOGLE_API_CERTIFICATE_CONFIG="$PWD/certificate_config.json"
@@ -879,6 +883,7 @@ jobs:
         shell: bash
         run: |
           echo "=== Testing --status ==="
+          export RUST_LOG=hardmtls=debug
           export GOOGLE_APPLICATION_CREDENTIALS="$PWD/adc.json"
           export GOOGLE_API_USE_CLIENT_CERTIFICATE=true
           export GOOGLE_API_CERTIFICATE_CONFIG="$PWD/certificate_config.json"

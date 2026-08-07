@@ -31,7 +31,7 @@ pub mod ssl_ctx;
 
 use std::ffi::{c_char, c_int, c_uchar, c_void};
 use std::slice;
-use std::sync::OnceLock;
+use std::sync::{Once, OnceLock};
 
 use config::CertificateConfig;
 use dispatch::select_backend;
@@ -52,6 +52,20 @@ pub type SignCallback = unsafe extern "C" fn(
 
 /// Global config cache to avoid re-parsing on every call.
 static CONFIG_CACHE: OnceLock<CertificateConfig> = OnceLock::new();
+
+/// One-time logger initialization guard.
+static LOGGER_INIT: Once = Once::new();
+
+/// Initialize `env_logger` on first call.
+///
+/// Uses `try_init()` so it's safe to call multiple times and won't panic
+/// if another logger was already registered (e.g., in test harnesses).
+/// Set `RUST_LOG=hardmtls=debug` (or `trace`) to see diagnostic output.
+fn ensure_logger() {
+    LOGGER_INIT.call_once(|| {
+        let _ = env_logger::try_init();
+    });
+}
 
 /// Configure an OpenSSL `SSL_CTX` for hardware-backed mTLS.
 ///
@@ -81,6 +95,7 @@ pub unsafe extern "C" fn ConfigureSslContext(
     cert: *const c_char,
     ctx: *mut c_void,
 ) -> c_int {
+    ensure_logger();
     let result = std::panic::catch_unwind(|| ssl_ctx::configure_ssl_context(sign_func, cert, ctx));
     match result {
         Ok(Ok(())) => 1,
@@ -116,6 +131,7 @@ pub unsafe extern "C" fn GetCertPemForPython(
     cert_holder: *mut c_char,
     cert_holder_len: c_int,
 ) -> c_int {
+    ensure_logger();
     let result =
         std::panic::catch_unwind(|| get_cert_pem_impl(config_path, cert_holder, cert_holder_len));
     match result {
@@ -149,6 +165,7 @@ pub unsafe extern "C" fn SignForPython(
     output: *mut c_uchar,
     output_len: c_int,
 ) -> c_int {
+    ensure_logger();
     let result = std::panic::catch_unwind(|| {
         sign_for_python_impl(config_path, input, input_len, output, output_len)
     });

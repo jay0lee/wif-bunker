@@ -73,24 +73,28 @@ jobs:
         working-directory: hardmtls-native
         env:
           OPENSSL_DIR: ${{ github.workspace }}/bin/ssl
+          OPENSSL_STATIC: "1"
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Tests
         working-directory: hardmtls-native
         env:
           OPENSSL_DIR: ${{ github.workspace }}/bin/ssl
+          OPENSSL_STATIC: "1"
         run: cargo test --all-features
 
       - name: Documentation
         working-directory: hardmtls-native
         env:
           OPENSSL_DIR: ${{ github.workspace }}/bin/ssl
+          OPENSSL_STATIC: "1"
         run: cargo doc --no-deps
 
       - name: Build release
         working-directory: hardmtls-native
         env:
           OPENSSL_DIR: ${{ github.workspace }}/bin/ssl
+          OPENSSL_STATIC: "1"
         run: cargo build --release
 
       - name: Upload native library
