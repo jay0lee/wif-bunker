@@ -344,13 +344,6 @@ def _ensure_token_via_tpm2_ptool(pin: str, tpm_store: str, module_path: str) -> 
             capture_output=True, text=True, check=False,
         )
         logger.info("    rmtoken exit=%d", rm_result.returncode)
-        # After rmtoken, remove the SQLite store so init re-creates the
-        # primary object.  On CI the TPM may have been cleared between
-        # runs, leaving stale pid references in the database.
-        db_path = Path(tpm_store, "tpm2_pkcs11.sqlite3")
-        if db_path.exists():
-            db_path.unlink()
-            logger.info("    Removed stale %s", db_path)
 
     # Create the token with both PINs.
     # Assumes the PKCS#11 store is already initialized with a primary
