@@ -395,7 +395,9 @@ fn wide_eq_ignore_case(a: &[u16], b: &[u16]) -> bool {
     a_trimmed
         .iter()
         .zip(b_trimmed.iter())
-        .all(|(&ac, &bc)| ac.to_ascii_lowercase() == bc.to_ascii_lowercase())
+        .all(|(&ac, &bc)| {
+            char::from(ac as u8).to_ascii_lowercase() == char::from(bc as u8).to_ascii_lowercase()
+        })
 }
 
 /// Convert DER certificate bytes to PEM format.
