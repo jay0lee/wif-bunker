@@ -1054,13 +1054,13 @@ static KEYMGMT_ALGORITHMS: [OsslAlgorithm; 3] = [
 /// SIGNATURE algorithm table — registers RSA and EC signatures.
 static SIGNATURE_ALGORITHMS: [OsslAlgorithm; 3] = [
     OsslAlgorithm {
-        algorithm_names: RSA_ALG_NAME.as_ptr(),
+        algorithm_names: c"RSA:rsaEncryption:RSA-PSS:RSASSA-PSS".as_ptr(),
         property_definition: PROVIDER_PROPS.as_ptr(),
         implementation: SIGNATURE_DISPATCH.as_ptr(),
         algorithm_description: c"hardmTLS RSA signature".as_ptr(),
     },
     OsslAlgorithm {
-        algorithm_names: EC_ALG_NAME.as_ptr(),
+        algorithm_names: c"EC:id-ecPublicKey".as_ptr(),
         property_definition: PROVIDER_PROPS.as_ptr(),
         implementation: SIGNATURE_DISPATCH.as_ptr(),
         algorithm_description: c"hardmTLS EC signature".as_ptr(),
