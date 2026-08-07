@@ -559,6 +559,32 @@ def _main_impl() -> None:
         except RuntimeError:
             sys.exit(1)
 
+        # ── mTLS Smoke Test ──
+        # Bare mTLS connection to sts.mtls.googleapis.com — no STS auth,
+        # just prove that hardmTLS can present the client cert in a real
+        # TLS handshake.  Any HTTP response (even 403) means success.
+        logger.info("=== 7b) mTLS Handshake Smoke Test ===")
+        try:
+            from google.auth.transport.requests import _MutualTlsOffloadAdapter
+
+            mtls_session = requests.Session()
+            mtls_session.mount("https://", _MutualTlsOffloadAdapter(str(cert_config_path)))
+            mtls_resp = mtls_session.get("https://sts.mtls.googleapis.com/", timeout=15)
+            logger.info(
+                "    PASS: mTLS handshake succeeded — server returned HTTP %d",
+                mtls_resp.status_code,
+            )
+        except requests.exceptions.SSLError as ssl_err:
+            logger.error("    FAIL: mTLS handshake failed with SSL error:")
+            logger.error("    %s", ssl_err)
+            if args.debug:
+                from wif_bunker.cert import run_hardmtls_diagnostics
+                run_hardmtls_diagnostics(cert_config_path, logger)
+            sys.exit(1)
+        except Exception as mtls_err:
+            logger.error("    FAIL: mTLS smoke test error: %s", mtls_err)
+            sys.exit(1)
+
         # ── ADC Verification (always runs) ──
         # End-to-end proof: hardware key → hardmTLS → mTLS → Google STS → API call.
         logger.info("=== 7) ADC Verification ===")
