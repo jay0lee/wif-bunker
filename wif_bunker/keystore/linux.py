@@ -330,26 +330,29 @@ def _ensure_token_via_tpm2_ptool(pin: str, tpm_store: str, module_path: str) -> 
                 capture_output=True, text=True, check=False,
             )
             if verify.returncode == 0:
-                logger.debug("    Token '%s' exists and PIN is valid", _TOKEN_LABEL)
+                logger.info("    Token '%s' exists and PIN is valid", _TOKEN_LABEL)
                 return
 
             # PIN mismatch — remove and recreate.
-            logger.debug(
-                "    Token '%s' exists but PIN is invalid, recreating",
-                _TOKEN_LABEL,
+            logger.info(
+                "    Token '%s' exists but PIN is invalid (rc=%d), recreating",
+                _TOKEN_LABEL, verify.returncode,
             )
-            subprocess.run(
+            rm_result = subprocess.run(
                 [tpm2_ptool, "rmtoken", "--label", _TOKEN_LABEL, "--path", tpm_store],
                 capture_output=True, text=True, check=False,
             )
+            logger.info("    rmtoken exit=%d", rm_result.returncode)
+            # Skip init — store and primary key already exist.
     except FileNotFoundError:
         return
 
-    # Ensure the store is initialized (creates primary object id=1).
-    subprocess.run(
-        [tpm2_ptool, "init", "--path", tpm_store],
-        capture_output=True, text=True, check=False,
-    )
+    if not Path(tpm_store, "tpm2_pkcs11.sqlite3").exists():
+        # Fresh store — initialize (creates primary object id=1).
+        subprocess.run(
+            [tpm2_ptool, "init", "--path", tpm_store],
+            capture_output=True, text=True, check=False,
+        )
 
     # Create the token with both PINs.
     try:
@@ -366,12 +369,12 @@ def _ensure_token_via_tpm2_ptool(pin: str, tpm_store: str, module_path: str) -> 
             capture_output=True,
             text=True,
         )
-        logger.debug(
+        logger.info(
             "    Created PKCS#11 token '%s' via tpm2_ptool addtoken",
             _TOKEN_LABEL,
         )
     except subprocess.CalledProcessError as exc:
-        logger.debug(
+        logger.info(
             "    tpm2_ptool addtoken failed: %s\n"
             "    stderr: %s",
             exc, exc.stderr,
