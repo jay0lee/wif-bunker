@@ -68,7 +68,7 @@ def yubikey_not_found_hint() -> str:
     if sys.platform == "linux":
         return (
             "Ensure the YubiKey is plugged in and the pcscd service is running "
-            "(sudo systemctl start pcscd)."
+            "(sudo systemctl restart pcscd)."
         )
     if sys.platform == "darwin":
         return (
