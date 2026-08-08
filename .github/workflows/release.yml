@@ -40,6 +40,8 @@ jobs:
       PYTHON_INSTALL_PATH: ${{ github.workspace }}/bin/python
       # Force Python to use UTF-8 for stdout/stderr on Windows (default is cp1252)
       PYTHONIOENCODING: utf-8
+      # Windows code signing — cert SHA1 thumbprint (public, not secret)
+      WINDOWS_CODESIGN_CERT_HASH: 3B11D9340A45CF078FF7FD984F1C3E30DA82FD05
 
     defaults:
       run:
@@ -153,6 +155,27 @@ jobs:
           "${PYTHON}" -m pip install pyinstaller
           "${PYTHON}" -m pip install --only-deps ".[yubikey]"
 
+      # ══════════════════════════════════════════════════════════════════════
+      # macOS: Import developer certificate for code signing
+      # Skipped when CERTIFICATES_P12 secret is not set.
+      # ══════════════════════════════════════════════════════════════════════
+
+      - name: "macOS: Import developer certificates"
+        if: runner.os == 'macOS' && env.CERTIFICATES_P12 != ''
+        uses: apple-actions/import-codesign-certs@b610f78488812c1e56b20e6df63ec42d833f2d14 # v6.0.0
+        env:
+          CERTIFICATES_P12: ${{ secrets.CERTIFICATES_P12 }}
+        with:
+          p12-file-base64: ${{ secrets.CERTIFICATES_P12 }}
+          p12-password: ${{ secrets.CERTIFICATES_P12_PASSWORD }}
+
+      - name: "macOS: Set codesign identity"
+        if: runner.os == 'macOS' && env.CERTIFICATES_P12 != ''
+        env:
+          CERTIFICATES_P12: ${{ secrets.CERTIFICATES_P12 }}
+        run: |
+          echo "codesign_identity=Jay Lee" >> $GITHUB_ENV
+
       - name: Run PyInstaller
         run: pyinstaller wif-bunker.spec
 
@@ -169,15 +192,128 @@ jobs:
           dist\wif-bunker\wif-bunker.exe --version
           dist\wif-bunker\wif-bunker.exe --help
 
+      # ══════════════════════════════════════════════════════════════════════
+      # Windows: Code signing with Certum SimplySign Desktop
+      # Skipped when TOTP_SECRET is not set.
+      # ══════════════════════════════════════════════════════════════════════
+
+      - name: "Windows: Install NPM deps for signing"
+        if: runner.os == 'Windows' && env.TOTP_SECRET != ''
+        env:
+          TOTP_SECRET: ${{ secrets.TOTP_SECRET }}
+        run: npm install totp-generator
+
+      - name: "Windows: Install Certum SimplySign Desktop"
+        if: runner.os == 'Windows' && env.TOTP_SECRET != ''
+        shell: pwsh
+        env:
+          TOTP_SECRET: ${{ secrets.TOTP_SECRET }}
+        run: |
+          $url = "https://files.certum.eu/software/SimplySignDesktop/Windows/9.4.3.90/SimplySignDesktop-9.4.3.90-64-bit-en.msi"
+          $file = "SimplySignDesktop.msi"
+          Invoke-WebRequest $url -OutFile $file
+          $log = "install.log"
+          $procMain = Start-Process "msiexec" "/i `"$file`" /qn /l*! `"$log`"" -NoNewWindow -PassThru
+          $procLog = Start-Process "powershell" "Get-Content -Path `"$log`" -Wait" -NoNewWindow -PassThru
+          $procMain.WaitForExit()
+          $procLog.Kill()
+
+      - name: "Windows: Launch SimplySign Desktop"
+        if: runner.os == 'Windows' && env.TOTP_SECRET != ''
+        shell: pwsh
+        env:
+          TOTP_SECRET: ${{ secrets.TOTP_SECRET }}
+        run: |
+          Write-Host "Running SSD..."
+          & "C:\Program Files\Certum\SimplySign Desktop\SimplySignDesktop.exe"
+          Start-Sleep -Seconds 10
+          & "C:\Program Files\Certum\SimplySign Desktop\SimplySignDesktop.exe"
+
+      - name: "Windows: Login to Certum"
+        if: runner.os == 'Windows' && env.TOTP_SECRET != ''
+        shell: pwsh
+        env:
+          TOTP_SECRET: ${{ secrets.TOTP_SECRET }}
+        run: |
+          Write-Host "Running SimplySignDesktop login..."
+          node tools/ssd.mjs --log-level warn
+          Get-ChildItem -Path $env:GITHUB_WORKSPACE
+          Write-Host "Sleeping during login..."
+          Start-Sleep 10
+
+      - name: "Windows: Upload signing debug screenshots"
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: runner.os == 'Windows' && env.TOTP_SECRET != ''
+        env:
+          TOTP_SECRET: ${{ secrets.TOTP_SECRET }}
+        with:
+          archive: true
+          name: signing-screenshots-${{ matrix.os }}
+          if-no-files-found: ignore
+          path: |
+            ${{ github.workspace }}/*.png
+            ${{ github.workspace }}/*.log
+
+      - name: "Windows: Sign wif-bunker.exe"
+        if: runner.os == 'Windows' && env.TOTP_SECRET != ''
+        shell: pwsh
+        env:
+          TOTP_SECRET: ${{ secrets.TOTP_SECRET }}
+        run: |
+          $exe = "dist\wif-bunker\wif-bunker.exe"
+          Write-Host "Signing $exe..."
+          # Always use x64 signtool — ARM64 version can't see Certum certs
+          # since SimplySignDesktop is x64-only.
+          Start-Process -Wait -NoNewWindow -ErrorAction Continue `
+            -FilePath 'C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe' `
+            -ArgumentList "sign", "/sha1", "$env:WINDOWS_CODESIGN_CERT_HASH", "/tr", "http://time.certum.pl", "/td", "SHA256", "/fd", "SHA256", "/v", "$exe"
+          Write-Host "Verifying signature..."
+          & 'C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe' verify /pa /v "$exe"
+
+      # ══════════════════════════════════════════════════════════════════════
+      # Package
+      # ══════════════════════════════════════════════════════════════════════
+
       - name: Package (Linux/macOS)
         if: runner.os != 'Windows'
         run: tar -czf wif-bunker-${VERSION}-${{ matrix.os }}.tar.gz -C dist wif-bunker/
 
+      # macOS: Submit for Apple notarization (fire-and-forget).
+      # Skipped when APPLE_KEY secret is not set.
+      - name: "macOS: Submit for Apple notarization"
+        if: runner.os == 'macOS' && env.APPLE_KEY != ''
+        env:
+          APPLE_KEY: ${{ secrets.APPLE_KEY }}
+          APPLE_KEY_ID: ${{ secrets.APPLE_KEY_ID }}
+          APPLE_ISSUER_ID: ${{ secrets.APPLE_ISSUER_ID }}
+        run: |
+          zipfilename="./wif-bunker-${RUNNER_ARCH}-${GITHUB_RUN_ID}-${GITHUB_RUN_NUMBER}.zip"
+          zip -r "$zipfilename" dist/wif-bunker/
+          export KEY_FILE="$(mktemp).p8"
+          trap 'rm -f "$KEY_FILE"' EXIT
+          echo "$APPLE_KEY" > "$KEY_FILE"
+          xcrun notarytool submit "$zipfilename" --key "$KEY_FILE" --key-id "$APPLE_KEY_ID" --issuer "$APPLE_ISSUER_ID"
+          rm -v "$zipfilename"
+
       - name: Package (Windows — InnoSetup)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && env.TOTP_SECRET == ''
         shell: pwsh
+        env:
+          TOTP_SECRET: ${{ secrets.TOTP_SECRET }}
         run: |
           & "C:\Program Files (x86)\Inno Setup 6\iscc.exe" /DVersion=$env:VERSION packaging\windows\wif-bunker.iss
+
+      - name: Package (Windows — InnoSetup, signed)
+        if: runner.os == 'Windows' && env.TOTP_SECRET != ''
+        shell: bash
+        env:
+          TOTP_SECRET: ${{ secrets.TOTP_SECRET }}
+        run: |
+          signtool="C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe"
+          iscc \
+            /S"wifbunkersigntool=$signtool sign /sha1 $WINDOWS_CODESIGN_CERT_HASH /tr http://time.certum.pl /td SHA256 /fd SHA256 /v \$f" \
+            /DVersion="$VERSION" \
+            packaging/windows/wif-bunker.iss
 
       - name: Upload artifact (Linux/macOS)
         if: runner.os != 'Windows'

@@ -109,7 +109,7 @@ jobs:
         run: |
           mkdir -vp "${GITHUB_WORKSPACE}/src"
           cd "${GITHUB_WORKSPACE}/src"
-          git clone https://github.com/openssl/openssl.git
+          git clone --filter=blob:none https://github.com/openssl/openssl.git
           cd "${OPENSSL_SOURCE_PATH}"
           LATEST_STABLE_TAG=$(git tag --list openssl-* | grep -v alpha | grep -v beta | sort -Vr | head -n1)
           echo "Checking out OpenSSL ${LATEST_STABLE_TAG}"
@@ -126,12 +126,7 @@ jobs:
         shell: bash
         run: |
           cd "${OPENSSL_SOURCE_PATH}"
-          # Linux ARM64 needs no-asm for OpenSSL 4.0 compatibility
-          if ([ "$RUNNER_OS" == "Linux" ] && [ "$RUNNER_ARCH" == "ARM64" ]); then
-            "${PERL}" ./Configure --libdir=lib --prefix="${OPENSSL_INSTALL_PATH}" no-asm $OPENSSL_CONFIG_OPTS
-          else
-            "${PERL}" ./Configure --libdir=lib --prefix="${OPENSSL_INSTALL_PATH}" $OPENSSL_CONFIG_OPTS
-          fi
+          "${PERL}" ./Configure --libdir=lib --prefix="${OPENSSL_INSTALL_PATH}" $OPENSSL_CONFIG_OPTS
 
       - name: "Build OpenSSL"
         if: steps.cache-python-ssl.outputs.cache-hit != 'true'
@@ -166,7 +161,7 @@ jobs:
         shell: bash
         run: |
           cd "${GITHUB_WORKSPACE}/src"
-          git clone https://github.com/python/cpython.git
+          git clone --filter=blob:none https://github.com/python/cpython.git
           cd "${PYTHON_SOURCE_PATH}"
           LATEST_STABLE_TAG=$(git tag --list | grep -v a | grep -v rc | grep -v b | sort -Vr | head -n1)
           echo "Checking out Python ${LATEST_STABLE_TAG}"
