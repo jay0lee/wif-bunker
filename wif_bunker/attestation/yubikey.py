@@ -264,11 +264,14 @@ def attest_yubikey(config: WorkloadConfig) -> AttestationReport:
 
     # Check 1: YubiKey detected
     if not devices:
+        from wif_bunker.utils import yubikey_not_found_hint  # pylint: disable=import-outside-toplevel
+
+        hint = yubikey_not_found_hint()
         checks.append(
             AttestationCheck(
                 name="YubiKey detected",
                 passed=False,
-                detail="No YubiKey detected. Ensure device is plugged in and pcscd is running (Linux: sudo apt install pcscd).",
+                detail=f"No YubiKey detected. {hint}",
             )
         )
         return AttestationReport(
@@ -276,7 +279,7 @@ def attest_yubikey(config: WorkloadConfig) -> AttestationReport:
             supported=True,
             hardware_type="YubiKey",
             checks=checks,
-            summary="No YubiKey with PIV support detected. Ensure the device is plugged in and pcscd is running.",
+            summary=f"No YubiKey with PIV support detected. {hint}",
         )
 
     if len(devices) > 1 and not config.yubikey_serial:

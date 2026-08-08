@@ -50,7 +50,9 @@ def get_supported_algorithms_yubikey(serial: int | None = None) -> list[str]:
 
     devices = list(list_all_devices())
     if not devices:
-        raise RuntimeError("No YubiKeys found. On Linux, ensure 'pcscd' service is running.")
+        from wif_bunker.utils import yubikey_not_found_hint  # pylint: disable=import-outside-toplevel
+
+        raise RuntimeError(f"No YubiKeys found. {yubikey_not_found_hint()}")
 
     target_info = None
     if len(devices) > 1 and serial is None:
@@ -117,9 +119,9 @@ def generate_cert_yubikey(config: WorkloadConfig) -> CertificateBundle:
     # 1. Detection
     devices = list(list_all_devices())
     if not devices:
-        raise RuntimeError(
-            "No YubiKeys found. On Linux, ensure 'pcscd' service is running (e.g. sudo systemctl start pcscd)."
-        )
+        from wif_bunker.utils import yubikey_not_found_hint  # pylint: disable=import-outside-toplevel
+
+        raise RuntimeError(f"No YubiKeys found. {yubikey_not_found_hint()}")
 
     target_dev = None
     target_info = None

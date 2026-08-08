@@ -58,7 +58,7 @@ class TestYubiKeyKeystore:
         from wif_bunker.keystore.yubikey import generate_cert_yubikey
 
         mock_list.return_value = iter([])
-        with pytest.raises(RuntimeError, match="pcscd"):
+        with pytest.raises(RuntimeError, match="No YubiKeys found"):
             generate_cert_yubikey(config)
 
     @patch("ykman.device.list_all_devices", create=True)
@@ -253,7 +253,7 @@ class TestYubiKeyAttestation:
         report = attest_yubikey(config)
         assert report.supported is True
         assert report.platform == "yubikey"
-        assert "pcscd" in report.checks[0].detail
+        assert "No YubiKey detected" in report.checks[0].detail
 
     @patch("ykman.device.list_all_devices", create=True)
     def test_firmware_too_old_report(self, mock_list, config):
