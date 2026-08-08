@@ -302,9 +302,8 @@ def _ensure_token_via_tpm2_ptool(pin: str, tpm_store: str, module_path: str) -> 
     in-process ``libtpm2_pkcs11.so`` only reads it at ``C_Initialize`` time.
 
     If the token exists but the PIN doesn't match (e.g. from a previous
-    run that used a different random PIN), the store is wiped and
-    re-initialized.  This is safe because ``bunker-wif`` is our own token
-    and the only token in this store.
+    run that used a different random PIN), the token is removed and
+    recreated. This is safe because ``bunker-wif`` is our own token.
     """
     import shutil
     import subprocess
@@ -323,26 +322,24 @@ def _ensure_token_via_tpm2_ptool(pin: str, tpm_store: str, module_path: str) -> 
     token_exists = _TOKEN_LABEL in (result.stdout + result.stderr)
 
     if token_exists:
-        # Token exists from a previous run with an unknown random PIN.
-        # tpm2_ptool rmtoken leaves the underlying TPM primary object
-        # out-of-sync with the SQLite store, causing addtoken to fail
-        # with "sqlite3.OperationalError: disk I/O error".
+        # Token exists from a previous run — remove it so we can
+        # recreate with our (randomly generated) PIN.  We skip PIN
+        # verification because each invocation generates a new random
+        # PIN, so login would always fail and needlessly increment the
+        # TPM's DA lockout counter.
         #
-        # Instead, wipe the store and re-initialize — same approach the
-        # CI "Reset TPM to clean state" step uses.  This is safe because
-        # we only ever create one token ("bunker-wif") in this store.
-        store_path = Path(tpm_store)
-        shutil.rmtree(store_path, ignore_errors=True)
-        store_path.mkdir(parents=True, exist_ok=True)
-        subprocess.run(
-            [tpm2_ptool, "init", "--path", tpm_store],
+        # rmtoken only removes *our* token — it never affects tokens
+        # belonging to other TPM applications (disk encryption, etc.).
+        rm_result = subprocess.run(
+            [tpm2_ptool, "rmtoken", "--label", _TOKEN_LABEL, "--path", tpm_store],
             capture_output=True,
             text=True,
             check=False,
         )
         logger.info(
-            "    Token '%s' existed — wiped and re-initialized store",
+            "    Token '%s' existed, removed (rc=%d)",
             _TOKEN_LABEL,
+            rm_result.returncode,
         )
 
     # Create the token with both PINs.

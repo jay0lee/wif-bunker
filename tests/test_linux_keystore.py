@@ -246,15 +246,10 @@ def test_cleanup_existing_token_error_open(mock_pkcs11_lib):
 
 
 def test_ensure_token_via_tpm2_ptool():
-    with (
-        patch("shutil.which", return_value="/bin/tpm2_ptool"),
-        patch("subprocess.run") as m_run,
-        patch("shutil.rmtree"),
-        patch("pathlib.Path.mkdir"),
-    ):
+    with patch("shutil.which", return_value="/bin/tpm2_ptool"), patch("subprocess.run") as m_run:
         m_run.side_effect = [
             subprocess.CompletedProcess(args=[], returncode=0, stdout="bunker-wif", stderr=""),  # list-token-slots
-            subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),  # init (re-init store)
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),  # rmtoken
             subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),  # addtoken
         ]
         _ensure_token_via_tpm2_ptool("pin", "/store", "/lib")

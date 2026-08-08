@@ -1053,6 +1053,24 @@ jobs:
             echo "--- Testing --cert-only --key-algorithm $algo ---"
             outdir=$(mktemp -d)
 
+            # CI-only: Reset the TPM PKCS#11 store between iterations.
+            # tpm2_ptool rmtoken can leave the SQLite store out-of-sync
+            # with TPM persistent handles, causing addtoken to fail with
+            # "disk I/O error".  Wipe + re-init is safe in CI because we
+            # own the entire TPM state.  WIF Bunker itself never does
+            # this — it only ever touches its own bunker-wif token.
+            if [[ "${{ matrix.self_hosted }}" == "true" ]] && command -v tpm2_ptool &>/dev/null; then
+              HANDLES=$(tpm2_getcap handles-persistent 2>/dev/null | grep -oP '0x[0-9A-Fa-f]+' || true)
+              for h in $HANDLES; do
+                tpm2_evictcontrol -c "$h" 2>/dev/null || true
+              done
+              rm -rf "$HOME/.tpm2_pkcs11"
+              mkdir -p "$HOME/.tpm2_pkcs11"
+              export TPM2_PKCS11_STORE="$HOME/.tpm2_pkcs11"
+              tpm2_ptool init --path="$HOME/.tpm2_pkcs11" 2>/dev/null || true
+              echo "  [CI] Reset TPM PKCS#11 store for $algo iteration"
+            fi
+
             # Each cert generation triggers CA store dialogs on Windows —
             # launch a fresh dialog acceptor per iteration.
             DIALOG_PID=""
@@ -1090,6 +1108,19 @@ jobs:
           certdir=$(mktemp -d)
           attestdir=$(mktemp -d)
           WIF_CMD="${{ inputs.wif_bunker_cmd || '${PYTHON} -m wif_bunker' }}"
+
+          # CI-only: Reset TPM PKCS#11 store (same as cert-only loop above)
+          if [[ "${{ matrix.self_hosted }}" == "true" ]] && command -v tpm2_ptool &>/dev/null; then
+            HANDLES=$(tpm2_getcap handles-persistent 2>/dev/null | grep -oP '0x[0-9A-Fa-f]+' || true)
+            for h in $HANDLES; do
+              tpm2_evictcontrol -c "$h" 2>/dev/null || true
+            done
+            rm -rf "$HOME/.tpm2_pkcs11"
+            mkdir -p "$HOME/.tpm2_pkcs11"
+            export TPM2_PKCS11_STORE="$HOME/.tpm2_pkcs11"
+            tpm2_ptool init --path="$HOME/.tpm2_pkcs11" 2>/dev/null || true
+            echo "  [CI] Reset TPM PKCS#11 store for attest test"
+          fi
 
           # Generate a cert first so there's something to attest
           DIALOG_PID=""
