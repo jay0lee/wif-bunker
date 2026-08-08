@@ -33,3 +33,4 @@ __pycache__/
 
 # Generated cert artifacts
 bunker-workload-*.pem
+mtls-test-output.txt

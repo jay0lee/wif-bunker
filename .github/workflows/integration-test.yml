@@ -370,9 +370,9 @@ jobs:
           path: |
             bin/ssl
             bin/python
-          key: python-ssl-${{ runner.os }}-${{ runner.arch }}-v1-
+          key: python-ssl-${{ runner.os }}-${{ runner.arch }}-v2-
           restore-keys: |
-            python-ssl-${{ runner.os }}-${{ runner.arch }}-v1-
+            python-ssl-${{ runner.os }}-${{ runner.arch }}-v2-
           fail-on-cache-miss: true
 
       - name: "Debug: Inspect cached OpenSSL + Python"
@@ -380,7 +380,7 @@ jobs:
         run: |
           echo "══════════════════════════════════════════════════"
           echo "Cache restore key used: ${{ steps.cache-python-ssl.outputs.cache-matched-key }}"
-          echo "Cache primary key:      python-ssl-${{ runner.os }}-${{ runner.arch }}-v1-"
+          echo "Cache primary key:      python-ssl-${{ runner.os }}-${{ runner.arch }}-v2-"
           echo "══════════════════════════════════════════════════"
 
           echo ""
