@@ -1064,7 +1064,7 @@ jobs:
             # "disk I/O error".  Wipe + re-init is safe in CI because we
             # own the entire TPM state.  WIF Bunker itself never does
             # this — it only ever touches its own bunker-wif token.
-            if [[ "${{ matrix.self_hosted }}" == "true" ]] && command -v tpm2_ptool &>/dev/null; then
+            if [[ "${{ matrix.self_hosted }}" == "true" ]] && [[ "${{ matrix.use_yubikey }}" != "true" ]] && command -v tpm2_ptool &>/dev/null; then
               HANDLES=$(tpm2_getcap handles-persistent 2>/dev/null | grep -oP '0x[0-9A-Fa-f]+' || true)
               for h in $HANDLES; do
                 tpm2_evictcontrol -c "$h" 2>/dev/null || true
@@ -1115,7 +1115,7 @@ jobs:
           WIF_CMD="${{ inputs.wif_bunker_cmd || '${PYTHON} -m wif_bunker' }}"
 
           # CI-only: Reset TPM PKCS#11 store (same as cert-only loop above)
-          if [[ "${{ matrix.self_hosted }}" == "true" ]] && command -v tpm2_ptool &>/dev/null; then
+          if [[ "${{ matrix.self_hosted }}" == "true" ]] && [[ "${{ matrix.use_yubikey }}" != "true" ]] && command -v tpm2_ptool &>/dev/null; then
             HANDLES=$(tpm2_getcap handles-persistent 2>/dev/null | grep -oP '0x[0-9A-Fa-f]+' || true)
             for h in $HANDLES; do
               tpm2_evictcontrol -c "$h" 2>/dev/null || true
