@@ -29,7 +29,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        name: ${{ matrix.os }}
         os: [ubuntu-22.04, ubuntu-24.04, ubuntu-26.04, ubuntu-22.04-arm, ubuntu-24.04-arm, ubuntu-26.04-arm, macos-14, macos-15, macos-26, macos-15-intel, macos-26-intel, windows-2025-vs2026, windows-11-vs2026-arm]
     runs-on: ${{ matrix.os }}
 
@@ -48,9 +47,9 @@ jobs:
           path: |
             bin/ssl
             bin/python
-          key: python-ssl-${{ runner.name }}-${{ env.CACHE_VERSION }}-${{ github.run_id }}
+          key: python-ssl-${{ matrix.os }}-${{ env.CACHE_VERSION }}-${{ github.run_id }}
           restore-keys: |
-            python-ssl-${{ runner.name }}-${{ env.CACHE_VERSION }}-
+            python-ssl-${{ matrix.os }}-${{ env.CACHE_VERSION }}-
 
       # ── Skip everything if cache is already warm from today ──
       # All subsequent steps are conditioned on cache miss.
