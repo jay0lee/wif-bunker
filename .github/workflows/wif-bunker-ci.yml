@@ -39,7 +39,7 @@ jobs:
       - name: Install system dependencies (Linux)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq libpcsclite-dev libtss2-dev swig
+          sudo apt-get install -y -qq libpcsclite-dev libtss2-dev swig pkg-config
 
       - name: Restore compiled OpenSSL + Python
         uses: actions/cache/restore@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
@@ -108,7 +108,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq libpcsclite-dev libtss2-dev swig
+          sudo apt-get install -y -qq libpcsclite-dev libtss2-dev swig pkg-config
 
       # ══════════════════════════════════════════════════════════════════
       # Restore pre-built OpenSSL + Python from cache
