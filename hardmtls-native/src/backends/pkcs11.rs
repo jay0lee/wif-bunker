@@ -141,11 +141,19 @@ impl Pkcs11Backend {
 
     /// Run a closure with the cached PKCS#11 session.
     ///
-    /// Opens the session on first use and keeps it alive.  If the operation
-    /// fails, the session is invalidated so the next call opens a fresh one.
+    /// Opens the session on first use and keeps it alive.  If the first
+    /// attempt fails, drops the session, opens a fresh one (with a new
+    /// `C_Initialize`), and retries **once**.
+    ///
+    /// The retry handles the race where Python's `python-pkcs11` garbage-
+    /// collects its `lib` object and calls `C_Finalize` on
+    /// `libtpm2_pkcs11.so` *after* we opened our session.  That `C_Finalize`
+    /// destroys the ESAPI context underneath us, causing `Esys_Load` (and
+    /// similar TPM calls) to fail with a stale handle.  A fresh
+    /// `C_Initialize` + session restores the context.
     fn with_session<F, R>(&self, f: F) -> Result<R, HardmtlsError>
     where
-        F: FnOnce(&Session) -> Result<R, HardmtlsError>,
+        F: Fn(&Session) -> Result<R, HardmtlsError>,
     {
         let mut cache = self
             .session_cache
@@ -160,14 +168,18 @@ impl Pkcs11Backend {
         let (_, ref session) = *cache.as_ref().unwrap();
         let result = f(session);
 
-        // If the operation failed, the session may be stale (e.g. token
-        // removed and re-inserted).  Drop it so the next call retries.
-        if result.is_err() {
-            log::warn!("PKCS#11 operation failed — invalidating cached session");
-            *cache = None;
+        if result.is_ok() {
+            return result;
         }
 
-        result
+        // First attempt failed — the session may be stale (e.g. another
+        // caller in this process called C_Finalize).  Drop it, open a
+        // completely fresh context, and retry once.
+        log::warn!("PKCS#11 operation failed — retrying with fresh session");
+        *cache = None;
+        *cache = Some(self.open_session()?);
+        let (_, ref session) = *cache.as_ref().unwrap();
+        f(session)
     }
 }
 
