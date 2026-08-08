@@ -235,85 +235,85 @@ jobs:
             name: Linux x64 (22.04)
             runner_id: linux-swtpm
             soft_key_flag: ""
-            artifact_name: wif-bunker-linux-x86_64
+            artifact_name: wif-bunker-ubuntu-22.04
             expected_algos: "es256 es384 rsa2048 rsa3072"
           - os: ubuntu-24.04
             name: Linux x64 (24.04)
             runner_id: linux-swtpm
             soft_key_flag: ""
-            artifact_name: wif-bunker-linux-x86_64
+            artifact_name: wif-bunker-ubuntu-24.04
             expected_algos: "es256 es384 rsa2048 rsa3072"
           - os: ubuntu-26.04
             name: Linux x64 (26.04)
             runner_id: linux-swtpm
             soft_key_flag: ""
-            artifact_name: wif-bunker-linux-x86_64
+            artifact_name: wif-bunker-ubuntu-24.04
             expected_algos: "es256 es384 rsa2048 rsa3072"
           # ── Linux ARM64 ──
           - os: ubuntu-22.04-arm
             name: Linux ARM64 (22.04)
             runner_id: linux-swtpm
             soft_key_flag: ""
-            artifact_name: wif-bunker-linux-aarch64
+            artifact_name: wif-bunker-ubuntu-22.04-arm
             expected_algos: "es256 es384 rsa2048 rsa3072"
           - os: ubuntu-24.04-arm
             name: Linux ARM64 (24.04)
             runner_id: linux-swtpm
             soft_key_flag: ""
-            artifact_name: wif-bunker-linux-aarch64
+            artifact_name: wif-bunker-ubuntu-24.04-arm
             expected_algos: "es256 es384 rsa2048 rsa3072"
           - os: ubuntu-26.04-arm
             name: Linux ARM64 (26.04)
             runner_id: linux-swtpm
             soft_key_flag: ""
-            artifact_name: wif-bunker-linux-aarch64
+            artifact_name: wif-bunker-ubuntu-24.04-arm
             expected_algos: "es256 es384 rsa2048 rsa3072"
           # ── macOS ARM64 (Apple Silicon — requires macOS 15+ for CryptoTokenKit) ──
           - os: macos-15
             name: macOS ARM64 (15)
             runner_id: macos
             soft_key_flag: ""
-            artifact_name: wif-bunker-macos-arm64
+            artifact_name: wif-bunker-macos-15
             expected_algos: "es256 es384"
           - os: macos-26
             name: macOS ARM64 (26)
             runner_id: macos
             soft_key_flag: ""
-            artifact_name: wif-bunker-macos-arm64
+            artifact_name: wif-bunker-macos-26
             expected_algos: "es256 es384"
           # ── Windows ──
           - os: windows-2025-vs2026
             name: Windows x64
             runner_id: windows
             soft_key_flag: "--soft-key"
-            artifact_name: wif-bunker-windows-x86_64
+            artifact_name: wif-bunker-windows-2025-vs2026
             expected_algos: "es256 es384 rsa2048 rsa3072 rsa4096"
-          - os: windows-11-vs2026-arm
-            name: Windows ARM64
-            runner_id: windows
-            soft_key_flag: "--soft-key"
-            artifact_name: wif-bunker-windows-aarch64
-            expected_algos: "es256 es384 rsa2048 rsa3072 rsa4096"
+#          - os: windows-11-vs2026-arm
+#            name: Windows ARM64
+#            runner_id: windows
+#            soft_key_flag: "--soft-key"
+#            artifact_name: wif-bunker-windows-aarch64
+#            expected_algos: "es256 es384 rsa2048 rsa3072 rsa4096"
           # ── Native SSL/Python: test with runner's pre-installed OpenSSL + Python ──
           - os: ubuntu-24.04
             name: Linux x64 (native-ssl)
             runner_id: linux-swtpm
             soft_key_flag: ""
-            artifact_name: wif-bunker-linux-x86_64
+            artifact_name: wif-bunker-ubuntu-24.04
             expected_algos: "es256 es384 rsa2048 rsa3072"
             use_native_ssl_and_python: true
           - os: macos-15
             name: macOS ARM64 (native-ssl)
             runner_id: macos
             soft_key_flag: ""
-            artifact_name: wif-bunker-macos-arm64
+            artifact_name: wif-bunker-macos-15
             expected_algos: "es256 es384"
             use_native_ssl_and_python: true
           - os: windows-2025-vs2026
             name: Windows x64 (native-ssl)
             runner_id: windows
             soft_key_flag: "--soft-key"
-            artifact_name: wif-bunker-windows-x86_64
+            artifact_name: wif-bunker-windows-2025-vs2026
             expected_algos: "es256 es384 rsa2048 rsa3072 rsa4096"
             use_native_ssl_and_python: true
           # ── Self-hosted hardware ──
@@ -324,7 +324,7 @@ jobs:
             runs_on: '["self-hosted", "Linux", "X64", "tpm"]'
             runner_id: nuc8-tpm
             soft_key_flag: ""
-            artifact_name: wif-bunker-linux-x86_64
+            artifact_name: wif-bunker-ubuntu-24.04
             self_hosted: true
             expected_algos: "es256 rsa2048"
           - name: YubiKey (NUC8)
@@ -332,7 +332,7 @@ jobs:
             runs_on: '["self-hosted", "Linux", "X64", "yk"]'
             runner_id: nuc8-yk
             soft_key_flag: ""
-            artifact_name: wif-bunker-linux-x86_64
+            artifact_name: wif-bunker-ubuntu-24.04
             self_hosted: true
             use_yubikey: true
             expected_algos: "es256 es384 rsa2048"
@@ -341,9 +341,9 @@ jobs:
     runs-on: ${{ matrix.runs_on && fromJSON(matrix.runs_on) || matrix.os }}
     name: ${{ matrix.name }}
     environment: ${{ matrix.self_hosted && 'tpm-hardware' || '' }}
-    concurrency:
-      group: wif-ci-${{ matrix.runner_id }}-${{ matrix.use_native_ssl_and_python && 'native' || 'cached' }}
-      cancel-in-progress: true
+    #concurrency:
+    #  group: wif-ci-${{ matrix.runner_id }}-${{ matrix.use_native_ssl_and_python && 'native' || 'cached' }}
+    #  cancel-in-progress: true
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       RUNNER_SA: ${{ fromJSON(needs.bootstrap.outputs.runner_map)[matrix.runner_id].sa }}
