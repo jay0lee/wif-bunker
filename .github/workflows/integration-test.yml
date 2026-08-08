@@ -1082,6 +1082,10 @@ jobs:
               mkdir -p "$HOME/.tpm2_pkcs11"
               export TPM2_PKCS11_STORE="$HOME/.tpm2_pkcs11"
               tpm2_ptool init --path="$HOME/.tpm2_pkcs11"
+              # Ensure SQLite DB is fully flushed to disk before addtoken
+              # opens it — avoids "disk I/O error" on NUC filesystem.
+              sync
+              sleep 1
               echo "  [CI] Reset TPM PKCS#11 store for $algo iteration"
             fi
 
