@@ -1,5 +1,6 @@
 """Tests for the --supported-algorithms feature across all keystores."""
 
+import importlib.util
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -7,6 +8,7 @@ import pytest
 # ── Linux: get_supported_algorithms_linux ──
 
 
+@pytest.mark.skipif(not importlib.util.find_spec("pkcs11"), reason="python-pkcs11 not installed")
 class TestLinuxSupportedAlgorithms:
     """Tests for get_supported_algorithms_linux using mocked PKCS#11 mechanisms."""
 

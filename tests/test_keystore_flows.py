@@ -1,3 +1,4 @@
+import importlib.util
 import subprocess
 import sys
 from unittest.mock import MagicMock, patch
@@ -165,6 +166,7 @@ class TestMacOSKeystoreFlow:
             _generate_cert_macos(config)
 
 
+@pytest.mark.skipif(not importlib.util.find_spec("pkcs11"), reason="python-pkcs11 not installed")
 class TestLinuxKeystoreFlow:
     @patch("socket.socket")
     def test_secret_tool_lookup_fallback(self, mock_socket):
