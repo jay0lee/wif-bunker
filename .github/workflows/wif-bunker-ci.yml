@@ -18,21 +18,68 @@ on:
       - 'wif-bunker.spec'
       - '.github/workflows/wif-bunker-ci.yml'
 
+# ── Shared env for both jobs (pre-built Python + OpenSSL from cache) ──
+env:
+  OPENSSL_INSTALL_PATH: ${{ github.workspace }}/bin/ssl
+  PYTHON_INSTALL_PATH: ${{ github.workspace }}/bin/python
+  PYTHONIOENCODING: utf-8
+
 jobs:
   lint:
     name: Lint & Format
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
+
+    defaults:
+      run:
+        shell: bash
+
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.x'
-      - run: pip install ruff pylint
-      # Pylint needs the project's deps importable.  Install from
-      # pre-built wheels only — no C compilation needed for linting.
-      - name: Install project dependencies for import resolution
+
+      - name: Install system dependencies (Linux)
         run: |
-          pip install --only-binary :all: --only-deps . || pip install --only-deps .
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libpcsclite-dev libtss2-dev swig
+
+      - name: Restore compiled OpenSSL + Python
+        uses: actions/cache/restore@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        id: cache-python-ssl
+        with:
+          path: |
+            bin/ssl
+            bin/python
+          key: python-ssl-ubuntu-26.04-v2-
+          restore-keys: |
+            python-ssl-ubuntu-26.04-v2-
+          fail-on-cache-miss: true
+
+      - name: Set PYTHON env var and library paths
+        run: |
+          PYTHON="${PYTHON_INSTALL_PATH}/bin/python3"
+          echo "${PYTHON_INSTALL_PATH}/bin" >> "$GITHUB_PATH"
+
+          LD_LIBRARY_PATH="${PYTHON_INSTALL_PATH}/lib:${OPENSSL_INSTALL_PATH}/lib:${LD_LIBRARY_PATH}"
+          echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+
+          echo "PYTHON=${PYTHON}" >> $GITHUB_ENV
+          echo "Using compiled Python: ${PYTHON}"
+          "${PYTHON}" --version
+          "${PYTHON}" -c "import ssl; print(f'OpenSSL: {ssl.OPENSSL_VERSION}')"
+
+      - name: Create venv and install dependencies
+        run: |
+          "${PYTHON}" -m venv .venv
+          source .venv/bin/activate
+          VENV_BIN="$PWD/.venv/bin"
+          echo "${VENV_BIN}" >> "$GITHUB_PATH"
+
+          VENV_PYTHON="$(which python)"
+          echo "PYTHON=${VENV_PYTHON}" >> $GITHUB_ENV
+          export PYTHON="${VENV_PYTHON}"
+          echo "PYTHON updated to venv: ${PYTHON}"
+
+          pip install ruff pylint
+          pip install .
 
       - name: Ruff lint
         run: ruff check .
@@ -48,12 +95,6 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-26.04, macos-26, windows-2025-vs2026]
-
-    env:
-      # Paths to pre-built OpenSSL + Python (from build-python-ssl.yml cache)
-      OPENSSL_INSTALL_PATH: ${{ github.workspace }}/bin/ssl
-      PYTHON_INSTALL_PATH: ${{ github.workspace }}/bin/python
-      PYTHONIOENCODING: utf-8
 
     defaults:
       run:
