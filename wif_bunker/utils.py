@@ -22,6 +22,14 @@ logger = logging.getLogger(__name__)
 # --- Unicode Detection ---
 def _supports_unicode() -> bool:
     """Detect whether the terminal supports Unicode symbols."""
+    # For frozen PyInstaller builds, PYTHONIOENCODING is ignored and stdout
+    # uses the console's native encoding (e.g. cp1252 on Windows).  Always
+    # verify that we can actually encode a representative symbol.
+    try:
+        encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+        "\u2713".encode(encoding)
+    except (UnicodeEncodeError, LookupError):
+        return False
     # GHA runners on all platforms (including Windows under bash) support UTF-8
     if os.environ.get("GITHUB_ACTIONS"):
         return True
