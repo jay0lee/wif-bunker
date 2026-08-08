@@ -145,6 +145,16 @@ jobs:
         with:
           arch: ${{ runner.arch }}
 
+      - name: "Windows: Hide Git link.exe (shadows MSVC)"
+        if: matrix.platform_name == 'windows'
+        run: |
+          # Git ships a coreutils link.exe that Rust picks up instead of MSVC's
+          GIT_LINK="/c/Program Files/Git/usr/bin/link.exe"
+          if [ -f "$GIT_LINK" ]; then
+            mv "$GIT_LINK" "${GIT_LINK}.bak"
+            echo "Renamed Git link.exe to avoid MSVC collision"
+          fi
+
       - name: Build hardmTLS
         working-directory: hardmtls-native
         env:

@@ -42,6 +42,10 @@ jobs:
       cancel-in-progress: false
     outputs:
       runner_map: ${{ steps.setup.outputs.runner_map }}
+    defaults:
+      run:
+        shell: bash
+
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -274,6 +278,10 @@ jobs:
       # Paths to pre-built OpenSSL + Python (from build-python-ssl.yml cache)
       OPENSSL_INSTALL_PATH: ${{ github.workspace }}/bin/ssl
       PYTHON_INSTALL_PATH: ${{ github.workspace }}/bin/python
+
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
