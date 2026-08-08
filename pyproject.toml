@@ -34,6 +34,10 @@ wif-bunker = "wif_bunker:main"
 [tool.ruff]
 target-version = "py310"
 line-length = 120
+exclude = [
+    ".venv",
+    "bin",
+]
 
 [tool.ruff.lint]
 select = [

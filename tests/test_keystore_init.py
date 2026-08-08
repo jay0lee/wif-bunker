@@ -13,6 +13,17 @@ def config():
     return cfg
 
 
+@pytest.fixture(autouse=True)
+def _restore_keystore_module():
+    """Restore the keystore module to its original state for the real OS after each test.
+    This prevents cross-test pollution when we mock sys.platform and reload the module.
+    """
+    yield
+    import wif_bunker.keystore
+
+    importlib.reload(wif_bunker.keystore)
+
+
 def test_import_win32():
     with patch("sys.platform", "win32"):
         import wif_bunker.keystore
