@@ -15,6 +15,7 @@ pub mod pkcs11;
     clippy::manual_ignore_case_cmp,
     clippy::manual_string_new,
     clippy::ptr_as_ptr,
+    clippy::ref_as_ptr,
     clippy::used_underscore_binding
 )]
 pub mod win_ncrypt;
