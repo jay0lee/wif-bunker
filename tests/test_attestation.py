@@ -178,6 +178,46 @@ class TestMacOSAttestation:
         assert identity_check is not None
         assert identity_check.passed is True
 
+    @patch("wif_bunker.attestation.macos.subprocess.run")
+    def test_keychain_identity_oserror(self, mock_run):
+        """Keychain check handles OSError."""
+        from wif_bunker.attestation.macos import _attest_macos
+
+        def side_effect(args, **kwargs):
+            if "find-identity" in args:
+                raise OSError("No security binary")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        mock_run.side_effect = side_effect
+        config = MagicMock()
+        config.workload_cn = "test-workload"
+
+        report = _attest_macos(config)
+        identity_check = next((c for c in report.checks if c.name == "Keychain identity present"), None)
+        assert identity_check is not None
+        assert identity_check.passed is False
+        assert "Could not query keychain" in identity_check.detail
+
+    @patch("wif_bunker.attestation.macos.subprocess.run")
+    def test_ctk_oserror(self, mock_run):
+        """CTK check handles OSError."""
+        from wif_bunker.attestation.macos import _attest_macos
+
+        def side_effect(args, **kwargs):
+            if "list-smartcards" in args:
+                raise OSError("No security binary")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        mock_run.side_effect = side_effect
+        config = MagicMock()
+        config.workload_cn = "test-workload"
+
+        report = _attest_macos(config)
+        ctk_check = next((c for c in report.checks if c.name == "CryptoTokenKit SE token"), None)
+        assert ctk_check is not None
+        assert ctk_check.passed is False
+        assert "Could not list smart cards" in ctk_check.detail
+
 
 class TestAttestationDispatcher:
     """Tests for the platform dispatcher."""

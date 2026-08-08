@@ -328,3 +328,98 @@ class TestMainModule:
 
             runpy.run_module("wif_bunker.__main__", run_name="__main__")
             mock_main.assert_called_once()
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS only")
+    @patch("wif_bunker.keystore.macos._create_ca_and_sign")
+    @patch("wif_bunker.keystore.macos.require_commands")
+    @patch("wif_bunker.keystore.macos.subprocess.run")
+    def test_cleanup_deletes_login_keychain_certs(self, mock_run, mock_require, mock_ca, config):
+        from wif_bunker.keystore.macos import _generate_cert_macos
+
+        def side_effect(*args, **kwargs):
+            cmd = args[0]
+            if cmd[0] == "security" and cmd[1] == "find-certificate":
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="SHA-1 hash: 12345ABCDE\n")
+            elif cmd[0] == "sc_auth" and cmd[1] == "identities":
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="new-hash\ttest-bunker\n")
+            elif cmd[0] == "sc_auth" and cmd[1] == "create-ctk-csr":
+                from pathlib import Path
+
+                idx = cmd.index("-f")
+                Path(f"{cmd[idx + 1]}.csr").write_text("fake csr")
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="")
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="")
+
+        mock_run.side_effect = side_effect
+        mock_ca.return_value = (
+            CertificateBundle(
+                trust_anchor_pem="ca",
+                workload_cert_pem="leaf",
+                issuer_cn="issuer",
+                serial_number_hex="01",
+                sha256_fingerprint="sha",
+            ),
+            "fake",
+        )
+
+        _generate_cert_macos(config)
+        mock_run.assert_any_call(
+            ["security", "delete-certificate", "-Z", "12345ABCDE", "/Users/jay/Library/Keychains/login.keychain-db"],
+            capture_output=True,
+        )
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS only")
+    @patch("wif_bunker.keystore.macos.require_commands")
+    @patch("wif_bunker.keystore.macos.subprocess.run")
+    @patch("wif_bunker.keystore.macos.time.sleep", return_value=None)
+    def test_key_hash_not_found(self, mock_sleep, mock_run, mock_require, config):
+        from wif_bunker.keystore.macos import _generate_cert_macos
+
+        def side_effect(*args, **kwargs):
+            cmd = args[0]
+            if cmd[0] == "sc_auth" and cmd[1] == "identities":
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="other-hash\tother\n")
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="")
+
+        mock_run.side_effect = side_effect
+        with pytest.raises(RuntimeError, match="Could not find key hash"):
+            _generate_cert_macos(config)
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS only")
+    @patch("wif_bunker.keystore.macos.require_commands")
+    @patch("wif_bunker.keystore.macos.subprocess.run")
+    def test_csr_file_not_found(self, mock_run, mock_require, config):
+        from wif_bunker.keystore.macos import _generate_cert_macos
+
+        def side_effect(*args, **kwargs):
+            cmd = args[0]
+            if cmd[0] == "sc_auth" and cmd[1] == "identities":
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="hash\ttest-bunker\n")
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="")
+
+        mock_run.side_effect = side_effect
+        with pytest.raises(FileNotFoundError, match="CSR not found"):
+            _generate_cert_macos(config)
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS only")
+    @patch("wif_bunker.keystore.macos.require_commands")
+    @patch("wif_bunker.keystore.macos.subprocess.run")
+    def test_generic_subprocess_error(self, mock_run, mock_require, config):
+        from wif_bunker.keystore.macos import _generate_cert_macos
+
+        def side_effect(*args, **kwargs):
+            cmd = args[0]
+            if cmd[0] == "sc_auth" and cmd[1] == "create-ctk-identity":
+                raise subprocess.CalledProcessError(returncode=1, cmd=cmd, stderr="some generic error")
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="")
+
+        mock_run.side_effect = side_effect
+        with pytest.raises(RuntimeError, match="macOS certificate generation failed"):
+            _generate_cert_macos(config)
+
+    def test_get_supported_algorithms_macos(self):
+        from wif_bunker.keystore.macos import get_supported_algorithms_macos
+
+        algos = get_supported_algorithms_macos()
+        assert "es256" in algos
+        assert "es384" in algos

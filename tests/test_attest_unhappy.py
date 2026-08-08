@@ -271,3 +271,37 @@ class TestRunAttestEndToEnd:
         # CN should remain the default
         assert config.workload_cn == original_cn
         mock_attest.assert_called_once()
+
+
+class TestMacOSAttestationExceptions:
+    """Test exception handling in macOS attestation."""
+
+    @patch("wif_bunker.attestation.macos.subprocess.run")
+    def test_macos_identity_check_exception(self, mock_run):
+        """Test OSError during identity check."""
+        from wif_bunker.attestation.macos import _attest_macos
+        from wif_bunker.config import WorkloadConfig
+
+        mock_run.side_effect = [OSError("Keychain access denied"), MagicMock(returncode=0, stdout="com.apple.setoken")]
+
+        config = WorkloadConfig()
+        report = _attest_macos(config)
+
+        identity_check = next(c for c in report.checks if c.name == "Keychain identity present")
+        assert not identity_check.passed
+        assert "Could not query keychain: Keychain access denied" in identity_check.detail
+
+    @patch("wif_bunker.attestation.macos.subprocess.run")
+    def test_macos_ctk_check_exception(self, mock_run):
+        """Test OSError during smartcard check."""
+        from wif_bunker.attestation.macos import _attest_macos
+        from wif_bunker.config import WorkloadConfig
+
+        mock_run.side_effect = [MagicMock(returncode=0, stdout="my-identity"), OSError("CTK access denied")]
+
+        config = WorkloadConfig()
+        report = _attest_macos(config)
+
+        ctk_check = next(c for c in report.checks if c.name == "CryptoTokenKit SE token")
+        assert not ctk_check.passed
+        assert "Could not list smart cards: CTK access denied" in ctk_check.detail

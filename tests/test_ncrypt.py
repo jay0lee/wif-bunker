@@ -315,3 +315,294 @@ class TestImportCertToStore:
 
         with pytest.raises(RuntimeError, match="CertSetCertificateContextProperty"):
             import_cert_to_store(b"\x30\x00", "k", "p")
+
+
+class TestLoadCtypes:
+    def test_load_ctypes_import_error(self):
+        import builtins
+
+        original_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "ctypes":
+                raise ImportError("no ctypes")
+            return original_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=fake_import):
+            from wif_bunker.keystore.ncrypt import _load_ctypes
+
+            with pytest.raises(RuntimeError, match="ctypes.wintypes not available"):
+                _load_ctypes()
+
+    def test_load_ctypes_dll_error(self):
+        import sys
+        import types
+
+        fake_ctypes = types.ModuleType("ctypes")
+        fake_ctypes.wintypes = types.ModuleType("wintypes")
+        sys.modules["ctypes"] = fake_ctypes
+        sys.modules["ctypes.wintypes"] = fake_ctypes.wintypes
+
+        try:
+            from wif_bunker.keystore.ncrypt import _load_ctypes
+
+            with pytest.raises(RuntimeError, match="Could not load ncrypt.dll"):
+                _load_ctypes()
+        finally:
+            del sys.modules["ctypes"]
+            del sys.modules["ctypes.wintypes"]
+
+
+class TestTestAlgorithm:
+    @patch("wif_bunker.keystore.ncrypt._load_ctypes")
+    def test_test_algorithm_success(self, mock_load):
+        mock_ctypes, mock_wintypes, mock_ncrypt = MagicMock(), MagicMock(), MagicMock()
+        mock_load.return_value = (mock_ctypes, mock_wintypes, mock_ncrypt)
+        mock_ncrypt.NCryptOpenStorageProvider.return_value = 0
+        mock_ncrypt.NCryptCreatePersistedKey.return_value = 0
+        mock_ncrypt.NCryptSetProperty.return_value = 0
+        mock_ncrypt.NCryptFinalizeKey.return_value = 0
+
+        from wif_bunker.keystore.ncrypt import test_algorithm
+
+        assert test_algorithm("RSA", 2048) is True
+
+    @patch("wif_bunker.keystore.ncrypt._load_ctypes")
+    def test_test_algorithm_open_fail(self, mock_load):
+        mock_ctypes, mock_wintypes, mock_ncrypt = MagicMock(), MagicMock(), MagicMock()
+        mock_load.return_value = (mock_ctypes, mock_wintypes, mock_ncrypt)
+        mock_ncrypt.NCryptOpenStorageProvider.return_value = 1
+        from wif_bunker.keystore.ncrypt import test_algorithm
+
+        assert test_algorithm("RSA") is False
+
+    @patch("wif_bunker.keystore.ncrypt._load_ctypes")
+    def test_test_algorithm_create_fail(self, mock_load):
+        mock_ctypes, mock_wintypes, mock_ncrypt = MagicMock(), MagicMock(), MagicMock()
+        mock_load.return_value = (mock_ctypes, mock_wintypes, mock_ncrypt)
+        mock_ncrypt.NCryptOpenStorageProvider.return_value = 0
+        mock_ncrypt.NCryptCreatePersistedKey.return_value = 1
+        from wif_bunker.keystore.ncrypt import test_algorithm
+
+        assert test_algorithm("RSA") is False
+
+    @patch("wif_bunker.keystore.ncrypt._load_ctypes")
+    def test_test_algorithm_property_fail(self, mock_load):
+        mock_ctypes, mock_wintypes, mock_ncrypt = MagicMock(), MagicMock(), MagicMock()
+        mock_load.return_value = (mock_ctypes, mock_wintypes, mock_ncrypt)
+        mock_ncrypt.NCryptOpenStorageProvider.return_value = 0
+        mock_ncrypt.NCryptCreatePersistedKey.return_value = 0
+        mock_ncrypt.NCryptSetProperty.return_value = 1
+        from wif_bunker.keystore.ncrypt import test_algorithm
+
+        assert test_algorithm("RSA", 2048) is False
+
+    @patch("wif_bunker.keystore.ncrypt._load_ctypes")
+    def test_test_algorithm_finalize_fail(self, mock_load):
+        mock_ctypes, mock_wintypes, mock_ncrypt = MagicMock(), MagicMock(), MagicMock()
+        mock_load.return_value = (mock_ctypes, mock_wintypes, mock_ncrypt)
+        mock_ncrypt.NCryptOpenStorageProvider.return_value = 0
+        mock_ncrypt.NCryptCreatePersistedKey.return_value = 0
+        mock_ncrypt.NCryptSetProperty.return_value = 0
+        mock_ncrypt.NCryptFinalizeKey.return_value = 1
+        from wif_bunker.keystore.ncrypt import test_algorithm
+
+        assert test_algorithm("RSA", 2048) is False
+
+    @patch("wif_bunker.keystore.ncrypt._load_ctypes")
+    def test_test_algorithm_exception(self, mock_load):
+        mock_ctypes, mock_wintypes, mock_ncrypt = MagicMock(), MagicMock(), MagicMock()
+        mock_load.return_value = (mock_ctypes, mock_wintypes, mock_ncrypt)
+        mock_ncrypt.NCryptOpenStorageProvider.side_effect = Exception("error")
+        from wif_bunker.keystore.ncrypt import test_algorithm
+
+        assert test_algorithm("RSA") is False
+
+
+class TestCreateTpmKeyErrors:
+    @patch("wif_bunker.keystore.ncrypt._load_ctypes")
+    def test_create_fail(self, mock_load):
+        mock_ctypes, mock_wintypes, mock_ncrypt = MagicMock(), MagicMock(), MagicMock()
+        mock_load.return_value = (mock_ctypes, mock_wintypes, mock_ncrypt)
+        mock_ncrypt.NCryptOpenStorageProvider.return_value = 0
+        mock_ncrypt.NCryptCreatePersistedKey.return_value = 1
+        from wif_bunker.keystore.ncrypt import create_tpm_key
+
+        with pytest.raises(RuntimeError, match="NCryptCreatePersistedKey"):
+            create_tpm_key("name", "RSA")
+
+    @patch("wif_bunker.keystore.ncrypt._load_ctypes")
+    def test_property_length_fail(self, mock_load):
+        mock_ctypes, mock_wintypes, mock_ncrypt = MagicMock(), MagicMock(), MagicMock()
+        mock_load.return_value = (mock_ctypes, mock_wintypes, mock_ncrypt)
+        mock_ncrypt.NCryptOpenStorageProvider.return_value = 0
+        mock_ncrypt.NCryptCreatePersistedKey.return_value = 0
+        mock_ncrypt.NCryptSetProperty.side_effect = [1]
+        from wif_bunker.keystore.ncrypt import create_tpm_key
+
+        with pytest.raises(RuntimeError, match="NCryptSetProperty.*Length"):
+            create_tpm_key("name", "RSA", 2048)
+
+    @patch("wif_bunker.keystore.ncrypt._load_ctypes")
+    def test_property_export_fail(self, mock_load):
+        mock_ctypes, mock_wintypes, mock_ncrypt = MagicMock(), MagicMock(), MagicMock()
+        mock_load.return_value = (mock_ctypes, mock_wintypes, mock_ncrypt)
+        mock_ncrypt.NCryptOpenStorageProvider.return_value = 0
+        mock_ncrypt.NCryptCreatePersistedKey.return_value = 0
+        mock_ncrypt.NCryptSetProperty.side_effect = [0, 1]
+        from wif_bunker.keystore.ncrypt import create_tpm_key
+
+        with pytest.raises(RuntimeError, match="NCryptSetProperty.*Export Policy"):
+            create_tpm_key("name", "RSA", 2048)
+
+    @patch("wif_bunker.keystore.ncrypt._load_ctypes")
+    def test_finalize_fail(self, mock_load):
+        mock_ctypes, mock_wintypes, mock_ncrypt = MagicMock(), MagicMock(), MagicMock()
+        mock_load.return_value = (mock_ctypes, mock_wintypes, mock_ncrypt)
+        mock_ncrypt.NCryptOpenStorageProvider.return_value = 0
+        mock_ncrypt.NCryptCreatePersistedKey.return_value = 0
+        mock_ncrypt.NCryptSetProperty.return_value = 0
+        mock_ncrypt.NCryptFinalizeKey.return_value = 1
+        from wif_bunker.keystore.ncrypt import create_tpm_key
+
+        with pytest.raises(RuntimeError, match="NCryptFinalizeKey"):
+            create_tpm_key("name", "RSA", 2048)
+
+
+class TestExportPublicKeyPem:
+    @patch("wif_bunker.keystore.ncrypt._load_ctypes")
+    def test_export_rsa(self, mock_load):
+        mock_ctypes, mock_wintypes, mock_ncrypt = MagicMock(), MagicMock(), MagicMock()
+        mock_load.return_value = (mock_ctypes, mock_wintypes, mock_ncrypt)
+
+        mock_ncrypt.NCryptExportKey.side_effect = [0, 0]  # first size, then data
+
+        from wif_bunker.keystore.ncrypt import BCRYPT_RSA_ALGORITHM, export_public_key_pem
+
+        with patch("wif_bunker.keystore.ncrypt._parse_rsa_public_blob") as mock_parse:
+            mock_pub = MagicMock()
+            mock_parse.return_value = mock_pub
+            mock_pub.public_bytes.return_value = b"pem"
+            pem = export_public_key_pem(1, BCRYPT_RSA_ALGORITHM)
+            assert pem == "pem"
+
+    @patch("wif_bunker.keystore.ncrypt._load_ctypes")
+    def test_export_ecc(self, mock_load):
+        mock_ctypes, mock_wintypes, mock_ncrypt = MagicMock(), MagicMock(), MagicMock()
+        mock_load.return_value = (mock_ctypes, mock_wintypes, mock_ncrypt)
+
+        mock_ncrypt.NCryptExportKey.side_effect = [0, 0]  # first size, then data
+
+        from wif_bunker.keystore.ncrypt import BCRYPT_ECDSA_P256_ALGORITHM, export_public_key_pem
+
+        with patch("wif_bunker.keystore.ncrypt._parse_ecc_public_blob") as mock_parse:
+            mock_pub = MagicMock()
+            mock_parse.return_value = mock_pub
+            mock_pub.public_bytes.return_value = b"pem"
+            pem = export_public_key_pem(1, BCRYPT_ECDSA_P256_ALGORITHM)
+            assert pem == "pem"
+
+    @patch("wif_bunker.keystore.ncrypt._load_ctypes")
+    def test_export_size_fail(self, mock_load):
+        mock_ctypes, mock_wintypes, mock_ncrypt = MagicMock(), MagicMock(), MagicMock()
+        mock_load.return_value = (mock_ctypes, mock_wintypes, mock_ncrypt)
+        mock_ncrypt.NCryptExportKey.return_value = 1
+        from wif_bunker.keystore.ncrypt import BCRYPT_RSA_ALGORITHM, export_public_key_pem
+
+        with pytest.raises(RuntimeError, match="size query failed"):
+            export_public_key_pem(1, BCRYPT_RSA_ALGORITHM)
+
+    @patch("wif_bunker.keystore.ncrypt._load_ctypes")
+    def test_export_data_fail(self, mock_load):
+        mock_ctypes, mock_wintypes, mock_ncrypt = MagicMock(), MagicMock(), MagicMock()
+        mock_load.return_value = (mock_ctypes, mock_wintypes, mock_ncrypt)
+        mock_ncrypt.NCryptExportKey.side_effect = [0, 1]
+        from wif_bunker.keystore.ncrypt import BCRYPT_RSA_ALGORITHM, export_public_key_pem
+
+        with pytest.raises(RuntimeError, match="NCryptExportKey failed"):
+            export_public_key_pem(1, BCRYPT_RSA_ALGORITHM)
+
+
+class TestRemainingNCrypt:
+    @patch("wif_bunker.keystore.ncrypt._load_ctypes")
+    def test_delete_key_provider_fail(self, mock_load):
+        mock_ctypes, mock_wintypes, mock_ncrypt = MagicMock(), MagicMock(), MagicMock()
+        mock_load.return_value = (mock_ctypes, mock_wintypes, mock_ncrypt)
+        mock_ncrypt.NCryptOpenStorageProvider.return_value = 1
+        from wif_bunker.keystore.ncrypt import delete_key
+
+        assert delete_key("name") is False
+
+    @patch("wif_bunker.keystore.ncrypt._load_ctypes")
+    def test_delete_key_fail(self, mock_load):
+        mock_ctypes, mock_wintypes, mock_ncrypt = MagicMock(), MagicMock(), MagicMock()
+        mock_load.return_value = (mock_ctypes, mock_wintypes, mock_ncrypt)
+        mock_ncrypt.NCryptOpenStorageProvider.return_value = 0
+        mock_ncrypt.NCryptOpenKey.return_value = 0
+        mock_ncrypt.NCryptDeleteKey.return_value = 1
+        from wif_bunker.keystore.ncrypt import delete_key
+
+        assert delete_key("name") is False
+
+    @patch("wif_bunker.keystore.ncrypt._load_ctypes")
+    def test_open_key(self, mock_load):
+        mock_ctypes, mock_wintypes, mock_ncrypt = MagicMock(), MagicMock(), MagicMock()
+        mock_load.return_value = (mock_ctypes, mock_wintypes, mock_ncrypt)
+        mock_ncrypt.NCryptOpenStorageProvider.return_value = 0
+        mock_ncrypt.NCryptOpenKey.return_value = 0
+        from wif_bunker.keystore.ncrypt import open_key
+
+        assert open_key("name") is not None
+
+    @patch("wif_bunker.keystore.ncrypt._load_ctypes")
+    def test_open_key_provider_fail(self, mock_load):
+        mock_ctypes, mock_wintypes, mock_ncrypt = MagicMock(), MagicMock(), MagicMock()
+        mock_load.return_value = (mock_ctypes, mock_wintypes, mock_ncrypt)
+        mock_ncrypt.NCryptOpenStorageProvider.return_value = 1
+        from wif_bunker.keystore.ncrypt import open_key
+
+        assert open_key("name") is None
+
+    @patch("wif_bunker.keystore.ncrypt._load_ctypes")
+    def test_open_key_fail(self, mock_load):
+        mock_ctypes, mock_wintypes, mock_ncrypt = MagicMock(), MagicMock(), MagicMock()
+        mock_load.return_value = (mock_ctypes, mock_wintypes, mock_ncrypt)
+        mock_ncrypt.NCryptOpenStorageProvider.return_value = 0
+        mock_ncrypt.NCryptOpenKey.return_value = 1
+        from wif_bunker.keystore.ncrypt import open_key
+
+        assert open_key("name") is None
+
+    @patch("wif_bunker.keystore.ncrypt._load_ctypes")
+    def test_free_object(self, mock_load):
+        mock_ctypes, mock_wintypes, mock_ncrypt = MagicMock(), MagicMock(), MagicMock()
+        mock_load.return_value = (mock_ctypes, mock_wintypes, mock_ncrypt)
+        from wif_bunker.keystore.ncrypt import free_object
+
+        free_object(1)
+        mock_ncrypt.NCryptFreeObject.assert_called_once()
+        free_object(0)  # should ignore
+
+    @patch("wif_bunker.keystore.ncrypt._load_ctypes")
+    def test_import_cert_dll_error(self, mock_load):
+        mock_ctypes, mock_wintypes, mock_ncrypt = MagicMock(), MagicMock(), MagicMock()
+        mock_load.return_value = (mock_ctypes, mock_wintypes, mock_ncrypt)
+        del mock_ctypes.windll.crypt32
+        from wif_bunker.keystore.ncrypt import import_cert_to_store
+
+        with pytest.raises(RuntimeError, match="Could not load crypt32.dll"):
+            import_cert_to_store(b"", "name", "prov")
+
+    @patch("wif_bunker.keystore.ncrypt._load_ctypes")
+    def test_import_cert_add_fail(self, mock_load):
+        mock_ctypes, mock_wintypes, mock_ncrypt = MagicMock(), MagicMock(), MagicMock()
+        mock_load.return_value = (mock_ctypes, mock_wintypes, mock_ncrypt)
+        mock_crypt32 = MagicMock()
+        mock_ctypes.windll.crypt32 = mock_crypt32
+        mock_crypt32.CertOpenStore.return_value = 1
+        mock_crypt32.CertCreateCertificateContext.return_value = 1
+        mock_crypt32.CertAddCertificateContextToStore.return_value = False
+        from wif_bunker.keystore.ncrypt import import_cert_to_store
+
+        with pytest.raises(RuntimeError, match="CertAddCertificateContextToStore"):
+            import_cert_to_store(b"", "name", "prov")
