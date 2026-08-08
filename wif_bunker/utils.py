@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 # --- Unicode Detection ---
 def _supports_unicode() -> bool:
     """Detect whether the terminal supports Unicode symbols."""
+    # GHA runners on all platforms (including Windows under bash) support UTF-8
+    if os.environ.get("GITHUB_ACTIONS"):
+        return True
     if sys.platform == "win32":
         # Windows consoles use cp1252 by default. Only trust UTF-8 if the
         # console code page is 65001 or stdout is explicitly UTF-8.
@@ -37,9 +40,6 @@ def _supports_unicode() -> bool:
             return bool(sys.stdout.encoding and sys.stdout.encoding.lower().startswith("utf"))
         except AttributeError:
             return False
-    # Non-Windows: GHA runners and most modern terminals support UTF-8
-    if os.environ.get("GITHUB_ACTIONS"):
-        return True
     try:
         return bool(sys.stdout.encoding and sys.stdout.encoding.lower().startswith("utf"))
     except AttributeError:

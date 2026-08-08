@@ -47,6 +47,8 @@ jobs:
       # Paths to pre-built OpenSSL + Python (from build-python-ssl.yml cache)
       OPENSSL_INSTALL_PATH: ${{ github.workspace }}/bin/ssl
       PYTHON_INSTALL_PATH: ${{ github.workspace }}/bin/python
+      # Force Python to use UTF-8 for stdout/stderr on Windows (default is cp1252)
+      PYTHONIOENCODING: utf-8
 
     defaults:
       run:
