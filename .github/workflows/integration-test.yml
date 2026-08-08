@@ -327,15 +327,15 @@ jobs:
  #           artifact_name: wif-bunker-ubuntu-24.04
  #           self_hosted: true
  #           expected_algos: "es256 rsa2048"
- #         - name: YubiKey (NUC8)
- #           os: ubuntu-24.04
- #           runs_on: '["self-hosted", "Linux", "X64", "yk"]'
- #           runner_id: nuc8-yk
- #           soft_key_flag: ""
- #           artifact_name: wif-bunker-ubuntu-24.04
- #           self_hosted: true
- #           use_yubikey: true
- #           expected_algos: "es256 es384 rsa2048"
+          - name: YubiKey (NUC8)
+            os: ubuntu-24.04
+            runs_on: '["self-hosted", "Linux", "X64", "yk"]'
+            runner_id: nuc8-yk
+            soft_key_flag: ""
+            artifact_name: wif-bunker-ubuntu-24.04
+            self_hosted: true
+            use_yubikey: true
+            expected_algos: "es256 es384 rsa2048"
 
     # Self-hosted entries set runs_on to a JSON label array; GH-hosted use os
     runs-on: ${{ matrix.runs_on && fromJSON(matrix.runs_on) || matrix.os }}
