@@ -194,16 +194,27 @@ class TestLinuxKeystoreFlow:
     @patch("wif_bunker.keystore.linux._check_tpm_linux")
     @patch("wif_bunker.keystore.linux._find_pkcs11_lib", return_value="/usr/lib/pkcs11/libtpm2_pkcs11.so")
     @patch("wif_bunker.keystore.linux._create_ca_and_sign")
+    @patch("wif_bunker.keystore.linux._ensure_token_via_tpm2_ptool")
+    @patch("wif_bunker.keystore.linux._run_pkcs11_tool_keygen")
     @patch("pkcs11.lib")
     def test_pkcs11_key_generation_and_cert_import(
-        self, mock_pkcs11_lib, mock_ca, mock_find_lib, mock_check, mock_home, config, tmp_path
+        self,
+        mock_pkcs11_lib,
+        mock_keygen,
+        mock_ensure_token,
+        mock_ca,
+        mock_find_lib,
+        mock_check,
+        mock_home,
+        config,
+        tmp_path,
     ):
         """Verify full PKCS#11 flow: key gen → pub key extract → cert import."""
         mock_home.return_value = tmp_path
         import os
 
         from cryptography.hazmat.primitives import serialization
-        from pkcs11 import Attribute, KeyType
+        from pkcs11 import Attribute, KeyType, ObjectClass
 
         from wif_bunker.keystore.linux import _generate_cert_linux
 
@@ -211,19 +222,12 @@ class TestLinuxKeystoreFlow:
         mock_lib = MagicMock()
         mock_pkcs11_lib.return_value = mock_lib
 
-        # Mock token: exists on first call (cleanup finds it, but no objects)
         mock_token = MagicMock()
         mock_lib.get_token.return_value = mock_token
 
-        # Cleanup session: no objects to destroy
-        mock_cleanup_session = MagicMock()
-        mock_cleanup_session.get_objects.return_value = []
-
-        # Generate session with key pair
-        mock_gen_session = MagicMock()
+        # Build mock pub/priv key objects that _find_key_objects will discover
         mock_pub = MagicMock()
         mock_priv = MagicMock()
-        mock_gen_session.generate_keypair.return_value = (mock_pub, mock_priv)
 
         # EC public key attributes (P-256 uncompressed point from a real key)
         from cryptography.hazmat.primitives.asymmetric import ec as ec_mod
@@ -237,25 +241,21 @@ class TestLinuxKeystoreFlow:
 
         mock_pub.key_type = KeyType.EC
         mock_pub.__getitem__ = lambda self, key: {
+            Attribute.CLASS: ObjectClass.PUBLIC_KEY,
             Attribute.EC_POINT: fake_point,
             Attribute.EC_PARAMS: b"",
             Attribute.ID: b"\x01\x02\x03",
         }.get(key, b"")
 
-        # Two token.open calls: cleanup (rw=True), then generate (user_pin, rw=True)
-        call_count = {"n": 0}
+        mock_priv.__getitem__ = lambda self, key: {
+            Attribute.CLASS: ObjectClass.PRIVATE_KEY,
+        }.get(key, b"")
 
-        def open_side_effect(**kwargs):
-            ctx = MagicMock()
-            call_count["n"] += 1
-            if call_count["n"] == 1:
-                ctx.__enter__ = MagicMock(return_value=mock_cleanup_session)
-            else:
-                ctx.__enter__ = MagicMock(return_value=mock_gen_session)
-            ctx.__exit__ = MagicMock(return_value=False)
-            return ctx
-
-        mock_token.open.side_effect = open_side_effect
+        # Single session: _find_key_objects calls session.get_objects()
+        mock_session = MagicMock()
+        mock_session.get_objects.return_value = [mock_pub, mock_priv]
+        mock_token.open.return_value.__enter__ = MagicMock(return_value=mock_session)
+        mock_token.open.return_value.__exit__ = MagicMock(return_value=False)
 
         mock_ca.return_value = (
             CertificateBundle(
@@ -272,15 +272,17 @@ class TestLinuxKeystoreFlow:
             result = _generate_cert_linux(config)
 
         assert result.trust_anchor_pem == "ca"
-        mock_gen_session.generate_keypair.assert_called_once()
-        mock_gen_session.create_object.assert_called_once()
+        mock_keygen.assert_called_once()
+        mock_session.create_object.assert_called_once()
 
     @patch("wif_bunker.keystore.linux.Path.home")
     @patch("wif_bunker.keystore.linux._check_tpm_linux")
     @patch("wif_bunker.keystore.linux._find_pkcs11_lib", return_value="/usr/lib/pkcs11/libtpm2_pkcs11.so")
+    @patch("wif_bunker.keystore.linux._ensure_token_via_tpm2_ptool")
+    @patch("wif_bunker.keystore.linux._run_pkcs11_tool_keygen")
     @patch("pkcs11.lib")
     def test_pkcs11_device_error_raises_runtime_error(
-        self, mock_pkcs11_lib, mock_find_lib, mock_check, mock_home, config, tmp_path
+        self, mock_pkcs11_lib, mock_keygen, mock_ensure_token, mock_find_lib, mock_check, mock_home, config, tmp_path
     ):
         """PKCS#11 device errors are converted to actionable RuntimeErrors."""
         mock_home.return_value = tmp_path
@@ -293,27 +295,11 @@ class TestLinuxKeystoreFlow:
         mock_lib = MagicMock()
         mock_pkcs11_lib.return_value = mock_lib
 
-        # Token exists but session open fails with device error
         mock_token = MagicMock()
         mock_lib.get_token.return_value = mock_token
 
-        # Cleanup session opens fine, generate session fails
-        call_count = {"n": 0}
-
-        def open_side_effect(**kwargs):
-            call_count["n"] += 1
-            if call_count["n"] == 1:
-                # Cleanup session - fine
-                ctx = MagicMock()
-                mock_session = MagicMock()
-                mock_session.get_objects.return_value = []
-                ctx.__enter__ = MagicMock(return_value=mock_session)
-                ctx.__exit__ = MagicMock(return_value=False)
-                return ctx
-            # Generate session - device error
-            raise pkcs11_mod.PKCS11Error("CKR_DEVICE_ERROR")
-
-        mock_token.open.side_effect = open_side_effect
+        # Single session open raises device error
+        mock_token.open.side_effect = pkcs11_mod.PKCS11Error("CKR_DEVICE_ERROR")
 
         with patch.dict(os.environ, clear=True), pytest.raises(RuntimeError, match="TPM device error"):
             _generate_cert_linux(config)
