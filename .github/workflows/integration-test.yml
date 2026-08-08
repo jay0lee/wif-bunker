@@ -496,16 +496,24 @@ jobs:
 
 
       - name: Create venv and install dependencies
-        shell: bash
         run: |
           "${PYTHON}" -m venv .venv
           if [ -d ".venv/Scripts" ]; then
             source .venv/Scripts/activate
-            echo "$PWD/.venv/Scripts" >> "$GITHUB_PATH"
+            VENV_BIN="$PWD/.venv/Scripts"
           else
             source .venv/bin/activate
-            echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+            VENV_BIN="$PWD/.venv/bin"
           fi
+          echo "${VENV_BIN}" >> "$GITHUB_PATH"
+
+          # Update PYTHON to point to the venv's Python so all subsequent
+          # steps using "${PYTHON}" see installed packages.
+          VENV_PYTHON="$(which python)"
+          echo "PYTHON=${VENV_PYTHON}" >> $GITHUB_ENV
+          export PYTHON="${VENV_PYTHON}"
+          echo "PYTHON updated to venv: ${PYTHON}"
+
           # Windows ARM64 has no PyPI cryptography wheel — install from jay0lee/cryptography-wheels
           if [ "$RUNNER_OS" = "Windows" ] && [ "$RUNNER_ARCH" = "ARM64" ]; then
             WHEEL_URL=$("${PYTHON}" -c "
