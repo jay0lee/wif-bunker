@@ -6,7 +6,17 @@ pub mod mac_se;
 pub mod pkcs11;
 
 #[cfg(target_os = "windows")]
-#[allow(unsafe_code)]
+#[allow(
+    unsafe_code,
+    clippy::borrow_as_ptr,
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::doc_markdown,
+    clippy::manual_ignore_case_cmp,
+    clippy::manual_string_new,
+    clippy::ptr_as_ptr,
+    clippy::used_underscore_binding
+)]
 pub mod win_ncrypt;
 
 use crate::error::HardmtlsError;
