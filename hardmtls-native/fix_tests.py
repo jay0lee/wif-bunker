@@ -1,6 +1,6 @@
 import re
 
-with open("tests/mtls_handshake.rs", "r") as f:
+with open("tests/mtls_handshake.rs") as f:
     content = f.read()
 
 bad_call = r"""    hardmtls::ConfigureSslContext\(
@@ -25,4 +25,3 @@ content = re.sub(bad_call, good_call, content)
 
 with open("tests/mtls_handshake.rs", "w") as f:
     f.write(content)
-

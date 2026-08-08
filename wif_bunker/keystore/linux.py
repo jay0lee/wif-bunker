@@ -252,7 +252,10 @@ def get_supported_algorithms_linux() -> list[str]:
                 if key_bits < mech_info.min_key_length or key_bits > mech_info.max_key_length:
                     logger.debug(
                         "    %s: key size %d outside mechanism range [%d, %d]",
-                        algo_name, key_bits, mech_info.min_key_length, mech_info.max_key_length,
+                        algo_name,
+                        key_bits,
+                        mech_info.min_key_length,
+                        mech_info.max_key_length,
                     )
                     continue
             except pkcs11.PKCS11Error:
@@ -290,6 +293,7 @@ def _cleanup_existing_token(lib, pin: str) -> None:
     except pkcs11.PKCS11Error as exc:
         logger.debug("    Could not open token for cleanup: %s", exc)
 
+
 def _ensure_token_via_tpm2_ptool(pin: str, tpm_store: str, module_path: str) -> None:
     """Create our PKCS#11 token via ``tpm2_ptool`` if it doesn't exist.
 
@@ -311,7 +315,9 @@ def _ensure_token_via_tpm2_ptool(pin: str, tpm_store: str, module_path: str) -> 
     # Check if our token already exists via standard PKCS#11 API.
     result = subprocess.run(
         ["pkcs11-tool", "--module", module_path, "--list-token-slots"],
-        capture_output=True, text=True, check=False,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     token_exists = _TOKEN_LABEL in (result.stdout + result.stderr)
 
@@ -323,11 +329,14 @@ def _ensure_token_via_tpm2_ptool(pin: str, tpm_store: str, module_path: str) -> 
         # TPM's DA lockout counter.
         rm_result = subprocess.run(
             [tpm2_ptool, "rmtoken", "--label", _TOKEN_LABEL, "--path", tpm_store],
-            capture_output=True, text=True, check=False,
+            capture_output=True,
+            text=True,
+            check=False,
         )
         logger.info(
             "    Token '%s' existed, removed (rc=%d)",
-            _TOKEN_LABEL, rm_result.returncode,
+            _TOKEN_LABEL,
+            rm_result.returncode,
         )
 
     # Create the token with both PINs.
@@ -337,12 +346,17 @@ def _ensure_token_via_tpm2_ptool(pin: str, tpm_store: str, module_path: str) -> 
     try:
         subprocess.run(
             [
-                tpm2_ptool, "addtoken",
+                tpm2_ptool,
+                "addtoken",
                 "--pid=1",
-                "--sopin", pin,
-                "--userpin", pin,
-                "--label", _TOKEN_LABEL,
-                "--path", tpm_store,
+                "--sopin",
+                pin,
+                "--userpin",
+                pin,
+                "--label",
+                _TOKEN_LABEL,
+                "--path",
+                tpm_store,
             ],
             check=True,
             capture_output=True,
@@ -439,8 +453,11 @@ def _extract_public_key_pem(pub_key) -> str:
 
 
 def _run_pkcs11_tool_keygen(
-    module_path: str, token_label: str, pin: str,
-    key_type: str, label: str,
+    module_path: str,
+    token_label: str,
+    pin: str,
+    key_type: str,
+    label: str,
 ) -> None:
     """Generate a key pair using ``pkcs11-tool``.
 
@@ -464,12 +481,17 @@ def _run_pkcs11_tool_keygen(
         result = subprocess.run(
             [
                 "pkcs11-tool",
-                "--module", module_path,
-                "--token-label", token_label,
-                "--pin", pin,
+                "--module",
+                module_path,
+                "--token-label",
+                token_label,
+                "--pin",
+                pin,
                 "--keypairgen",
-                "--key-type", key_type,
-                "--label", label,
+                "--key-type",
+                key_type,
+                "--label",
+                label,
             ],
             check=True,
             capture_output=True,
@@ -496,10 +518,7 @@ def _find_key_objects(session, label: str):
             priv = obj
 
     if pub is None or priv is None:
-        raise RuntimeError(
-            f"Key pair not found in PKCS#11 session for label '{label}' "
-            f"(pub={pub}, priv={priv})"
-        )
+        raise RuntimeError(f"Key pair not found in PKCS#11 session for label '{label}' (pub={pub}, priv={priv})")
 
     return pub, priv
 

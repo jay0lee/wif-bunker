@@ -248,6 +248,7 @@ def generate_cert_yubikey(config: WorkloadConfig) -> CertificateBundle:
         #    Minidriver to discover PIV keys and propagate certificates to
         #    the Windows Certificate Store.
         from ykman.piv import generate_ccc, generate_chuid
+
         piv.put_object(OBJECT_ID.CHUID, generate_chuid())
         piv.put_object(OBJECT_ID.CAPABILITY, generate_ccc())
 
@@ -430,14 +431,19 @@ def precache_yubikey_pin_ncrypt(serial: int | None, issuer_cn: str) -> bool:
             # Enumerate keys to find the one matching our cert's issuer
             # We use PowerShell to get the key container name
             result = subprocess.run(
-                ["powershell", "-Command",
-                 "Get-ChildItem Cert:\\CurrentUser\\My"
-                 f" | Where-Object {{ $_.Issuer -match '{issuer_cn}' }}"
-                 " | ForEach-Object {"
-                 " $k = [System.Security.Cryptography.X509Certificates.ECDsaCertificateExtensions]::GetECDsaPrivateKey($_);"
-                 " if ($k -and $k.Key) { $k.Key.UniqueName }"
-                 " }"],
-                capture_output=True, text=True, timeout=15,
+                [
+                    "powershell",
+                    "-Command",
+                    "Get-ChildItem Cert:\\CurrentUser\\My"
+                    f" | Where-Object {{ $_.Issuer -match '{issuer_cn}' }}"
+                    " | ForEach-Object {"
+                    " $k = [System.Security.Cryptography.X509Certificates.ECDsaCertificateExtensions]::GetECDsaPrivateKey($_);"
+                    " if ($k -and $k.Key) { $k.Key.UniqueName }"
+                    " }",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
             )
             key_name = result.stdout.strip()
             if not key_name:

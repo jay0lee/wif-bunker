@@ -77,7 +77,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     mode_group.add_argument(
         "--status",
         action="store_true",
-        help=("Show current WIF Bunker configuration status, certificate expiry, and test hardmTLS and ADC connectivity."),
+        help=(
+            "Show current WIF Bunker configuration status, certificate expiry, and test hardmTLS and ADC connectivity."
+        ),
     )
     mode_group.add_argument(
         "--attest",
@@ -379,6 +381,7 @@ def _main_impl() -> None:
     # On Windows, hardmTLS uses NCrypt (via YubiKey Smart Card Minidriver).
     if config.use_yubikey and sys.platform != "win32":
         from wif_bunker.keystore.yubikey import find_pkcs11_library
+
         try:
             find_pkcs11_library()
         except FileNotFoundError as exc:
@@ -457,10 +460,15 @@ def _main_impl() -> None:
             _sp.run(["certutil", "-pulse"], capture_output=True, timeout=10)
 
             _check = _sp.run(
-                ["powershell", "-Command",
-                 "Get-ChildItem Cert:\\CurrentUser\\My"
-                 f" | Where-Object {{ $_.Issuer -match '{cert_bundle.issuer_cn}' }}"],
-                capture_output=True, text=True, timeout=15,
+                [
+                    "powershell",
+                    "-Command",
+                    "Get-ChildItem Cert:\\CurrentUser\\My"
+                    f" | Where-Object {{ $_.Issuer -match '{cert_bundle.issuer_cn}' }}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
             )
             if not _check.stdout.strip():
                 logger.error(
@@ -629,6 +637,7 @@ def _main_impl() -> None:
             logger.error("    This means hardmTLS did NOT send the client certificate.")
             if args.debug:
                 from wif_bunker.cert import run_hardmtls_diagnostics
+
                 run_hardmtls_diagnostics(cert_config_path, logger)
             sys.exit(1)
         except Exception as mtls_err:
@@ -652,12 +661,8 @@ def _main_impl() -> None:
             _workload_cert_path = Path.cwd() / "workload_cert.pem"
             _trust_chain_path_7c = Path.cwd() / "trust_chain.pem"
 
-            leaf_cert = cx509.load_pem_x509_certificate(
-                _workload_cert_path.read_bytes()
-            )
-            leaf_b64 = base64.b64encode(
-                leaf_cert.public_bytes(serialization.Encoding.DER)
-            ).decode("utf-8")
+            leaf_cert = cx509.load_pem_x509_certificate(_workload_cert_path.read_bytes())
+            leaf_b64 = base64.b64encode(leaf_cert.public_bytes(serialization.Encoding.DER)).decode("utf-8")
 
             cert_chain = [leaf_b64]
             trust_chain_data = _trust_chain_path_7c.read_bytes()
@@ -667,9 +672,7 @@ def _main_impl() -> None:
                     continue
                 pem = b"-----BEGIN CERTIFICATE-----" + block
                 tc_cert = cx509.load_pem_x509_certificate(pem)
-                tc_b64 = base64.b64encode(
-                    tc_cert.public_bytes(serialization.Encoding.DER)
-                ).decode("utf-8")
+                tc_b64 = base64.b64encode(tc_cert.public_bytes(serialization.Encoding.DER)).decode("utf-8")
                 if tc_b64 != leaf_b64:
                     cert_chain.append(tc_b64)
 
@@ -726,12 +729,14 @@ def _main_impl() -> None:
         # hardmTLS/tls_offload can sign silently (no PIN dialog).
         if sys.platform == "win32" and config.use_yubikey:
             from wif_bunker.keystore.yubikey import precache_yubikey_pin_ncrypt
+
             precache_yubikey_pin_ncrypt(
                 serial=config.yubikey_serial,
                 issuer_cn=cert_bundle.issuer_cn,
             )
 
         try:
+
             @with_retries(
                 max_attempts=15,
                 retryable_exceptions=(google.auth.exceptions.RefreshError,),

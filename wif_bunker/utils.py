@@ -276,13 +276,17 @@ def preflight_check_openssl_shared() -> None:
         if sys.platform == "linux":
             result = _sp.run(
                 ["ldd", ssl_path],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             has_shared = "libssl.so" in result.stdout or "libcrypto.so" in result.stdout
         elif sys.platform == "darwin":
             result = _sp.run(
                 ["otool", "-L", ssl_path],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             has_shared = "libssl" in result.stdout or "libcrypto" in result.stdout
         elif sys.platform == "win32":
@@ -292,7 +296,9 @@ def preflight_check_openssl_shared() -> None:
                 return
             result = _sp.run(
                 [dumpbin, "/dependents", ssl_path],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             output_lower = result.stdout.lower()
             has_shared = "libssl" in output_lower or "libcrypto" in output_lower
@@ -304,16 +310,13 @@ def preflight_check_openssl_shared() -> None:
     if not has_shared:
         logger.warning("")
         logger.warning(
-            "%s Python's ssl module appears to be linked against a "
-            "statically-compiled OpenSSL (no-shared).",
+            "%s Python's ssl module appears to be linked against a statically-compiled OpenSSL (no-shared).",
             SYM_WARN,
         )
         logger.warning(
-            "  The hardmTLS provider cannot be loaded into a static "
-            "OpenSSL context — mTLS handshakes will fail.",
+            "  The hardmTLS provider cannot be loaded into a static OpenSSL context — mTLS handshakes will fail.",
         )
         logger.warning(
-            "  Rebuild Python against a shared OpenSSL, or use the "
-            "pre-built binaries from the WIF Bunker release.",
+            "  Rebuild Python against a shared OpenSSL, or use the pre-built binaries from the WIF Bunker release.",
         )
         logger.warning("")

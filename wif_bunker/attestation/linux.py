@@ -122,7 +122,8 @@ def _extract_ek_certificate_cli_fallback(work_dir: Path, ectx) -> tuple[Attestat
 
     result = subprocess.run(
         ["tpm2_createek", "-c", str(ek_ctx), "-G", "rsa2048", "-u", str(ek_pub)],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if result.returncode != 0:
         logger.debug("tpm2_createek failed (rc=%d): %s", result.returncode, result.stderr.strip()[:200])
@@ -130,12 +131,15 @@ def _extract_ek_certificate_cli_fallback(work_dir: Path, ectx) -> tuple[Attestat
 
     result = subprocess.run(
         ["tpm2_getekcertificate", "-u", str(ek_pub), "-o", str(ek_cert_path)],
-        capture_output=True, text=True, cwd=work_dir,
+        capture_output=True,
+        text=True,
+        cwd=work_dir,
     )
     if result.returncode != 0:
         logger.debug(
             "tpm2_getekcertificate failed (rc=%d): %s",
-            result.returncode, result.stderr.strip()[:200],
+            result.returncode,
+            result.stderr.strip()[:200],
         )
         return None, None
 
@@ -229,8 +233,7 @@ def _get_tpm_info(ectx) -> dict | None:
     # tpm2-pytss versions (attribute names vary between releases).
     _PT_FAMILY_INDICATOR = getattr(TPM2_PT, "FAMILY_INDICATOR", 0x100)
     _PT_MANUFACTURER = getattr(TPM2_PT, "MANUFACTURER", 0x105)
-    _PT_FIRMWARE_VERSION_1 = getattr(TPM2_PT, "FIRMWARE_VERSION_1",
-                                     getattr(TPM2_PT, "FW_VERSION_1", 0x111))
+    _PT_FIRMWARE_VERSION_1 = getattr(TPM2_PT, "FIRMWARE_VERSION_1", getattr(TPM2_PT, "FW_VERSION_1", 0x111))
 
     # Manufacturer
     if _PT_MANUFACTURER in prop_map:
@@ -280,15 +283,11 @@ def _create_ek_and_ak(ectx) -> tuple[AttestationCheck, bool, object, object, byt
         # TCG EK Credential Profile §2.3.1: auth policy = PolicySecret(endorsement)
         ek_template = TPM2B_PUBLIC.parse(
             "rsa2048",
-            objectAttributes=(
-                "fixedtpm|fixedparent|sensitivedataorigin"
-                "|adminwithpolicy|restricted|decrypt"
-            ),
+            objectAttributes=("fixedtpm|fixedparent|sensitivedataorigin|adminwithpolicy|restricted|decrypt"),
         )
         # TCG standard auth policy digest for PolicySecret(TPM_RH_ENDORSEMENT)
         ek_template.publicArea.authPolicy = bytes.fromhex(
-            "837197674484b3f81a90cc8d46a5d724"
-            "fd52d76e06520b64f2a1da1b331469aa"
+            "837197674484b3f81a90cc8d46a5d724fd52d76e06520b64f2a1da1b331469aa"
         )
 
         ek_handle, _ek_pub, _, _, _ = ectx.create_primary(
@@ -327,10 +326,7 @@ def _create_ek_and_ak(ectx) -> tuple[AttestationCheck, bool, object, object, byt
         # symmetric (parse defaults to AES-128-CFB for storage keys).
         ak_template = TPM2B_PUBLIC.parse(
             "rsa2048:rsassa-sha256",
-            objectAttributes=(
-                "fixedtpm|fixedparent|sensitivedataorigin"
-                "|userwithauth|restricted|sign"
-            ),
+            objectAttributes=("fixedtpm|fixedparent|sensitivedataorigin|userwithauth|restricted|sign"),
         )
         ak_template.publicArea.parameters.rsaDetail.symmetric.algorithm = TPM2_ALG.NULL
 

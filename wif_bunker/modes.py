@@ -448,7 +448,9 @@ def _run_all_versions() -> None:
         try:
             result = subprocess.run(
                 [ssl_path, "version"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
             print(f"  openssl CLI:                {result.stdout.strip()}")
             print(f"  openssl path:               {ssl_path}")
@@ -478,6 +480,7 @@ def _run_all_versions() -> None:
     print("\nhardmTLS")
     try:
         from wif_bunker.cert import _find_hardmtls_library
+
         lib_path = _find_hardmtls_library()
         print(f"  Library:           {lib_path}")
     except FileNotFoundError:
