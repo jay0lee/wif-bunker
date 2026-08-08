@@ -246,3 +246,74 @@ def preflight_check_write_access(directory: Path) -> None:
         logger.error("  Linux:      cd ~/Desktop && wif-bunker ...")
         logger.error("")
         raise SystemExit(1) from None
+
+
+def preflight_check_openssl_shared() -> None:
+    """Warn if Python's ssl module was compiled against a statically-linked OpenSSL.
+
+    When OpenSSL is built with ``no-shared``, its symbols are embedded directly
+    into the ``_ssl`` extension module.  This gives ``_ssl`` its own isolated
+    ``OSSL_LIB_CTX``, which means dynamically-loaded OpenSSL providers (like
+    hardmTLS) are invisible to Python's TLS stack.  The mTLS handshake silently
+    falls back to a bare TLS connection and the server rejects it.
+
+    Detection: inspect the dynamic library dependencies of ``_ssl`` and look
+    for ``libssl``/``libcrypto``.  If neither appears, OpenSSL was statically
+    linked.
+    """
+    import subprocess as _sp  # pylint: disable=import-outside-toplevel
+
+    try:
+        import _ssl  # type: ignore[import-not-found]  # pylint: disable=import-outside-toplevel
+    except ImportError:
+        return  # no ssl module at all — different problem
+
+    ssl_path = getattr(_ssl, "__file__", None)
+    if not ssl_path or not Path(ssl_path).exists():
+        return
+
+    try:
+        if sys.platform == "linux":
+            result = _sp.run(
+                ["ldd", ssl_path],
+                capture_output=True, text=True, timeout=10,
+            )
+            has_shared = "libssl.so" in result.stdout or "libcrypto.so" in result.stdout
+        elif sys.platform == "darwin":
+            result = _sp.run(
+                ["otool", "-L", ssl_path],
+                capture_output=True, text=True, timeout=10,
+            )
+            has_shared = "libssl" in result.stdout or "libcrypto" in result.stdout
+        elif sys.platform == "win32":
+            # On Windows, try dumpbin if available (MSVC), otherwise skip
+            dumpbin = shutil.which("dumpbin")
+            if not dumpbin:
+                return
+            result = _sp.run(
+                [dumpbin, "/dependents", ssl_path],
+                capture_output=True, text=True, timeout=10,
+            )
+            output_lower = result.stdout.lower()
+            has_shared = "libssl" in output_lower or "libcrypto" in output_lower
+        else:
+            return  # unknown platform, skip check
+    except (OSError, _sp.TimeoutExpired):
+        return  # tool not available or timed out, skip gracefully
+
+    if not has_shared:
+        logger.warning("")
+        logger.warning(
+            "%s Python's ssl module appears to be linked against a "
+            "statically-compiled OpenSSL (no-shared).",
+            SYM_WARN,
+        )
+        logger.warning(
+            "  The hardmTLS provider cannot be loaded into a static "
+            "OpenSSL context — mTLS handshakes will fail.",
+        )
+        logger.warning(
+            "  Rebuild Python against a shared OpenSSL, or use the "
+            "pre-built binaries from the WIF Bunker release.",
+        )
+        logger.warning("")

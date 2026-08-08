@@ -44,6 +44,7 @@ from wif_bunker.utils import (
     SYM_FAIL,
     SYM_OK,
     _CleanFormatter,
+    preflight_check_openssl_shared,
     preflight_check_write_access,
     with_retries,
 )
@@ -323,6 +324,8 @@ def _main_impl() -> None:
         level=logging.DEBUG if args.debug else logging.INFO,
         handlers=[handler],
     )
+
+    preflight_check_openssl_shared()
 
     config = WorkloadConfig()
     _validate_and_configure(parser, args, config)
