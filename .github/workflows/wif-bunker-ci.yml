@@ -30,8 +30,10 @@ jobs:
       - name: Install system dependencies (Linux)
         run: |
           sudo apt-get update && sudo apt-get install -y libpcsclite-dev libtss2-dev swig gcc-14
-          # Make gcc-14 the default so pip build-isolation subprocesses
-          # don't pick up GCC 15's C23 nullptr_t headers via pycparser.
+          # GCC 15 on Ubuntu 26.04 ships C23 headers (nullptr_t) that
+          # pycparser cannot parse. Hiding the directory forces the
+          # preprocessor to fall back to GCC 14's C17 headers.
+          sudo mv /usr/lib/gcc/x86_64-linux-gnu/15 /usr/lib/gcc/x86_64-linux-gnu/15.bak || true
           sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100
           sudo update-alternatives --install /usr/bin/cc  cc  /usr/bin/gcc-14 100
       - run: python -m pip install "pip>=26.2"
@@ -61,6 +63,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update && sudo apt-get install -y libpcsclite-dev libtss2-dev swig gcc-14
+          sudo mv /usr/lib/gcc/x86_64-linux-gnu/15 /usr/lib/gcc/x86_64-linux-gnu/15.bak || true
           sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100
           sudo update-alternatives --install /usr/bin/cc  cc  /usr/bin/gcc-14 100
       - run: python -m pip install "pip>=26.2"
