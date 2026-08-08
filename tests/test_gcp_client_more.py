@@ -50,10 +50,9 @@ def test_api_call_with_iam_retry_connection_error():
         client.session,
         "request",
         side_effect=[requests.exceptions.ConnectionError("err"), _mock_response(json_data={"ok": "yes"})],
-    ):
-        with patch("wif_bunker.gcp_client.time.sleep"):
-            res = client.api_call_with_iam_retry("GET", "http://test")
-            assert res == {"ok": "yes"}
+    ), patch("wif_bunker.gcp_client.time.sleep"):
+        res = client.api_call_with_iam_retry("GET", "http://test")
+        assert res == {"ok": "yes"}
 
 
 def test_wait_for_wif_resource_404():
@@ -63,10 +62,9 @@ def test_wait_for_wif_resource_404():
     resp_404 = _mock_response(404)
     with patch.object(
         client, "api_call", side_effect=[requests.exceptions.HTTPError(response=resp_404), {"state": "ACTIVE"}]
-    ):
-        with patch("wif_bunker.gcp_client.time.sleep"):
-            res = client.wait_for_wif_resource("http://test")
-            assert res == {"state": "ACTIVE"}
+    ), patch("wif_bunker.gcp_client.time.sleep"):
+        res = client.wait_for_wif_resource("http://test")
+        assert res == {"state": "ACTIVE"}
 
 
 def test_ensure_project_with_folder():

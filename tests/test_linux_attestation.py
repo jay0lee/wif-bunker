@@ -12,6 +12,9 @@ if "tpm2_pytss" not in sys.modules:
     _mock_tpm2_pytss.ESYS_TR = MagicMock()
     _mock_tpm2_pytss.TPM2_CAP = MagicMock()
     _mock_tpm2_pytss.TPM2_PT = MagicMock()
+    _mock_tpm2_pytss.TPM2_PT.MANUFACTURER = 0x105
+    _mock_tpm2_pytss.TPM2_PT.FIRMWARE_VERSION_1 = 0x111
+    _mock_tpm2_pytss.TPM2_PT.FAMILY_INDICATOR = 0x100
     _mock_tpm2_pytss.TPM2_SE = MagicMock()
     _mock_tpm2_pytss.TPM2B_DIGEST = MagicMock
     _mock_tpm2_pytss.TPM2B_NONCE = MagicMock
@@ -60,6 +63,61 @@ class TestLinuxTpmInfo:
         mock_ectx.get_capability.side_effect = RuntimeError("no TPM")
         result = _get_tpm_info(mock_ectx)
         assert result is None
+
+    def test_get_tpm_info_success(self):
+        """get_capability succeeds → parses Manufacturer and FW version."""
+        mock_ectx = MagicMock()
+        mock_prop = MagicMock()
+        mock_prop.property = 0x105  # _PT_MANUFACTURER
+        mock_prop.value = int.from_bytes(b"INTC", "big")
+
+        mock_prop2 = MagicMock()
+        mock_prop2.property = 0x111  # _PT_FIRMWARE_VERSION_1
+        mock_prop2.value = 0x00010002
+
+        mock_prop3 = MagicMock()
+        mock_prop3.property = 0x100  # _PT_FAMILY_INDICATOR
+        mock_prop3.value = int.from_bytes(b"2.0\x00", "big")
+
+        mock_props = MagicMock()
+        mock_props.data.tpmProperties = [mock_prop, mock_prop2, mock_prop3]
+        mock_ectx.get_capability.return_value = (None, mock_props)
+
+        result = _get_tpm_info(mock_ectx)
+        assert result is not None
+        assert result["manufacturer"] == "INTC"
+        assert result["firmware"] == "1.2"
+        assert result["family"] == "2.0"
+
+class TestExtractEkCertificateEsapi:
+    @patch("OpenSSL.crypto.load_certificate")
+    @patch("OpenSSL.crypto.dump_certificate")
+    def test_success(self, mock_dump, mock_load):
+        mock_dump.return_value = b"-----BEGIN CERTIFICATE-----\nMOCK\n-----END CERTIFICATE-----"
+        mock_load.return_value.get_issuer.return_value.get_components.return_value = [(b"CN", b"MOCK_CA")]
+
+        mock_ectx = MagicMock()
+        mock_ectx.tr_from_tpmpublic.return_value = 123
+        mock_pub = MagicMock()
+        mock_pub.nvPublic.dataSize = 100
+        mock_ectx.nv_read_public.return_value = (mock_pub, None)
+        mock_ectx.nv_read.return_value = b"mock der data"
+
+        from wif_bunker.attestation.linux import _extract_ek_certificate_esapi
+        check, pem = _extract_ek_certificate_esapi(mock_ectx)
+
+        assert check.passed is True
+        assert "MOCK_CA" in check.detail
+        assert pem == "-----BEGIN CERTIFICATE-----\nMOCK\n-----END CERTIFICATE-----"
+
+    def test_failure(self):
+        mock_ectx = MagicMock()
+        mock_ectx.tr_from_tpmpublic.side_effect = Exception("failed")
+
+        from wif_bunker.attestation.linux import _extract_ek_certificate_esapi
+        check, pem = _extract_ek_certificate_esapi(mock_ectx)
+        assert check is None
+        assert pem is None
 
 
 class TestPkcs11StoreQuery:
