@@ -1367,11 +1367,15 @@ jobs:
         if: always() && matrix.self_hosted
         run: |
           rm -rf .venv "$RUNNER_TEMP/adc_"*.txt
-          # Nuke TPM state — CI owns this device.
-          HANDLES=$(tpm2_getcap handles-persistent 2>/dev/null | grep -oP '0x[0-9A-Fa-f]+' || true)
-          for h in $HANDLES; do tpm2_evictcontrol -c "$h" 2>/dev/null || true; done
-          [ -n "$HANDLES" ] && echo "Post-test: evicted $(echo "$HANDLES" | wc -w) TPM handle(s)."
-          rm -rf "$HOME/.tpm2_pkcs11"
+          # Nuke TPM state — but ONLY for TPM test runs.
+          # The YubiKey job shares $HOME with the TPM job on the NUC
+          # and must NEVER touch the TPM or its files.
+          if [ "${{ matrix.use_yubikey }}" != "true" ]; then
+            HANDLES=$(tpm2_getcap handles-persistent 2>/dev/null | grep -oP '0x[0-9A-Fa-f]+' || true)
+            for h in $HANDLES; do tpm2_evictcontrol -c "$h" 2>/dev/null || true; done
+            [ -n "$HANDLES" ] && echo "Post-test: evicted $(echo "$HANDLES" | wc -w) TPM handle(s)."
+            rm -rf "$HOME/.tpm2_pkcs11"
+          fi
           # Reset YubiKey PIV state if this was a YubiKey test
           if [ -n "$YUBIKEY_FLAGS" ]; then
             SERIAL="${{ steps.yubikey.outputs.serial }}"
