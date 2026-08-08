@@ -533,12 +533,7 @@ jobs:
           echo "project_id=$PROJECT_ID" >> "$GITHUB_OUTPUT"
           echo "Project ID: $PROJECT_ID"
 
-      # ── Diagnostic: dump all version info early ──
-      - name: "Diagnostic: --all-versions"
-        shell: bash
-        run: |
-          WIF_CMD="${{ inputs.wif_bunker_cmd || '${PYTHON} -m wif_bunker' }}"
-          $WIF_CMD --all-versions
+
 
       # ── Baseline: confirm GHA CI service account is working ──
       - name: "ADC Baseline: GHA CI service account"
@@ -724,6 +719,12 @@ jobs:
           tar -xzf artifact/*.tar.gz
           chmod +x wif-bunker/wif-bunker
           ls -la wif-bunker/
+
+      # ── Diagnostic: dump all version info early ──
+      - name: "Diagnostic: --all-versions"
+        run: |
+          WIF_CMD="${{ inputs.wif_bunker_cmd || '${PYTHON} -m wif_bunker' }}"
+          $WIF_CMD --all-versions
 
       # ── Build hardmTLS native library (source testing only — built binary has it bundled) ──
       - name: "Install Rust toolchain"
