@@ -319,14 +319,14 @@ jobs:
           # ── Self-hosted hardware ──
           # os is set so the cache key python-ssl-${{ matrix.os }} matches;
           # runs_on takes precedence for runner selection.
- #         - name: Hardware TPM (NUC8)
- #           os: ubuntu-24.04
- #           runs_on: '["self-hosted", "Linux", "X64", "tpm"]'
- #           runner_id: nuc8-tpm
- #           soft_key_flag: ""
- #           artifact_name: wif-bunker-ubuntu-24.04
- #           self_hosted: true
- #           expected_algos: "es256 rsa2048"
+          - name: Hardware TPM (NUC8)
+            os: ubuntu-24.04
+            runs_on: '["self-hosted", "Linux", "X64", "tpm"]'
+            runner_id: nuc8-tpm
+            soft_key_flag: ""
+            artifact_name: wif-bunker-ubuntu-24.04
+            self_hosted: true
+            expected_algos: "es256 rsa2048"
           - name: YubiKey (NUC8)
             os: ubuntu-24.04
             runs_on: '["self-hosted", "Linux", "X64", "yk"]'
