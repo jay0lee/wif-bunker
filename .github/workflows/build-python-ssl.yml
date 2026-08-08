@@ -47,9 +47,9 @@ jobs:
           path: |
             bin/ssl
             bin/python
-          key: python-ssl-${{ runner.os }}-${{ runner.arch }}-${{ env.CACHE_VERSION }}-${{ github.run_id }}
+          key: python-ssl-${{ runner.name }}-${{ env.CACHE_VERSION }}-${{ github.run_id }}
           restore-keys: |
-            python-ssl-${{ runner.os }}-${{ runner.arch }}-${{ env.CACHE_VERSION }}-
+            python-ssl-${{ runner.name }}-${{ env.CACHE_VERSION }}-
 
       # ── Skip everything if cache is already warm from today ──
       # All subsequent steps are conditioned on cache miss.
