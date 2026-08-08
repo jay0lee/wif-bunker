@@ -1,6 +1,7 @@
 name: hardmTLS CI
 
 on:
+  workflow_dispatch:
   push:
     paths:
       - 'hardmtls-native/**'
