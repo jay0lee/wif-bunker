@@ -18,7 +18,7 @@ import pkcs11
 from cryptography import x509 as cx509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
-from pkcs11 import Attribute, CertificateType, KeyType, Mechanism, ObjectClass, TokenFlag
+from pkcs11 import Attribute, CertificateType, KeyType, Mechanism, ObjectClass
 from pkcs11.util.ec import encode_named_curve_parameters
 
 from wif_bunker.cert import _create_ca_and_sign

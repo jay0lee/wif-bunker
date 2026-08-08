@@ -247,7 +247,7 @@ def generate_cert_yubikey(config: WorkloadConfig) -> CertificateBundle:
         # 9. Generate CHUID and CCC — required for the Windows Smart Card
         #    Minidriver to discover PIV keys and propagate certificates to
         #    the Windows Certificate Store.
-        from ykman.piv import generate_chuid, generate_ccc
+        from ykman.piv import generate_ccc, generate_chuid
         piv.put_object(OBJECT_ID.CHUID, generate_chuid())
         piv.put_object(OBJECT_ID.CAPABILITY, generate_ccc())
 
@@ -408,7 +408,6 @@ def precache_yubikey_pin_ncrypt(serial: int | None, issuer_cn: str) -> bool:
 
     try:
         import ctypes
-        from ctypes import wintypes
 
         ncrypt = ctypes.windll.ncrypt
 

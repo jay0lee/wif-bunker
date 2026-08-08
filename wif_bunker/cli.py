@@ -7,12 +7,10 @@ import ctypes
 import logging
 import os
 import sys
-import time
 from pathlib import Path
 
 import google.auth
 import requests
-from google.auth.exceptions import OAuthError, RefreshError
 from google.auth.transport.requests import AuthorizedSession
 
 from wif_bunker import __version__
@@ -27,7 +25,6 @@ from wif_bunker.config import (
     _DEFAULT_CERT_LIFETIME_DAYS,
     _KEY_ALGORITHMS,
     _WIF_MAX_CERT_LIFETIME_DAYS,
-    API_RETRY_ATTEMPTS,
     WorkloadConfig,
 )
 from wif_bunker.gcp_client import GCPClient
@@ -423,6 +420,7 @@ def _main_impl() -> None:
         if sys.platform == "win32" and config.use_yubikey:
             import subprocess as _sp
             import time as _time
+
             from ykman.device import list_all_devices as _list_yk
 
             logger.info("")

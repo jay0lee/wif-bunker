@@ -371,7 +371,8 @@ class TestYubiKeyCLI:
         assert "--yubikey-serial" in captured.err
 
     @patch("sys.platform", "win32")
-    def test_soft_key_and_yubikey_exclusive(self, capsys):
+    @patch("wif_bunker.cli.preflight_check_openssl_shared")
+    def test_soft_key_and_yubikey_exclusive(self, _mock_preflight, capsys):
         with patch("sys.argv", ["wif-bunker", "--soft-key", "--use-yubikey", "--cert-only"]), pytest.raises(SystemExit):
             _main_impl()
         captured = capsys.readouterr()

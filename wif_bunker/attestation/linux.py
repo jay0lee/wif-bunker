@@ -266,10 +266,8 @@ def _create_ek_and_ak(ectx) -> tuple[AttestationCheck, bool, object, object, byt
 
     Returns (check, success, ek_handle, ak_handle, ak_pub_pem_bytes).
     """
-    from cryptography.hazmat.primitives import serialization  # pylint: disable=import-outside-toplevel
-    from tpm2_pytss import TPM2B_SENSITIVE_CREATE  # pylint: disable=import-outside-toplevel
-
     from tpm2_pytss import ESYS_TR as _ESYS_TR  # pylint: disable=import-outside-toplevel
+    from tpm2_pytss import TPM2B_SENSITIVE_CREATE  # pylint: disable=import-outside-toplevel
 
     # Create EK in endorsement hierarchy using TCG standard template.
     # The standard EK has adminWithPolicy requiring PolicySecret(endorsement),
@@ -316,11 +314,14 @@ def _create_ek_and_ak(ectx) -> tuple[AttestationCheck, bool, object, object, byt
     # The TCG EK has adminWithPolicy, so we need a policy session to use
     # the EK as parent (see docs/attestation-linux-tpm.md).
     try:
+        from tpm2_pytss import (  # pylint: disable=import-outside-toplevel
+            TPM2_SE,
+            TPM2B_DIGEST,
+            TPM2B_NONCE,
+            TPMT_SYM_DEF,
+        )
         from tpm2_pytss.constants import TPM2_ALG  # pylint: disable=import-outside-toplevel
         from tpm2_pytss.types import TPM2B_PUBLIC  # pylint: disable=import-outside-toplevel
-        from tpm2_pytss import (  # pylint: disable=import-outside-toplevel
-            TPM2_SE, TPM2B_DIGEST, TPM2B_NONCE, TPMT_SYM_DEF,
-        )
 
         # Use parse() for correct RSASSA scheme union types, then fix
         # symmetric (parse defaults to AES-128-CFB for storage keys).
@@ -501,7 +502,8 @@ def _certify_key(ectx, ak_handle) -> tuple[AttestationCheck, bool, bytes | None,
     keys) and has the AK certify it, proving the key hierarchy lives
     inside the TPM.
     """
-    from tpm2_pytss import ESYS_TR as _ESYS_TR, TPM2_ALG  # pylint: disable=import-outside-toplevel
+    from tpm2_pytss import ESYS_TR as _ESYS_TR  # pylint: disable=import-outside-toplevel
+    from tpm2_pytss import TPM2_ALG
 
     try:
         # Create a primary in owner hierarchy (parent of tpm2-pkcs11 keys)

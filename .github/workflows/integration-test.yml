@@ -268,13 +268,7 @@ jobs:
             soft_key_flag: ""
             artifact_name: wif-bunker-linux-aarch64
             expected_algos: "es256 es384 rsa2048 rsa3072"
-          # ── macOS ARM64 (Apple Silicon) ──
-          - os: macos-14
-            name: macOS ARM64 (14)
-            runner_id: macos
-            soft_key_flag: ""
-            artifact_name: wif-bunker-macos-arm64
-            expected_algos: "es256 es384"
+          # ── macOS ARM64 (Apple Silicon — requires macOS 15+ for CryptoTokenKit) ──
           - os: macos-15
             name: macOS ARM64 (15)
             runner_id: macos
@@ -323,7 +317,10 @@ jobs:
             expected_algos: "es256 es384 rsa2048 rsa3072 rsa4096"
             use_native_ssl_and_python: true
           # ── Self-hosted hardware ──
+          # os is set so the cache key python-ssl-${{ matrix.os }} matches;
+          # runs_on takes precedence for runner selection.
           - name: Hardware TPM (NUC8)
+            os: ubuntu-24.04
             runs_on: '["self-hosted", "Linux", "X64", "tpm"]'
             runner_id: nuc8-tpm
             soft_key_flag: ""
@@ -331,6 +328,7 @@ jobs:
             self_hosted: true
             expected_algos: "es256 rsa2048"
           - name: YubiKey (NUC8)
+            os: ubuntu-24.04
             runs_on: '["self-hosted", "Linux", "X64", "yk"]'
             runner_id: nuc8-yk
             soft_key_flag: ""

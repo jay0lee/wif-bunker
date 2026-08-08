@@ -402,7 +402,7 @@ def _run_supported_algorithms(
             print(algo)
 
 
-def _run_all_versions() -> None:  # noqa: C901 — diagnostic dump, complexity is fine
+def _run_all_versions() -> None:
     """Print comprehensive version, environment, and system info for debugging."""
     import platform
     import shutil
