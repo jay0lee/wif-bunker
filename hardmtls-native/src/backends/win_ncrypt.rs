@@ -442,7 +442,7 @@ impl SigningBackend for NcryptBackend {
                     algorithm,
                 );
                 let raw_sig = Self::ncrypt_sign(key_handle, algorithm, data)?;
-                
+
                 if matches!(algorithm, KeyAlgorithm::Ec) {
                     crate::backends::raw_ecdsa_to_der(&raw_sig)
                 } else {

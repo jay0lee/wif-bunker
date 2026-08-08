@@ -187,52 +187,27 @@ mod tests {
         ));
     }
 
-    /// Helper: generate a self-signed RSA cert with the given CN.
-    /// Uses RSA to avoid our hardmTLS EC provider intercepting the signing.
-    fn make_test_cert(cn: &str) -> Vec<u8> {
-        use openssl::asn1::Asn1Time;
-        use openssl::bn::BigNum;
-        use openssl::hash::MessageDigest;
-        use openssl::pkey::PKey;
-        use openssl::rsa::Rsa;
-        use openssl::x509::{X509Builder, X509NameBuilder};
-
-        let rsa = Rsa::generate(2048).unwrap();
-        let pkey = PKey::from_rsa(rsa).unwrap();
-
-        let mut name_builder = X509NameBuilder::new().unwrap();
-        name_builder.append_entry_by_text("CN", cn).unwrap();
-        let name = name_builder.build();
-
-        let mut builder = X509Builder::new().unwrap();
-        builder.set_version(2).unwrap();
-        builder.set_subject_name(&name).unwrap();
-        builder.set_issuer_name(&name).unwrap();
-        builder.set_pubkey(&pkey).unwrap();
-
-        let serial = BigNum::from_u32(1).unwrap().to_asn1_integer().unwrap();
-        builder.set_serial_number(&serial).unwrap();
-
-        let not_before = Asn1Time::days_from_now(0).unwrap();
-        let not_after = Asn1Time::days_from_now(365).unwrap();
-        builder.set_not_before(&not_before).unwrap();
-        builder.set_not_after(&not_after).unwrap();
-
-        builder.sign(&pkey, MessageDigest::sha256()).unwrap();
-        builder.build().to_der().unwrap()
-    }
+    /// Pre-built self-signed RSA-2048 test certificate in DER format.
+    ///
+    /// CN = "Test Issuer", self-signed, valid 2026-08-08 to 2036-08-05.
+    ///
+    /// Using a static cert avoids calling `Rsa::generate()` and
+    /// `X509Builder::sign()` at test time, which would race with the
+    /// hardmTLS provider registration — our provider's RSA keymgmt shadows
+    /// the default provider's RSA when both are loaded, breaking keygen.
+    const TEST_CERT_DER: &[u8] = include_bytes!("../../tests/fixtures/test_issuer.der");
 
     #[test]
     fn test_issuer_matches_self_signed() {
-        let der = make_test_cert("Test Issuer");
-        assert!(issuer_matches(&der, "Test Issuer"));
-        assert!(!issuer_matches(&der, "Wrong Issuer"));
+        let der = TEST_CERT_DER;
+        assert!(issuer_matches(der, "Test Issuer"));
+        assert!(!issuer_matches(der, "Wrong Issuer"));
     }
 
     #[test]
     fn test_der_to_pem() {
-        let der = make_test_cert("Test");
-        let pem = der_to_pem(&der).unwrap();
+        let der = TEST_CERT_DER;
+        let pem = der_to_pem(der).unwrap();
         assert!(pem.starts_with("-----BEGIN CERTIFICATE-----"));
         assert!(pem.trim_end().ends_with("-----END CERTIFICATE-----"));
     }

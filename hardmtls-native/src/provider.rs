@@ -1574,26 +1574,27 @@ pub fn register_provider() -> Result<(), crate::error::HardmtlsError> {
             return;
         }
 
-        // Now load it to activate.
+        // Load the default provider FIRST. When any provider is explicitly
+        // loaded, OpenSSL stops auto-loading the default. By loading default
+        // before hardmtls, we ensure standard algorithms (ciphers, digests,
+        // RSA keygen, etc.) remain available at all times — even if another
+        // thread is using OpenSSL concurrently.
+        let default_prov =
+            unsafe { openssl_sys::OSSL_PROVIDER_load(ptr::null_mut(), c"default".as_ptr()) };
+        if default_prov.is_null() {
+            result = Err(crate::error::HardmtlsError::SslError(
+                "OSSL_PROVIDER_load failed for default provider".into(),
+            ));
+            return;
+        }
+
+        // Now load our provider.
         // SAFETY: FFI call with valid name.
         let prov =
             unsafe { openssl_sys::OSSL_PROVIDER_load(ptr::null_mut(), PROVIDER_NAME.as_ptr()) };
         if prov.is_null() {
             result = Err(crate::error::HardmtlsError::SslError(
                 "OSSL_PROVIDER_load failed for hardmtls".into(),
-            ));
-            return;
-        }
-
-        // Also load the default provider. When any provider is explicitly loaded,
-        // OpenSSL stops auto-loading the default provider. Without this, standard
-        // algorithms (ciphers, digests, RSA, etc.) become unavailable, breaking
-        // SSL_CTX_new and normal TLS operations.
-        let default_prov =
-            unsafe { openssl_sys::OSSL_PROVIDER_load(ptr::null_mut(), c"default".as_ptr()) };
-        if default_prov.is_null() {
-            result = Err(crate::error::HardmtlsError::SslError(
-                "OSSL_PROVIDER_load failed for default provider".into(),
             ));
             return;
         }

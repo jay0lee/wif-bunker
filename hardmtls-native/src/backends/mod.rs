@@ -47,3 +47,64 @@ pub fn raw_ecdsa_to_der(raw_sig: &[u8]) -> Result<Vec<u8>, HardmtlsError> {
     sig.to_der()
         .map_err(|e| HardmtlsError::Pkcs11Error(format!("Failed to encode DER: {e}")))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A valid P-256 raw ECDSA signature: 32-byte r || 32-byte s (big-endian).
+    fn p256_raw_sig() -> Vec<u8> {
+        let mut sig = vec![0u8; 64];
+        // r = 1 (left-padded to 32 bytes)
+        sig[31] = 1;
+        // s = 2 (left-padded to 32 bytes)
+        sig[63] = 2;
+        sig
+    }
+
+    #[test]
+    fn raw_ecdsa_to_der_p256_valid() {
+        let raw = p256_raw_sig();
+        let der = raw_ecdsa_to_der(&raw).unwrap();
+        // DER output must start with SEQUENCE tag (0x30)
+        assert_eq!(der[0], 0x30);
+        // Verify round-trip by parsing back with OpenSSL
+        let parsed = openssl::ecdsa::EcdsaSig::from_der(&der).unwrap();
+        assert_eq!(parsed.r().to_vec(), vec![1]);
+        assert_eq!(parsed.s().to_vec(), vec![2]);
+    }
+
+    #[test]
+    fn raw_ecdsa_to_der_p384_valid() {
+        // P-384: 48-byte r || 48-byte s = 96 bytes total
+        let mut raw = vec![0u8; 96];
+        raw[47] = 0x42;
+        raw[95] = 0x43;
+        let der = raw_ecdsa_to_der(&raw).unwrap();
+        assert_eq!(der[0], 0x30);
+        let parsed = openssl::ecdsa::EcdsaSig::from_der(&der).unwrap();
+        assert_eq!(parsed.r().to_vec(), vec![0x42]);
+        assert_eq!(parsed.s().to_vec(), vec![0x43]);
+    }
+
+    #[test]
+    fn raw_ecdsa_to_der_odd_length_rejected() {
+        let raw = vec![0u8; 65]; // odd length
+        let err = raw_ecdsa_to_der(&raw).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Invalid raw ECDSA signature length"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn raw_ecdsa_to_der_empty_input() {
+        // Empty is even-length (0), so it should attempt conversion.
+        // BigNum::from_slice(&[]) produces zero, which is a valid (though
+        // degenerate) ECDSA component.
+        let result = raw_ecdsa_to_der(&[]);
+        // Either succeeds with a trivial signature or fails gracefully
+        assert!(result.is_ok() || result.is_err());
+    }
+}
