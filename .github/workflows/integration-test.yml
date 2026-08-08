@@ -230,23 +230,75 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # ── Linux x64 ──
+          - os: ubuntu-22.04
+            name: Linux x64 (22.04)
+            runner_id: linux-swtpm
+            soft_key_flag: ""
+            artifact_name: wif-bunker-linux-x86_64
+            expected_algos: "es256 es384 rsa2048 rsa3072"
           - os: ubuntu-24.04
             name: Linux x64 (24.04)
             runner_id: linux-swtpm
             soft_key_flag: ""
             artifact_name: wif-bunker-linux-x86_64
             expected_algos: "es256 es384 rsa2048 rsa3072"
-          - os: macos-15
-            name: macOS ARM64 (Apple Silicon)
+          - os: ubuntu-26.04
+            name: Linux x64 (26.04)
+            runner_id: linux-swtpm
+            soft_key_flag: ""
+            artifact_name: wif-bunker-linux-x86_64
+            expected_algos: "es256 es384 rsa2048 rsa3072"
+          # ── Linux ARM64 ──
+          - os: ubuntu-22.04-arm
+            name: Linux ARM64 (22.04)
+            runner_id: linux-swtpm
+            soft_key_flag: ""
+            artifact_name: wif-bunker-linux-aarch64
+            expected_algos: "es256 es384 rsa2048 rsa3072"
+          - os: ubuntu-24.04-arm
+            name: Linux ARM64 (24.04)
+            runner_id: linux-swtpm
+            soft_key_flag: ""
+            artifact_name: wif-bunker-linux-aarch64
+            expected_algos: "es256 es384 rsa2048 rsa3072"
+          - os: ubuntu-26.04-arm
+            name: Linux ARM64 (26.04)
+            runner_id: linux-swtpm
+            soft_key_flag: ""
+            artifact_name: wif-bunker-linux-aarch64
+            expected_algos: "es256 es384 rsa2048 rsa3072"
+          # ── macOS ARM64 (Apple Silicon) ──
+          - os: macos-14
+            name: macOS ARM64 (14)
             runner_id: macos
             soft_key_flag: ""
             artifact_name: wif-bunker-macos-arm64
             expected_algos: "es256 es384"
-          - os: windows-2025
+          - os: macos-15
+            name: macOS ARM64 (15)
+            runner_id: macos
+            soft_key_flag: ""
+            artifact_name: wif-bunker-macos-arm64
+            expected_algos: "es256 es384"
+          - os: macos-26
+            name: macOS ARM64 (26)
+            runner_id: macos
+            soft_key_flag: ""
+            artifact_name: wif-bunker-macos-arm64
+            expected_algos: "es256 es384"
+          # ── Windows ──
+          - os: windows-2025-vs2026
             name: Windows x64
             runner_id: windows
             soft_key_flag: "--soft-key"
             artifact_name: wif-bunker-windows-x86_64
+            expected_algos: "es256 es384 rsa2048 rsa3072 rsa4096"
+          - os: windows-11-vs2026-arm
+            name: Windows ARM64
+            runner_id: windows
+            soft_key_flag: "--soft-key"
+            artifact_name: wif-bunker-windows-aarch64
             expected_algos: "es256 es384 rsa2048 rsa3072 rsa4096"
           # ── Native SSL/Python: test with runner's pre-installed OpenSSL + Python ──
           - os: ubuntu-24.04
@@ -263,13 +315,14 @@ jobs:
             artifact_name: wif-bunker-macos-arm64
             expected_algos: "es256 es384"
             use_native_ssl_and_python: true
-          - os: windows-2025
+          - os: windows-2025-vs2026
             name: Windows x64 (native-ssl)
             runner_id: windows
             soft_key_flag: "--soft-key"
             artifact_name: wif-bunker-windows-x86_64
             expected_algos: "es256 es384 rsa2048 rsa3072 rsa4096"
             use_native_ssl_and_python: true
+          # ── Self-hosted hardware ──
           - name: Hardware TPM (NUC8)
             runs_on: '["self-hosted", "Linux", "X64", "tpm"]'
             runner_id: nuc8-tpm
@@ -393,9 +446,9 @@ jobs:
           path: |
             bin/ssl
             bin/python
-          key: python-ssl-${{ runner.os }}-${{ runner.arch }}-v2-
+          key: python-ssl-${{ matrix.os }}-v2-
           restore-keys: |
-            python-ssl-${{ runner.os }}-${{ runner.arch }}-v2-
+            python-ssl-${{ matrix.os }}-v2-
           fail-on-cache-miss: true
 
       - name: "Debug: Inspect cached OpenSSL + Python"
@@ -404,7 +457,7 @@ jobs:
         run: |
           echo "══════════════════════════════════════════════════"
           echo "Cache restore key used: ${{ steps.cache-python-ssl.outputs.cache-matched-key }}"
-          echo "Cache primary key:      python-ssl-${{ runner.os }}-${{ runner.arch }}-v2-"
+          echo "Cache primary key:      python-ssl-${{ matrix.os }}-v2-"
           echo "══════════════════════════════════════════════════"
 
           echo ""
