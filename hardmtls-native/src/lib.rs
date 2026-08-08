@@ -31,8 +31,9 @@ pub mod ssl_ctx;
 
 use std::ffi::{c_char, c_int, c_uchar, c_void};
 use std::slice;
-use std::sync::{Once, OnceLock};
+use std::sync::{Mutex, Once, OnceLock};
 
+use backends::SigningBackend;
 use config::CertificateConfig;
 use dispatch::select_backend;
 use error::HardmtlsError;
@@ -52,6 +53,14 @@ pub type SignCallback = unsafe extern "C" fn(
 
 /// Global config cache to avoid re-parsing on every call.
 static CONFIG_CACHE: OnceLock<CertificateConfig> = OnceLock::new();
+
+/// Global backend cache — serialises all hardware signing operations.
+///
+/// All supported keystores (TPM, `YubiKey`, Secure Enclave, Windows `NCrypt`)
+/// are single-channel hardware.  Concurrent callers within a process must
+/// wait their turn.  Cross-process serialisation is handled by the OS
+/// (tpm2-abrmd, securityd, CNG KSP, CCID USB protocol).
+static BACKEND_CACHE: OnceLock<Mutex<Option<Box<dyn SigningBackend>>>> = OnceLock::new();
 
 /// One-time logger initialization guard.
 static LOGGER_INIT: Once = Once::new();
@@ -184,6 +193,30 @@ pub unsafe extern "C" fn SignForPython(
 
 // ── Internal implementations ───────────────────────────────────────────
 
+/// Run a closure with the cached signing backend.
+///
+/// The backend is created on first use (via [`select_backend`]) and kept
+/// alive for the process lifetime.  A [`Mutex`] serialises all calls so
+/// that only one thread talks to the hardware at a time — correct for
+/// single-channel devices (TPM, `YubiKey`, Secure Enclave, `NCrypt`/CNG).
+fn with_backend<F, R>(config: &CertificateConfig, f: F) -> Result<R, HardmtlsError>
+where
+    F: FnOnce(&dyn SigningBackend) -> Result<R, HardmtlsError>,
+{
+    let mutex = BACKEND_CACHE.get_or_init(|| Mutex::new(None));
+    let mut guard = mutex
+        .lock()
+        .map_err(|_| HardmtlsError::Pkcs11Error("backend lock poisoned".into()))?;
+
+    // Lazily create the backend on first use.
+    if guard.is_none() {
+        log::debug!("hardmTLS: creating and caching signing backend");
+        *guard = Some(select_backend(config)?);
+    }
+
+    f(guard.as_ref().unwrap().as_ref())
+}
+
 /// Internal implementation of `GetCertPemForPython`.
 #[allow(unsafe_code)]
 unsafe fn get_cert_pem_impl(
@@ -193,10 +226,10 @@ unsafe fn get_cert_pem_impl(
 ) -> Result<c_int, HardmtlsError> {
     let config = load_config(config_path)?;
 
-    // Try the signing backend first (e.g., PKCS#11 can retrieve the cert).
+    // Try the cached signing backend first (e.g., PKCS#11 can retrieve the cert).
     // Fall back to reading from cert_configs.workload.cert_path on disk.
-    let cert_pem = if let Ok(backend) = select_backend(&config) {
-        backend.certificate_pem()?
+    let cert_pem = if let Ok(pem) = with_backend(&config, |backend| backend.certificate_pem()) {
+        pem
     } else {
         // No signing backend — try reading the cert from the workload config.
         let cert_path = config
@@ -210,7 +243,9 @@ unsafe fn get_cert_pem_impl(
                 )
             })?;
         std::fs::read_to_string(cert_path).map_err(|e| {
-            HardmtlsError::CertificateError(format!("failed to read cert from {cert_path}: {e}"))
+            HardmtlsError::CertificateError(format!(
+                "failed to read cert from {cert_path}: {e}"
+            ))
         })?
     };
     let cert_bytes = cert_pem.as_bytes();
@@ -240,27 +275,28 @@ unsafe fn sign_for_python_impl(
     output_len: c_int,
 ) -> Result<c_int, HardmtlsError> {
     let config = load_config(config_path)?;
-    let backend = select_backend(&config)?;
 
     let in_len = usize::try_from(input_len).unwrap_or(0);
     // SAFETY: input is guaranteed by caller to point to input_len bytes.
     let tbs = unsafe { slice::from_raw_parts(input, in_len) };
 
-    let signature = backend.sign(tbs)?;
+    with_backend(&config, |backend| {
+        let signature = backend.sign(tbs)?;
 
-    let out_len = usize::try_from(output_len).unwrap_or(0);
-    if signature.len() > out_len {
-        return Err(HardmtlsError::BufferTooSmall {
-            needed: signature.len(),
-            provided: out_len,
-        });
-    }
+        let out_len = usize::try_from(output_len).unwrap_or(0);
+        if signature.len() > out_len {
+            return Err(HardmtlsError::BufferTooSmall {
+                needed: signature.len(),
+                provided: out_len,
+            });
+        }
 
-    // SAFETY: output is guaranteed by caller to point to output_len bytes.
-    unsafe {
-        std::ptr::copy_nonoverlapping(signature.as_ptr(), output, signature.len());
-    }
-    Ok(c_int::try_from(signature.len()).unwrap_or(c_int::MAX))
+        // SAFETY: output is guaranteed by caller to point to output_len bytes.
+        unsafe {
+            std::ptr::copy_nonoverlapping(signature.as_ptr(), output, signature.len());
+        }
+        Ok(c_int::try_from(signature.len()).unwrap_or(c_int::MAX))
+    })
 }
 
 /// Load and cache the certificate configuration from a JSON file path.

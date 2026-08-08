@@ -15,11 +15,22 @@ use cryptoki::session::{Session, UserType};
 use cryptoki::types::AuthPin;
 use openssl::x509::X509;
 
+use std::sync::Mutex;
+
 /// The PKCS#11 signing backend.
 ///
 /// Handles interactions with PKCS#11 tokens for retrieving client certificates
 /// and performing cryptographic signatures using the token's private key.
-#[derive(Debug)]
+///
+/// The session is opened on first use and kept alive for the process lifetime.
+/// This avoids the TPM handle conflict that occurs when `libtpm2_pkcs11.so`
+/// is loaded/unloaded repeatedly (each load creates a new ESAPI context that
+/// races for the TPM primary object handle).
+///
+/// Thread safety: the `session_cache` mutex serialises per-backend access.
+/// In practice, the dispatch-level `BACKEND_CACHE` mutex in `lib.rs` already
+/// ensures single-threaded access, but the inner mutex makes the backend
+/// self-contained and satisfies `Send + Sync` on [`SigningBackend`].
 #[allow(dead_code)] // Fields are used when signing and retrieving certificates.
 pub struct Pkcs11Backend {
     /// Path to the PKCS#11 shared library module.
@@ -30,6 +41,21 @@ pub struct Pkcs11Backend {
     label: String,
     /// User PIN for the token.
     user_pin: String,
+    /// Cached PKCS#11 context + session, initialised on first use.
+    session_cache: Mutex<Option<(Pkcs11, Session)>>,
+}
+
+// Manual Debug — Pkcs11/Session don't implement Debug.
+impl std::fmt::Debug for Pkcs11Backend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pkcs11Backend")
+            .field("module", &self.module)
+            .field("slot", &self.slot)
+            .field("label", &self.label)
+            .field("user_pin", &"****")
+            .field("session_cached", &self.session_cache.lock().ok().map(|g| g.is_some()))
+            .finish()
+    }
 }
 
 impl Pkcs11Backend {
@@ -50,14 +76,12 @@ impl Pkcs11Backend {
             slot: config.slot.clone(),
             label: config.label.clone(),
             user_pin: config.user_pin.clone(),
+            session_cache: Mutex::new(None),
         })
     }
 
-    /// Helper to run a closure with an initialized PKCS#11 session.
-    fn with_session<F, R>(&self, f: F) -> Result<R, HardmtlsError>
-    where
-        F: FnOnce(&Session) -> Result<R, HardmtlsError>,
-    {
+    /// Open a fresh PKCS#11 session (load module, initialise, login).
+    fn open_session(&self) -> Result<(Pkcs11, Session), HardmtlsError> {
         let pkcs11 = Pkcs11::new(&self.module)
             .map_err(|e| HardmtlsError::Pkcs11Error(format!("Failed to load module: {e}")))?;
 
@@ -79,7 +103,7 @@ impl Pkcs11Backend {
                     _,
                 ),
             ) => {
-                log::debug!("PKCS#11 already initialized — reusing existing session");
+                log::debug!("PKCS#11 already initialized — reusing");
             }
             Err(e) => {
                 return Err(HardmtlsError::Pkcs11Error(format!(
@@ -104,10 +128,37 @@ impl Pkcs11Backend {
             .login(UserType::User, Some(&pin))
             .map_err(|e| HardmtlsError::Pkcs11Error(format!("Failed to login: {e}")))?;
 
-        let result = f(&session);
+        log::debug!("PKCS#11 session opened (module={}, slot={})", self.module, self.slot);
+        Ok((pkcs11, session))
+    }
 
-        // Best effort logout and close, ignore errors
-        let _ = session.logout();
+    /// Run a closure with the cached PKCS#11 session.
+    ///
+    /// Opens the session on first use and keeps it alive.  If the operation
+    /// fails, the session is invalidated so the next call opens a fresh one.
+    fn with_session<F, R>(&self, f: F) -> Result<R, HardmtlsError>
+    where
+        F: FnOnce(&Session) -> Result<R, HardmtlsError>,
+    {
+        let mut cache = self
+            .session_cache
+            .lock()
+            .map_err(|_| HardmtlsError::Pkcs11Error("session lock poisoned".into()))?;
+
+        // Open session on first use.
+        if cache.is_none() {
+            *cache = Some(self.open_session()?);
+        }
+
+        let (_, ref session) = *cache.as_ref().unwrap();
+        let result = f(session);
+
+        // If the operation failed, the session may be stale (e.g. token
+        // removed and re-inserted).  Drop it so the next call retries.
+        if result.is_err() {
+            log::warn!("PKCS#11 operation failed — invalidating cached session");
+            *cache = None;
+        }
 
         result
     }
