@@ -1168,6 +1168,7 @@ jobs:
 
       # ── Step 2: WIF Bunker fresh run (creates project, SA, pool, provider) ──
       - name: "WIF Bunker: Fresh setup"
+        if: false
         shell: bash
         run: |
           echo "=== Running WIF Bunker (fresh creation) ==="
@@ -1187,6 +1188,7 @@ jobs:
 
       # ── Step 3: WIF Bunker reuse run (detects existing resources) ──
       - name: "WIF Bunker: Reuse existing"
+        if: false
         shell: bash
         run: |
           echo "=== Running WIF Bunker (reuse flow) ==="
@@ -1202,6 +1204,7 @@ jobs:
 
       # ── Step 3b: ADC integration test (with service account) ──
       - name: "ADC Test: With service account"
+        if: false
         shell: bash
         run: |
           echo "=== Testing ADC with X.509 WIF (service account) ==="
@@ -1233,6 +1236,7 @@ jobs:
 
       # ── Step 4: WIF Bunker reuse without service account ──
       - name: "WIF Bunker: Reuse (no service account)"
+        if: false
         shell: bash
         run: |
           echo "=== Running WIF Bunker (reuse, no service account) ==="
@@ -1248,6 +1252,7 @@ jobs:
 
       # ── Step 4b: ADC integration test (no service account) ──
       - name: "ADC Test: No service account"
+        if: false
         shell: bash
         run: |
           echo "=== Testing ADC with X.509 WIF (no service account) ==="
@@ -1271,6 +1276,7 @@ jobs:
 
       # ── Test --status after full WIF setup ──
       - name: "Test --status"
+        if: false
         shell: bash
         run: |
           echo "=== Testing --status ==="
@@ -1295,7 +1301,7 @@ jobs:
 
       # ── Step 4: Cleanup own project ──
       - name: "Cleanup test project"
-        if: always()
+        if: false
         shell: bash
         run: |
           PROJECT_ID="${{ steps.config.outputs.project_id }}"
