@@ -53,7 +53,10 @@ impl std::fmt::Debug for Pkcs11Backend {
             .field("slot", &self.slot)
             .field("label", &self.label)
             .field("user_pin", &"****")
-            .field("session_cached", &self.session_cache.lock().ok().map(|g| g.is_some()))
+            .field(
+                "session_cached",
+                &self.session_cache.lock().ok().map(|g| g.is_some()),
+            )
             .finish()
     }
 }
@@ -128,7 +131,11 @@ impl Pkcs11Backend {
             .login(UserType::User, Some(&pin))
             .map_err(|e| HardmtlsError::Pkcs11Error(format!("Failed to login: {e}")))?;
 
-        log::debug!("PKCS#11 session opened (module={}, slot={})", self.module, self.slot);
+        log::debug!(
+            "PKCS#11 session opened (module={}, slot={})",
+            self.module,
+            self.slot
+        );
         Ok((pkcs11, session))
     }
 
