@@ -10,7 +10,19 @@
 //! 3. CertificateVerify works correctly in TLS 1.2.
 //!
 //! Run with: `cargo test --test mtls_handshake -- --nocapture`
-#![allow(missing_docs, unsafe_code)]
+#![allow(
+    missing_docs,
+    unsafe_code,
+    clippy::borrow_as_ptr,
+    clippy::doc_markdown,
+    clippy::items_after_statements,
+    clippy::needless_pass_by_value,
+    clippy::ptr_as_ptr,
+    clippy::too_many_lines,
+    clippy::uninlined_format_args,
+    clippy::used_underscore_binding,
+    clippy::if_not_else
+)]
 
 use foreign_types_shared::ForeignType;
 use std::ffi::{c_int, c_uchar, c_void};

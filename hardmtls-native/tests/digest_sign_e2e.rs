@@ -6,7 +6,20 @@
 //! 3. Call `EVP_DigestSign` to produce a signature
 //!
 //! Run with: cargo test --test digest_sign_e2e -- --nocapture
-#![allow(missing_docs)]
+#![allow(
+    missing_docs,
+    clippy::borrow_as_ptr,
+    clippy::doc_markdown,
+    clippy::items_after_statements,
+    clippy::needless_pass_by_value,
+    clippy::ptr_as_ptr,
+    clippy::ref_as_ptr,
+    clippy::too_many_lines,
+    clippy::uninlined_format_args,
+    clippy::used_underscore_binding,
+    clippy::if_not_else,
+    dead_code
+)]
 
 use std::ffi::{c_char, c_int, c_uchar, c_void, CStr};
 use std::ptr;

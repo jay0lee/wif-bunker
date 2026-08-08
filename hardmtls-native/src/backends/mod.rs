@@ -28,7 +28,7 @@ pub trait SigningBackend: Send + Sync {
 /// Helper function to convert a raw P-256/P-384 ECDSA signature (r || s, big-endian)
 /// into an ASN.1 DER encoded ECDSA signature required by OpenSSL.
 pub fn raw_ecdsa_to_der(raw_sig: &[u8]) -> Result<Vec<u8>, HardmtlsError> {
-    if raw_sig.len() % 2 != 0 {
+    if !raw_sig.len().is_multiple_of(2) {
         return Err(HardmtlsError::Pkcs11Error(format!(
             "Invalid raw ECDSA signature length: {}",
             raw_sig.len()

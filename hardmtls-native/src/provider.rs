@@ -118,8 +118,7 @@ struct HardmtlsKey {
 // ── Signing context (stored by SIGNATURE operations) ───────────────────
 
 /// Context for an in-progress signing operation.
-
-#[allow(unsafe_code)]
+#[allow(dead_code, unsafe_code)]
 fn get_param_utf8_string(param: *const openssl_sys::OSSL_PARAM) -> Option<String> {
     if param.is_null() {
         return None;
@@ -128,7 +127,7 @@ fn get_param_utf8_string(param: *const openssl_sys::OSSL_PARAM) -> Option<String
         let p = &*param;
         if p.data_type == crate::provider_ffi::OSSL_PARAM_UTF8_STRING && !p.data.is_null() {
             let cstr = std::ffi::CStr::from_ptr(p.data.cast::<std::ffi::c_char>());
-            return cstr.to_str().ok().map(|s| s.to_string());
+            return cstr.to_str().ok().map(ToString::to_string);
         }
     }
     None
@@ -342,24 +341,21 @@ extern "C" fn keymgmt_get_params(
             } else if key_bytes == OSSL_PKEY_PARAM_SECURITY_BITS.to_bytes() {
                 unsafe { write_int_param(param, key.security_bits) };
             }
-        } else if param.data_type == OSSL_PARAM_UTF8_STRING {
-            if key_bytes == OSSL_PKEY_PARAM_GROUP_NAME.to_bytes() && !key.group_name.is_empty() {
-                // Write group name as a null-terminated UTF-8 string.
-                let src = &key.group_name;
-                let copy_len = src.len().min(param.data_size);
-                if !param.data.is_null() {
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            src.as_ptr(),
-                            param.data.cast::<u8>(),
-                            copy_len,
-                        );
-                        // Null-terminate.
-                        *param.data.cast::<u8>().add(copy_len) = 0;
-                    }
+        } else if param.data_type == OSSL_PARAM_UTF8_STRING
+            && key_bytes == OSSL_PKEY_PARAM_GROUP_NAME.to_bytes()
+            && !key.group_name.is_empty()
+        {
+            // Write group name as a null-terminated UTF-8 string.
+            let src = &key.group_name;
+            let copy_len = src.len().min(param.data_size);
+            if !param.data.is_null() {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(src.as_ptr(), param.data.cast::<u8>(), copy_len);
+                    // Null-terminate.
+                    *param.data.cast::<u8>().add(copy_len) = 0;
                 }
-                param.return_size = src.len() + 1; // including null
             }
+            param.return_size = src.len() + 1; // including null
         }
 
         i += 1;
@@ -438,8 +434,6 @@ extern "C" fn keymgmt_settable_params(_provctx: *mut c_void) -> *const openssl_s
     empty_param_list()
 }
 
-/// Validate a key (always valid — proxy key).
-#[allow(unsafe_code)]
 /// Query which signature algorithm an EC key type prefers.
 #[allow(unsafe_code)]
 extern "C" fn ec_keymgmt_query_operation_name(operation_id: c_int) -> *const c_char {
@@ -561,7 +555,7 @@ unsafe fn extract_sign_func_from_params(
     None
 }
 
-/// Extract key metadata (bits, security_bits, max_sig_size) from params.
+/// Extract key metadata (bits, `security_bits`, `max_sig_size`) from params.
 ///
 /// # Safety
 ///
@@ -594,23 +588,24 @@ unsafe fn extract_key_metadata_from_params(
             } else if key_bytes == HARDMTLS_PARAM_MAX_SIZE.to_bytes() {
                 key.max_sig_size = unsafe { read_int_param(param) };
             }
-        } else if param.data_type == OSSL_PARAM_UTF8_STRING && !param.data.is_null() {
-            if key_bytes == HARDMTLS_PARAM_GROUP_NAME.to_bytes() {
-                // Read the group name as a UTF-8 string (null-terminated).
-                let cstr = unsafe { std::ffi::CStr::from_ptr(param.data.cast::<c_char>()) };
-                key.group_name = cstr.to_bytes().to_vec();
-                log::debug!(
-                    "hardmTLS provider: imported group_name={:?}",
-                    cstr.to_str().unwrap_or("?")
-                );
-            }
+        } else if param.data_type == OSSL_PARAM_UTF8_STRING
+            && !param.data.is_null()
+            && key_bytes == HARDMTLS_PARAM_GROUP_NAME.to_bytes()
+        {
+            // Read the group name as a UTF-8 string (null-terminated).
+            let cstr = unsafe { std::ffi::CStr::from_ptr(param.data.cast::<c_char>()) };
+            key.group_name = cstr.to_bytes().to_vec();
+            log::debug!(
+                "hardmTLS provider: imported group_name={:?}",
+                cstr.to_str().unwrap_or("?")
+            );
         }
 
         i += 1;
     }
 }
 
-/// Read a c_int from an OSSL_PARAM.
+/// Read a `c_int` from an `OSSL_PARAM`.
 ///
 /// # Safety
 ///
@@ -620,7 +615,7 @@ unsafe fn read_int_param(param: &openssl_sys::OSSL_PARAM) -> c_int {
     unsafe { std::ptr::read(param.data.cast::<c_int>()) }
 }
 
-/// Write a c_int into an OSSL_PARAM and set return_size.
+/// Write a `c_int` into an `OSSL_PARAM` and set `return_size`.
 ///
 /// # Safety
 ///
@@ -631,7 +626,7 @@ unsafe fn write_int_param(param: &mut openssl_sys::OSSL_PARAM, value: c_int) {
     param.return_size = std::mem::size_of::<c_int>();
 }
 
-/// Return a static empty (sentinel-only) OSSL_PARAM array.
+/// Return a static empty (sentinel-only) `OSSL_PARAM` array.
 fn empty_param_list() -> *const openssl_sys::OSSL_PARAM {
     struct SyncParams([openssl_sys::OSSL_PARAM; 1]);
 
@@ -742,7 +737,7 @@ extern "C" fn signature_sign(
     if sigret.is_null() {
         // Size query — use max_sig_size from key metadata, fallback to 512.
         let size = if key.max_sig_size > 0 {
-            key.max_sig_size as usize
+            key.max_sig_size.unsigned_abs() as usize
         } else {
             512
         };
@@ -833,7 +828,7 @@ extern "C" fn signature_digest_sign_final(
     if sigret.is_null() {
         // Size query — use max_sig_size from metadata, fallback to 512.
         let size = if key.max_sig_size > 0 {
-            key.max_sig_size as usize
+            key.max_sig_size.unsigned_abs() as usize
         } else {
             512
         };
@@ -888,7 +883,7 @@ extern "C" fn signature_digest_sign(
     if sigret.is_null() {
         // Size query.
         let size = if key.max_sig_size > 0 {
-            key.max_sig_size as usize
+            key.max_sig_size.unsigned_abs() as usize
         } else {
             512
         };
@@ -959,7 +954,6 @@ extern "C" fn signature_get_ctx_params(
 
 /// Declare gettable signature context parameters (empty).
 #[allow(unsafe_code)]
-#[allow(unsafe_code)]
 extern "C" fn signature_gettable_ctx_params(
     _ctx: *const c_void,
     _provctx: *const c_void,
@@ -996,7 +990,6 @@ extern "C" fn signature_set_ctx_params(
 }
 
 /// Declare settable signature context parameters (empty).
-#[allow(unsafe_code)]
 #[allow(unsafe_code)]
 extern "C" fn signature_settable_ctx_params(
     _ctx: *const c_void,
@@ -1470,7 +1463,7 @@ extern "C" fn provider_query_operation(
     operation_id: c_int,
     _no_cache: *mut c_int,
 ) -> *const OsslAlgorithm {
-    log::debug!("hardmTLS provider: query_operation(op_id={})", operation_id);
+    log::debug!("hardmTLS provider: query_operation(op_id={operation_id})");
     match operation_id {
         x if x == OSSL_OP_KEYMGMT => {
             log::debug!("hardmTLS provider: returning KEYMGMT algorithms");
@@ -1621,12 +1614,12 @@ mod tests {
         // RSA SIGNATURE has 16 entries + sentinel.
         assert_eq!(RSA_SIGNATURE_DISPATCH.len(), 17);
         assert_eq!(RSA_SIGNATURE_DISPATCH[16].function_id, 0);
-        assert_eq!(RSA_SIGNATURE_DISPATCH[16].function.is_none(), true);
+        assert!(RSA_SIGNATURE_DISPATCH[16].function.is_none());
 
         // ECDSA SIGNATURE has 16 entries + sentinel.
         assert_eq!(ECDSA_SIGNATURE_DISPATCH.len(), 17);
         assert_eq!(ECDSA_SIGNATURE_DISPATCH[16].function_id, 0);
-        assert_eq!(ECDSA_SIGNATURE_DISPATCH[16].function.is_none(), true);
+        assert!(ECDSA_SIGNATURE_DISPATCH[16].function.is_none());
 
         // Provider dispatch has 2 entries + sentinel.
         assert_eq!(PROVIDER_DISPATCH.len(), 3);
@@ -1722,24 +1715,21 @@ mod tests {
                     }
                     let lib = openssl_sys::ERR_lib_error_string(err);
                     let reason = openssl_sys::ERR_reason_error_string(err);
-                    let lib_s = if !lib.is_null() {
+                    let lib_s = if lib.is_null() {
+                        "?"
+                    } else {
                         std::ffi::CStr::from_ptr(lib).to_str().unwrap_or("?")
-                    } else {
-                        "?"
                     };
-                    let rsn_s = if !reason.is_null() {
-                        std::ffi::CStr::from_ptr(reason).to_str().unwrap_or("?")
-                    } else {
+                    let rsn_s = if reason.is_null() {
                         "?"
+                    } else {
+                        std::ffi::CStr::from_ptr(reason).to_str().unwrap_or("?")
                     };
                     eprintln!("  ERR: lib={lib_s} reason={rsn_s} code={err:#x}");
                 }
                 panic!("EVP_SIGNATURE_fetch('ECDSA', provider=hardmtls) returned NULL!");
             } else {
-                eprintln!(
-                    "EVP_SIGNATURE_fetch('ECDSA', provider=hardmtls) = {:?} ✓",
-                    sig
-                );
+                eprintln!("EVP_SIGNATURE_fetch('ECDSA', provider=hardmtls) = {sig:?} ✓");
                 openssl_sys::EVP_SIGNATURE_free(sig);
             }
         }

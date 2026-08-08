@@ -135,7 +135,7 @@ pub const OSSL_KEYMGMT_SELECT_PUBLIC_KEY: c_int = 0x02;
 // OSSL_PARAM data types
 /// Signed integer parameter.
 pub const OSSL_PARAM_INTEGER: u32 = 1;
-/// UTF-8 string parameter (used for group_name, etc.).
+/// UTF-8 string parameter (used for `group_name`, etc.).
 pub const OSSL_PARAM_UTF8_STRING: u32 = 4;
 /// Octet string (arbitrary binary data).
 pub const OSSL_PARAM_OCTET_STRING: u32 = 5;

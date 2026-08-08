@@ -72,11 +72,13 @@ impl Pkcs11Backend {
         //     underlying C library was already initialized by another caller
         match pkcs11.initialize(CInitializeArgs::OsThreads) {
             Ok(()) => {}
-            Err(cryptoki::error::Error::AlreadyInitialized)
-            | Err(cryptoki::error::Error::Pkcs11(
-                cryptoki::error::RvError::CryptokiAlreadyInitialized,
-                _,
-            )) => {
+            Err(
+                cryptoki::error::Error::AlreadyInitialized
+                | cryptoki::error::Error::Pkcs11(
+                    cryptoki::error::RvError::CryptokiAlreadyInitialized,
+                    _,
+                ),
+            ) => {
                 log::debug!("PKCS#11 already initialized — reusing existing session");
             }
             Err(e) => {

@@ -77,10 +77,7 @@ pub unsafe fn configure_ssl_context(
 
     // ── Load certificate into SSL_CTX ──────────────────────────────────
     let ssl_ctx = ctx.cast::<openssl_sys::SSL_CTX>();
-    log::debug!(
-        "hardmTLS: calling SSL_CTX_use_certificate (ssl_ctx={:?})",
-        ssl_ctx
-    );
+    log::debug!("hardmTLS: calling SSL_CTX_use_certificate (ssl_ctx={ssl_ctx:?})");
 
     // SAFETY: ssl_ctx is valid (guaranteed by caller), x509 is valid.
     let rc = unsafe { openssl_sys::SSL_CTX_use_certificate(ssl_ctx, x509.as_ptr()) };
@@ -96,6 +93,7 @@ pub unsafe fn configure_ssl_context(
         .public_key()
         .map_err(|e| HardmtlsError::SslError(format!("failed to get public key: {e}")))?;
 
+    #[allow(clippy::cast_possible_wrap)]
     let (key_type_name, key_bits, security_bits, max_sig_size, group_name) =
         if let Ok(rsa) = pub_key.rsa() {
             let bits = rsa.size() as c_int * 8; // RSA::size() returns bytes
@@ -109,7 +107,7 @@ pub unsafe fn configure_ssl_context(
                 .ok_or_else(|| HardmtlsError::SslError("EC key has no named curve".into()))?;
             let (bits, sec_bits, max_size) = ec_key_metadata(nid)?;
             // Get the curve's short name (e.g., "prime256v1").
-            let curve_name = nid.short_name().map(|s| s.to_string()).ok();
+            let curve_name = nid.short_name().map(ToString::to_string).ok();
             (c"EC", bits, sec_bits, max_size, curve_name)
         } else {
             return Err(HardmtlsError::SslError(
@@ -138,12 +136,9 @@ pub unsafe fn configure_ssl_context(
             group_name.as_deref(),
         )
     }?;
-    log::debug!("hardmTLS: provider EVP_PKEY created ({:?})", pkey);
+    log::debug!("hardmTLS: provider EVP_PKEY created ({pkey:?})");
 
-    // SAFETY: ssl_ctx and pkey are valid.
-    log::debug!("hardmTLS: calling SSL_CTX_use_PrivateKey");
-    let rc = unsafe { openssl_sys::SSL_CTX_use_PrivateKey(ssl_ctx, pkey) };
-
+    #[allow(clippy::items_after_statements)]
     extern "C" {
         fn SSL_CTX_set_client_cert_cb(
             ctx: *mut openssl_sys::SSL_CTX,
@@ -156,6 +151,11 @@ pub unsafe fn configure_ssl_context(
             >,
         );
     }
+
+    // SAFETY: ssl_ctx and pkey are valid.
+    log::debug!("hardmTLS: calling SSL_CTX_use_PrivateKey");
+    let rc = unsafe { openssl_sys::SSL_CTX_use_PrivateKey(ssl_ctx, pkey) };
+
     unsafe {
         SSL_CTX_set_client_cert_cb(ssl_ctx, Some(client_cert_cb));
     }
@@ -196,7 +196,7 @@ fn rsa_security_bits(key_bits: c_int) -> c_int {
     }
 }
 
-/// Get key metadata (bits, security_bits, max_sig_size) for an EC key by curve NID.
+/// Get key metadata (bits, `security_bits`, `max_sig_size`) for an EC key by curve NID.
 fn ec_key_metadata(nid: openssl::nid::Nid) -> Result<(c_int, c_int, c_int), HardmtlsError> {
     use openssl::nid::Nid;
 
@@ -207,8 +207,7 @@ fn ec_key_metadata(nid: openssl::nid::Nid) -> Result<(c_int, c_int, c_int), Hard
         Nid::SECP384R1 => Ok((384, 192, 104)),       // P-384
         Nid::SECP521R1 => Ok((521, 256, 141)),       // P-521
         _ => Err(HardmtlsError::SslError(format!(
-            "unsupported EC curve NID: {:?}",
-            nid
+            "unsupported EC curve NID: {nid:?}"
         ))),
     }
 }
@@ -346,6 +345,36 @@ unsafe fn create_provider_pkey(
     }
 
     Ok(pkey)
+}
+
+#[allow(unsafe_code)]
+extern "C" fn client_cert_cb(
+    ssl: *mut openssl_sys::SSL,
+    x509: *mut *mut openssl_sys::X509,
+    pkey: *mut *mut openssl_sys::EVP_PKEY,
+) -> std::ffi::c_int {
+    unsafe {
+        let ssl_ctx = openssl_sys::SSL_get_SSL_CTX(ssl);
+        if ssl_ctx.is_null() {
+            return 0;
+        }
+
+        let cert = openssl_sys::SSL_CTX_get0_certificate(ssl_ctx);
+        let private_key = openssl_sys::SSL_CTX_get0_privatekey(ssl_ctx);
+
+        if cert.is_null() || private_key.is_null() {
+            return 0;
+        }
+
+        openssl_sys::X509_up_ref(cert);
+        openssl_sys::EVP_PKEY_up_ref(private_key);
+
+        *x509 = cert;
+        *pkey = private_key;
+
+        log::debug!("hardmTLS: client_cert_cb invoked, forcing client cert selection");
+        1
+    }
 }
 
 #[cfg(test)]
@@ -516,35 +545,5 @@ mod tests {
         if let Ok(pkey) = result {
             unsafe { openssl_sys::EVP_PKEY_free(pkey) };
         }
-    }
-}
-
-#[allow(unsafe_code)]
-extern "C" fn client_cert_cb(
-    ssl: *mut openssl_sys::SSL,
-    x509: *mut *mut openssl_sys::X509,
-    pkey: *mut *mut openssl_sys::EVP_PKEY,
-) -> std::ffi::c_int {
-    unsafe {
-        let ssl_ctx = openssl_sys::SSL_get_SSL_CTX(ssl);
-        if ssl_ctx.is_null() {
-            return 0;
-        }
-
-        let cert = openssl_sys::SSL_CTX_get0_certificate(ssl_ctx);
-        let private_key = openssl_sys::SSL_CTX_get0_privatekey(ssl_ctx);
-
-        if cert.is_null() || private_key.is_null() {
-            return 0;
-        }
-
-        openssl_sys::X509_up_ref(cert);
-        openssl_sys::EVP_PKEY_up_ref(private_key);
-
-        *x509 = cert;
-        *pkey = private_key;
-
-        log::debug!("hardmTLS: client_cert_cb invoked, forcing client cert selection");
-        1
     }
 }
