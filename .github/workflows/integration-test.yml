@@ -248,6 +248,28 @@ jobs:
             soft_key_flag: "--soft-key"
             artifact_name: wif-bunker-windows-x86_64
             expected_algos: "es256 es384 rsa2048 rsa3072 rsa4096"
+          # ── Native SSL/Python: test with runner's pre-installed OpenSSL + Python ──
+          - os: ubuntu-24.04
+            name: Linux x64 (native-ssl)
+            runner_id: linux-swtpm
+            soft_key_flag: ""
+            artifact_name: wif-bunker-linux-x86_64
+            expected_algos: "es256 es384 rsa2048 rsa3072"
+            use_native_ssl_and_python: true
+          - os: macos-15
+            name: macOS ARM64 (native-ssl)
+            runner_id: macos
+            soft_key_flag: ""
+            artifact_name: wif-bunker-macos-arm64
+            expected_algos: "es256 es384"
+            use_native_ssl_and_python: true
+          - os: windows-2025
+            name: Windows x64 (native-ssl)
+            runner_id: windows
+            soft_key_flag: "--soft-key"
+            artifact_name: wif-bunker-windows-x86_64
+            expected_algos: "es256 es384 rsa2048 rsa3072 rsa4096"
+            use_native_ssl_and_python: true
           - name: Hardware TPM (NUC8)
             runs_on: '["self-hosted", "Linux", "X64", "tpm"]'
             runner_id: nuc8-tpm
@@ -269,7 +291,7 @@ jobs:
     name: ${{ matrix.name }}
     environment: ${{ matrix.self_hosted && 'tpm-hardware' || '' }}
     concurrency:
-      group: wif-ci-${{ matrix.runner_id }}
+      group: wif-ci-${{ matrix.runner_id }}-${{ matrix.use_native_ssl_and_python && 'native' || 'cached' }}
       cancel-in-progress: true
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -364,6 +386,7 @@ jobs:
       # ══════════════════════════════════════════════════════════════════════
 
       - name: "Restore compiled OpenSSL + Python"
+        if: ${{ !matrix.use_native_ssl_and_python }}
         uses: actions/cache/restore@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         id: cache-python-ssl
         with:
@@ -376,6 +399,7 @@ jobs:
           fail-on-cache-miss: true
 
       - name: "Debug: Inspect cached OpenSSL + Python"
+        if: ${{ !matrix.use_native_ssl_and_python }}
         shell: bash
         run: |
           echo "══════════════════════════════════════════════════"
@@ -429,7 +453,8 @@ jobs:
             find bin/python -name '_ssl*' 2>/dev/null || echo "_ssl not found"
           fi
 
-      - name: "Set PYTHON env var and library paths"
+      - name: "Set PYTHON env var and library paths (cached build)"
+        if: ${{ !matrix.use_native_ssl_and_python }}
         shell: bash
         run: |
           # Set the exact path to our compiled Python binary.
@@ -458,7 +483,66 @@ jobs:
           ls -la "${PYTHON}" 2>/dev/null || echo "WARNING: ${PYTHON} does not exist!"
           echo "LD_LIBRARY_PATH: ${LD_LIBRARY_PATH}"
 
-      - name: "Verify compiled Python + OpenSSL"
+      - name: "Set PYTHON env var and library paths (native)"
+        if: ${{ matrix.use_native_ssl_and_python }}
+        shell: bash
+        run: |
+          # Use the runner's pre-installed Python and OpenSSL instead of
+          # our cached custom build.  This tests against whatever the
+          # platform ships with natively (OpenSSL 3.x required).
+
+          # ── Find native Python ──
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            PYTHON="$(which python)"
+          else
+            PYTHON="$(which python3)"
+          fi
+          echo "PYTHON=${PYTHON}" >> $GITHUB_ENV
+
+          # ── Find native OpenSSL ──
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            NATIVE_OPENSSL_DIR="/usr"
+          elif [[ "${RUNNER_OS}" == "macOS" ]]; then
+            # macOS runners have Homebrew OpenSSL pre-installed.
+            if brew --prefix openssl@3 >/dev/null 2>&1; then
+              NATIVE_OPENSSL_DIR="$(brew --prefix openssl@3)"
+            elif brew --prefix openssl >/dev/null 2>&1; then
+              NATIVE_OPENSSL_DIR="$(brew --prefix openssl)"
+            else
+              echo "::error::No Homebrew OpenSSL found on macOS runner"
+              exit 1
+            fi
+          elif [[ "${RUNNER_OS}" == "Windows" ]]; then
+            NATIVE_OPENSSL_DIR="C:/Program Files/OpenSSL"
+            if [ ! -d "$NATIVE_OPENSSL_DIR" ]; then
+              echo "::error::OpenSSL not found at ${NATIVE_OPENSSL_DIR}"
+              exit 1
+            fi
+          fi
+
+          # Override OPENSSL_INSTALL_PATH so downstream steps
+          # (hardmTLS build, library path setup) use the native OpenSSL.
+          echo "OPENSSL_INSTALL_PATH=${NATIVE_OPENSSL_DIR}" >> $GITHUB_ENV
+
+          # Library search paths for dynamic linking against native OpenSSL.
+          export LD_LIBRARY_PATH="${NATIVE_OPENSSL_DIR}/lib:${LD_LIBRARY_PATH}"
+          echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+          if [[ "${RUNNER_OS}" == "macOS" ]]; then
+            export DYLD_LIBRARY_PATH="${NATIVE_OPENSSL_DIR}/lib:${DYLD_LIBRARY_PATH}"
+            echo "DYLD_LIBRARY_PATH=${DYLD_LIBRARY_PATH}" >> $GITHUB_ENV
+          fi
+
+          echo "── Native environment ──"
+          echo "PYTHON=${PYTHON}"
+          "${PYTHON}" --version
+          echo "OPENSSL_DIR=${NATIVE_OPENSSL_DIR}"
+          if [ -x "${NATIVE_OPENSSL_DIR}/bin/openssl" ]; then
+            "${NATIVE_OPENSSL_DIR}/bin/openssl" version
+          elif command -v openssl >/dev/null 2>&1; then
+            openssl version
+          fi
+
+      - name: "Verify Python + OpenSSL"
         shell: bash
         run: |
           echo "══════════════════════════════════════════════════"
@@ -762,7 +846,7 @@ jobs:
         if: ${{ !inputs.use_built_binary }}
         shell: bash
         env:
-          OPENSSL_DIR: ${{ github.workspace }}/bin/ssl
+          OPENSSL_DIR: ${{ env.OPENSSL_INSTALL_PATH }}
           # NOTE: Do NOT set OPENSSL_STATIC=1 here. When loaded into
           # the same process as Python, hardmTLS must dynamically link
           # against the same OpenSSL that Python uses. Static linking
