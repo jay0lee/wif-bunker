@@ -88,7 +88,7 @@ class TestRunAttestCertParsing:
     def test_garbage_cert_file_raises(self, tmp_path):
         """--attest with a garbage file that isn't PEM raises."""
         garbage = tmp_path / "garbage.pem"
-        garbage.write_text("this is not a certificate")
+        garbage.write_text("this is not a certificate", encoding="utf-8")
         config = WorkloadConfig()
         with pytest.raises(Exception):  # noqa: B017
             _run_attest(config, str(tmp_path / "output"), str(garbage))
@@ -98,7 +98,7 @@ class TestRunAttestCertParsing:
         """Self-signed cert CN is correctly extracted and set on config."""
         cert_pem = _self_signed_pem("my-test-workload-42")
         cert_file = tmp_path / "workload_cert.pem"
-        cert_file.write_text(cert_pem)
+        cert_file.write_text(cert_pem, encoding="utf-8")
 
         mock_attest.return_value = AttestationReport(platform="test", supported=False, hardware_type="Test")
         config = WorkloadConfig()
@@ -112,7 +112,7 @@ class TestRunAttestCertParsing:
         """Cert with no CN uses the default config CN."""
         cert_pem = _no_cn_pem()
         cert_file = tmp_path / "no_cn.pem"
-        cert_file.write_text(cert_pem)
+        cert_file.write_text(cert_pem, encoding="utf-8")
 
         mock_attest.return_value = AttestationReport(platform="test", supported=False, hardware_type="Test")
         config = WorkloadConfig()
@@ -166,7 +166,7 @@ class TestAttestationWithSelfSignedCert:
         # JSON report should exist and be valid
         json_path = tmp_path / "attestation_report.json"
         assert json_path.exists()
-        data = json.loads(json_path.read_text())
+        data = json.loads(json_path.read_text(encoding="utf-8"))
         assert data["platform"] == "macos-se"
         assert data["supported"] is False
         assert data["checks_passed"] < data["checks_total"]
@@ -174,7 +174,7 @@ class TestAttestationWithSelfSignedCert:
         # Text report should exist
         text_path = tmp_path / "attestation_report.txt"
         assert text_path.exists()
-        text = text_path.read_text()
+        text = text_path.read_text(encoding="utf-8")
         assert "Hardware Attestation Report" in text
 
     @patch("wif_bunker.attestation.windows._run_powershell")
@@ -218,7 +218,7 @@ class TestRunAttestEndToEnd:
         """A self-signed cert produces a failing attestation report."""
         cert_pem = _self_signed_pem("self-signed-test")
         cert_file = tmp_path / "workload_cert.pem"
-        cert_file.write_text(cert_pem)
+        cert_file.write_text(cert_pem, encoding="utf-8")
         output_dir = tmp_path / "attest-output"
 
         # Return a report where everything fails
@@ -242,7 +242,7 @@ class TestRunAttestEndToEnd:
 
         # Report should be written
         assert (output_dir / "attestation_report.json").exists()
-        data = json.loads((output_dir / "attestation_report.json").read_text())
+        data = json.loads((output_dir / "attestation_report.json").read_text(encoding="utf-8"))
         assert data["checks_passed"] == 0
         assert data["checks_total"] == 7
 
@@ -251,7 +251,7 @@ class TestRunAttestEndToEnd:
         """RSA self-signed cert CN is correctly parsed."""
         cert_pem = _rsa_self_signed_pem("rsa-test-workload")
         cert_file = tmp_path / "rsa_cert.pem"
-        cert_file.write_text(cert_pem)
+        cert_file.write_text(cert_pem, encoding="utf-8")
 
         mock_attest.return_value = AttestationReport(platform="test", supported=False, hardware_type="Test")
         config = WorkloadConfig()

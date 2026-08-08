@@ -200,6 +200,7 @@ class TestYubiKeyKeystore:
     @patch("wif_bunker.keystore.yubikey._create_ca_and_sign")
     @patch("yubikit.core.smartcard.SmartCardConnection", create=True)
     @patch("yubikit.piv.PivSession", create=True)
+    @patch("wif_bunker.keystore.yubikey.sys.platform", "linux")
     def test_generates_key_and_imports_cert(
         self, mock_piv_class, mock_conn, mock_ca, mock_path, mock_list, config, tmp_path
     ):
