@@ -272,13 +272,18 @@ jobs:
       # Verify
       # ════════════════════════════════════════════════════════════════
 
-      - name: "Add compiled Python to PATH"
+      - name: "Set PYTHON env var and library paths"
         shell: bash
         run: |
+          # Set the exact path to our compiled Python binary.
+          # On Windows, CPython installs as python.exe (no python3 symlink).
+          # Using $PYTHON everywhere avoids picking up a system Python.
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            PYTHON="${PYTHON_INSTALL_PATH}/python.exe"
             echo "${PYTHON_INSTALL_PATH}" >> "$GITHUB_PATH"
             echo "${PYTHON_INSTALL_PATH}/Scripts" >> "$GITHUB_PATH"
           else
+            PYTHON="${PYTHON_INSTALL_PATH}/bin/python3"
             echo "${PYTHON_INSTALL_PATH}/bin" >> "$GITHUB_PATH"
             if [[ "${RUNNER_OS}" == "Linux" ]]; then
               echo "LD_LIBRARY_PATH=${PYTHON_INSTALL_PATH}/lib:${OPENSSL_INSTALL_PATH}/lib" >> $GITHUB_ENV
@@ -286,6 +291,10 @@ jobs:
               echo "DYLD_LIBRARY_PATH=${PYTHON_INSTALL_PATH}/lib:${OPENSSL_INSTALL_PATH}/lib" >> $GITHUB_ENV
             fi
           fi
+
+          echo "PYTHON=${PYTHON}" >> $GITHUB_ENV
+          echo "Compiled Python binary: ${PYTHON}"
+          ls -la "${PYTHON}" 2>/dev/null || echo "WARNING: ${PYTHON} does not exist!"
 
       - name: "Verify compiled Python + OpenSSL"
         shell: bash
@@ -295,20 +304,25 @@ jobs:
           echo "══════════════════════════════════════════════════"
 
           echo ""
-          echo "=== Which python3 is on PATH ==="
-          which python3 || echo "python3 NOT FOUND"
+          echo "=== PYTHON env var ==="
+          echo "PYTHON=${PYTHON}"
+          ls -la "${PYTHON}" || echo "PYTHON binary NOT FOUND"
           echo ""
           echo "=== Python version ==="
-          python3 --version
+          "${PYTHON}" --version
           echo ""
           echo "=== Python sys.executable ==="
-          python3 -c "import sys; print(f'sys.executable: {sys.executable}')"
+          "${PYTHON}" -c "import sys; print(f'sys.executable: {sys.executable}')"
+          echo ""
+          echo "=== Which python3 is on PATH (for comparison) ==="
+          which python3 2>/dev/null || echo "python3 not on PATH"
+          which python 2>/dev/null || echo "python not on PATH"
           echo ""
           echo "=== OpenSSL (standalone binary) ==="
           "${OPENSSL_INSTALL_PATH}/bin/openssl" version -a
           echo ""
           echo "=== OpenSSL (via Python ssl module) ==="
-          python3 -c "
+          "${PYTHON}" -c "
           import ssl, sys
           print(f'Python version:       {sys.version}')
           print(f'Python executable:    {sys.executable}')
@@ -324,7 +338,7 @@ jobs:
           echo ""
           echo "=== Version match check ==="
           STANDALONE_VER=$("${OPENSSL_INSTALL_PATH}/bin/openssl" version 2>/dev/null | awk '{print $2}')
-          PYTHON_VER=$(python3 -c "import ssl; print(ssl.OPENSSL_VERSION.split()[1])")
+          PYTHON_VER=$("${PYTHON}" -c "import ssl; print(ssl.OPENSSL_VERSION.split()[1])")
           echo "Standalone OpenSSL: ${STANDALONE_VER}"
           echo "Python ssl OpenSSL: ${PYTHON_VER}"
           if [[ "${STANDALONE_VER}" == "${PYTHON_VER}" ]]; then

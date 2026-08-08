@@ -7,9 +7,9 @@ on:
   workflow_call:
     inputs:
       wif_bunker_cmd:
-        description: 'Command to invoke wif-bunker (e.g. python -m wif_bunker or ./wif-bunker)'
+        description: 'Command to invoke wif-bunker (e.g. $PYTHON -m wif_bunker or ./wif-bunker)'
         required: false
-        default: 'python -m wif_bunker'
+        default: '$PYTHON -m wif_bunker'
         type: string
       use_built_binary:
         description: 'Set true to download and test a pre-built binary artifact (hardmTLS bundled)'
@@ -419,16 +419,18 @@ jobs:
             find bin/python -name '_ssl*' 2>/dev/null || echo "_ssl not found"
           fi
 
-      - name: "Add compiled Python to PATH"
+      - name: "Set PYTHON env var and library paths"
         shell: bash
         run: |
+          # Set the exact path to our compiled Python binary.
+          # On Windows, CPython installs as python.exe (no python3 symlink).
+          # Using $PYTHON everywhere avoids picking up a system Python.
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
-            echo "Adding to PATH: ${PYTHON_INSTALL_PATH}"
-            echo "Adding to PATH: ${PYTHON_INSTALL_PATH}/Scripts"
+            PYTHON="${PYTHON_INSTALL_PATH}/python.exe"
             echo "${PYTHON_INSTALL_PATH}" >> "$GITHUB_PATH"
             echo "${PYTHON_INSTALL_PATH}/Scripts" >> "$GITHUB_PATH"
           else
-            echo "Adding to PATH: ${PYTHON_INSTALL_PATH}/bin"
+            PYTHON="${PYTHON_INSTALL_PATH}/bin/python3"
             echo "${PYTHON_INSTALL_PATH}/bin" >> "$GITHUB_PATH"
             if [[ "${RUNNER_OS}" == "Linux" ]]; then
               echo "LD_LIBRARY_PATH=${PYTHON_INSTALL_PATH}/lib:${OPENSSL_INSTALL_PATH}/lib:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
@@ -436,6 +438,10 @@ jobs:
               echo "DYLD_LIBRARY_PATH=${PYTHON_INSTALL_PATH}/lib:${OPENSSL_INSTALL_PATH}/lib:${DYLD_LIBRARY_PATH}" >> $GITHUB_ENV
             fi
           fi
+
+          echo "PYTHON=${PYTHON}" >> $GITHUB_ENV
+          echo "Compiled Python binary: ${PYTHON}"
+          ls -la "${PYTHON}" 2>/dev/null || echo "WARNING: ${PYTHON} does not exist!"
 
       - name: "Verify compiled Python + OpenSSL"
         shell: bash
@@ -445,18 +451,18 @@ jobs:
           echo "══════════════════════════════════════════════════"
 
           echo ""
-          echo "=== Which python3 is on PATH ==="
-          which python3 || echo "python3 NOT FOUND on PATH"
-          which python3.14 2>/dev/null || which python3.12 2>/dev/null || true
+          echo "=== PYTHON env var ==="
+          echo "PYTHON=${PYTHON}"
+          ls -la "${PYTHON}" || echo "PYTHON binary NOT FOUND"
           echo ""
-          echo "=== python3 --version ==="
-          python3 --version
+          echo "=== Python version ==="
+          "${PYTHON}" --version
           echo ""
           echo "=== Python sys.executable ==="
-          python3 -c "import sys; print(f'sys.executable: {sys.executable}')"
+          "${PYTHON}" -c "import sys; print(f'sys.executable: {sys.executable}')"
           echo ""
           echo "=== Python ssl module details ==="
-          python3 -c "
+          "${PYTHON}" -c "
           import ssl, sys, os
           print(f'Python version:       {sys.version}')
           print(f'Python executable:    {sys.executable}')
@@ -468,27 +474,18 @@ jobs:
               print(f'_ssl module file:     {_ssl.__file__}')
           except Exception as e:
               print(f'_ssl import error:    {e}')
-          print(f'PATH: {os.environ.get(\"PATH\", \"(not set)\")[:200]}...')
           "
           echo ""
-          echo "=== Expected vs actual ==="
-          EXPECTED_PYTHON="${PYTHON_INSTALL_PATH}"
-          ACTUAL_PYTHON=$(python3 -c "import sys; print(sys.executable)")
-          echo "Expected prefix: ${EXPECTED_PYTHON}"
-          echo "Actual executable: ${ACTUAL_PYTHON}"
-          if [[ "${ACTUAL_PYTHON}" == "${EXPECTED_PYTHON}"* ]]; then
-            echo "✓ Python executable is from compiled cache"
-          else
-            echo "✗ WARNING: Python executable is NOT from compiled cache!"
-            echo "  This means a system Python is being used instead."
-          fi
+          echo "=== Which python3 is on PATH (for comparison) ==="
+          which python3 2>/dev/null && python3 --version 2>/dev/null || echo "python3 not on PATH"
+          which python 2>/dev/null && python --version 2>/dev/null || echo "python not on PATH"
 
 
 
       - name: Create venv and install dependencies
         shell: bash
         run: |
-          python3 -m venv .venv
+          "${PYTHON}" -m venv .venv
           if [ -d ".venv/Scripts" ]; then
             source .venv/Scripts/activate
             echo "$PWD/.venv/Scripts" >> "$GITHUB_PATH"
@@ -498,7 +495,7 @@ jobs:
           fi
           # Windows ARM64 has no PyPI cryptography wheel — install from jay0lee/cryptography-wheels
           if [ "$RUNNER_OS" = "Windows" ] && [ "$RUNNER_ARCH" = "ARM64" ]; then
-            WHEEL_URL=$(python -c "
+            WHEEL_URL=$("${PYTHON}" -c "
           import json, urllib.request, sys
           rel = json.loads(urllib.request.urlopen('https://api.github.com/repos/jay0lee/cryptography-wheels/releases/latest').read())
           py_ver = f'cp{sys.version_info.major}{sys.version_info.minor}'
@@ -527,7 +524,7 @@ jobs:
       - name: "Diagnostic: --all-versions"
         shell: bash
         run: |
-          WIF_CMD="${{ inputs.wif_bunker_cmd || 'python -m wif_bunker' }}"
+          WIF_CMD="${{ inputs.wif_bunker_cmd || '${PYTHON} -m wif_bunker' }}"
           $WIF_CMD --all-versions
 
       # ── Baseline: confirm GHA CI service account is working ──
@@ -536,7 +533,7 @@ jobs:
         run: |
           echo "=== ADC baseline with GHA CI credentials ==="
           # -u: unbuffered stdout so tee captures the complete output
-          python -u minimal-adc.py | tee "$RUNNER_TEMP/adc_baseline.txt"
+          "${PYTHON}" -u minimal-adc.py | tee "$RUNNER_TEMP/adc_baseline.txt"
 
           # Confirm we see the expected CI service account
           GHA_SA="$RUNNER_SA"
@@ -757,7 +754,7 @@ jobs:
           ls -la "${OPENSSL_DIR}/lib/"libssl* "${OPENSSL_DIR}/lib/"libcrypto* 2>/dev/null || echo "No OpenSSL libs found"
           echo ""
           echo "=== Python's OpenSSL (for comparison) ==="
-          python3 -c "import ssl; print(f'Python ssl uses: {ssl.OPENSSL_VERSION}')" 2>/dev/null || echo "Could not check Python ssl"
+          "${PYTHON}" -c "import ssl; print(f'Python ssl uses: {ssl.OPENSSL_VERSION}')" 2>/dev/null || echo "Could not check Python ssl"
           echo ""
 
           cd hardmtls-native
@@ -778,7 +775,7 @@ jobs:
         run: |
           echo "=== Discovering YubiKey serials ==="
           # Discover all connected YubiKey serials and firmware versions
-          KEYS=$(python3 -c "from ykman.device import list_all_devices; [print(i.serial, '%d.%d.%d' % i.version) for _, i in list_all_devices()]")
+          KEYS=$("${PYTHON}" -c "from ykman.device import list_all_devices; [print(i.serial, '%d.%d.%d' % i.version) for _, i in list_all_devices()]")
           echo "Connected YubiKeys:"
           echo "$KEYS"
 
@@ -790,7 +787,7 @@ jobs:
           echo "✓ Found $KEY_COUNT YubiKeys"
 
           # Test 1: --use-yubikey without --yubikey-serial should error (multiple keys)
-          WIF_CMD="${{ inputs.wif_bunker_cmd || 'python -m wif_bunker' }}"
+          WIF_CMD="${{ inputs.wif_bunker_cmd || '${PYTHON} -m wif_bunker' }}"
           outdir=$(mktemp -d)
           if $WIF_CMD --cert-only --use-yubikey --output-dir "$outdir" 2>&1; then
             echo "FAIL: --use-yubikey without --yubikey-serial should have errored"
@@ -821,7 +818,7 @@ jobs:
 
           # Reset PIV applet to factory defaults before testing
           # (clears any leftover management key, PIN, PUK from previous runs)
-          python3 -c "import sys; from ykman.device import list_all_devices; from yubikit.core.smartcard import SmartCardConnection; from yubikit.piv import PivSession; serial=int(sys.argv[1]); [PivSession(dev.open_connection(SmartCardConnection)).reset() or print('YubiKey', serial, 'PIV reset to factory defaults') for dev, info in list_all_devices() if info.serial == serial]" "$SERIAL"
+          "${PYTHON}" -c "import sys; from ykman.device import list_all_devices; from yubikit.core.smartcard import SmartCardConnection; from yubikit.piv import PivSession; serial=int(sys.argv[1]); [PivSession(dev.open_connection(SmartCardConnection)).reset() or print('YubiKey', serial, 'PIV reset to factory defaults') for dev, info in list_all_devices() if info.serial == serial]" "$SERIAL"
 
       # ── Test --cert-and-mtls-test (hardmTLS mTLS smoke test) ──
       # This tests the full hardware-backed signing → mTLS pipeline WITHOUT
@@ -833,7 +830,7 @@ jobs:
         shell: bash
         run: |
           echo "=== Testing --cert-and-mtls-test ==="
-          WIF_CMD="${{ inputs.wif_bunker_cmd || 'python -m wif_bunker' }}"
+          WIF_CMD="${{ inputs.wif_bunker_cmd || '${PYTHON} -m wif_bunker' }}"
           outdir=$(mktemp -d)
 
           # Each cert generation triggers CA store dialogs on Windows
@@ -864,7 +861,7 @@ jobs:
         run: |
           echo "=== Testing --cert-only for all supported algorithms ==="
 
-          WIF_CMD="${{ inputs.wif_bunker_cmd || 'python -m wif_bunker' }}"
+          WIF_CMD="${{ inputs.wif_bunker_cmd || '${PYTHON} -m wif_bunker' }}"
 
           # Dynamically discover supported algorithms from the active keystore
           # tr -d '\r' strips Windows CRLF line endings
@@ -933,7 +930,7 @@ jobs:
           echo "=== Testing --attest ==="
           certdir=$(mktemp -d)
           attestdir=$(mktemp -d)
-          WIF_CMD="${{ inputs.wif_bunker_cmd || 'python -m wif_bunker' }}"
+          WIF_CMD="${{ inputs.wif_bunker_cmd || '${PYTHON} -m wif_bunker' }}"
 
           # Generate a cert first so there's something to attest
           DIALOG_PID=""
@@ -973,7 +970,7 @@ jobs:
 
           # Verify JSON is valid and has expected structure
           # On self-hosted (hardware TPM): demand ALL checks pass (6/6)
-          python3 -c "
+          "${PYTHON}" -c "
           import json, sys, os
           report_path = os.path.join(sys.argv[1], 'attestation_report.json')
           with open(report_path) as f:
@@ -1002,7 +999,7 @@ jobs:
           echo "=== Testing --cert-only overwrite protection ==="
           outdir=$(mktemp -d)
           echo '{}' > "$outdir/adc.json"
-          WIF_CMD="${{ inputs.wif_bunker_cmd || 'python -m wif_bunker' }}"
+          WIF_CMD="${{ inputs.wif_bunker_cmd || '${PYTHON} -m wif_bunker' }}"
           if $WIF_CMD --cert-only --output-dir "$outdir" ${{ matrix.soft_key_flag }} $YUBIKEY_FLAGS 2>&1; then
             echo "FAIL: --cert-only should have refused to overwrite"
             exit 1
@@ -1022,7 +1019,7 @@ jobs:
             DIALOG_PID=$!
             echo "Dialog auto-accept PID: $DIALOG_PID"
           fi
-          ${{ inputs.wif_bunker_cmd || 'python -m wif_bunker' }} \
+          ${{ inputs.wif_bunker_cmd || '${PYTHON} -m wif_bunker' }} \
             --debug \
             --use-adc \
             --create-project="${{ steps.config.outputs.project_id }}" \
@@ -1037,7 +1034,7 @@ jobs:
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             powershell -NoProfile -File .github/scripts/win_dialog_accept.ps1 &
           fi
-          ${{ inputs.wif_bunker_cmd || 'python -m wif_bunker' }} \
+          ${{ inputs.wif_bunker_cmd || '${PYTHON} -m wif_bunker' }} \
             --use-adc \
             --use-project="${{ steps.config.outputs.project_id }}" \
             --use-pool=bunker-wif-pool \
@@ -1058,7 +1055,7 @@ jobs:
           # Clear GHA's OIDC credential file to prove we're using bunker creds
           unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE 2>/dev/null || true
 
-          python minimal-adc.py | tee "$RUNNER_TEMP/adc_output.txt"
+          "${PYTHON}" minimal-adc.py | tee "$RUNNER_TEMP/adc_output.txt"
 
           # Validate we're NOT accidentally using the GHA CI service account
           echo ""
@@ -1083,7 +1080,7 @@ jobs:
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             powershell -NoProfile -File .github/scripts/win_dialog_accept.ps1 &
           fi
-          ${{ inputs.wif_bunker_cmd || 'python -m wif_bunker' }} \
+          ${{ inputs.wif_bunker_cmd || '${PYTHON} -m wif_bunker' }} \
             --use-adc \
             --use-project="${{ steps.config.outputs.project_id }}" \
             --use-pool=bunker-wif-pool \
@@ -1101,7 +1098,7 @@ jobs:
           export GOOGLE_API_CERTIFICATE_CONFIG="$PWD/certificate_config.json"
           unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE 2>/dev/null || true
 
-          python minimal-adc.py | tee "$RUNNER_TEMP/adc_output_nosa.txt"
+          "${PYTHON}" minimal-adc.py | tee "$RUNNER_TEMP/adc_output_nosa.txt"
 
           # Validate we're NOT accidentally using the GHA CI service account
           echo ""
@@ -1123,7 +1120,7 @@ jobs:
           export GOOGLE_API_USE_CLIENT_CERTIFICATE=true
           export GOOGLE_API_CERTIFICATE_CONFIG="$PWD/certificate_config.json"
           unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE 2>/dev/null || true
-          ${{ inputs.wif_bunker_cmd || 'python -m wif_bunker' }} --status
+          ${{ inputs.wif_bunker_cmd || '${PYTHON} -m wif_bunker' }} --status
 
 
       # ── Upload Windows screenshots for dialog debugging ──
@@ -1161,7 +1158,7 @@ jobs:
           # Reset YubiKey PIV state if this was a YubiKey test
           if [ -n "$YUBIKEY_FLAGS" ]; then
             SERIAL="${{ steps.yubikey.outputs.serial }}"
-            python3 -c "import sys; from ykman.device import list_all_devices; from yubikit.core.smartcard import SmartCardConnection; from yubikit.piv import PivSession; serial=int(sys.argv[1]); [PivSession(dev.open_connection(SmartCardConnection)).reset() or print('YubiKey', serial, 'PIV reset') for dev, info in list_all_devices() if info.serial == serial]" "$SERIAL" || true
+            "${PYTHON}" -c "import sys; from ykman.device import list_all_devices; from yubikit.core.smartcard import SmartCardConnection; from yubikit.piv import PivSession; serial=int(sys.argv[1]); [PivSession(dev.open_connection(SmartCardConnection)).reset() or print('YubiKey', serial, 'PIV reset') for dev, info in list_all_devices() if info.serial == serial]" "$SERIAL" || true
           fi
 
       # ── Summary ──
