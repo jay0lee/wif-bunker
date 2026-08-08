@@ -778,7 +778,13 @@ jobs:
             --recovery-time=1 \
             --lockout-recovery-time=1 2>/dev/null || true
 
-          # 1. Evict persistent handles (tpm2-pkcs11 primary objects + test keys)
+          # 1. Flush stale transient objects and sessions from previous runs
+          tpm2_flushcontext --transient-object 2>/dev/null || true
+          tpm2_flushcontext --loaded-session 2>/dev/null || true
+          tpm2_flushcontext --saved-session 2>/dev/null || true
+          echo "Flushed transient TPM contexts."
+
+          # 2. Evict persistent handles (tpm2-pkcs11 primary objects + test keys)
           HANDLES=$(tpm2_getcap handles-persistent 2>/dev/null | grep -oP '0x[0-9A-Fa-f]+' || true)
           for h in $HANDLES; do
             tpm2_evictcontrol -c "$h" 2>/dev/null || true
@@ -1065,6 +1071,9 @@ jobs:
             # own the entire TPM state.  WIF Bunker itself never does
             # this — it only ever touches its own bunker-wif token.
             if [[ "${{ matrix.self_hosted }}" == "true" ]] && [[ "${{ matrix.use_yubikey }}" != "true" ]] && command -v tpm2_ptool &>/dev/null; then
+              tpm2_flushcontext --transient-object 2>/dev/null || true
+              tpm2_flushcontext --loaded-session 2>/dev/null || true
+              tpm2_flushcontext --saved-session 2>/dev/null || true
               HANDLES=$(tpm2_getcap handles-persistent 2>/dev/null | grep -oP '0x[0-9A-Fa-f]+' || true)
               for h in $HANDLES; do
                 tpm2_evictcontrol -c "$h" 2>/dev/null || true
@@ -1116,6 +1125,9 @@ jobs:
 
           # CI-only: Reset TPM PKCS#11 store (same as cert-only loop above)
           if [[ "${{ matrix.self_hosted }}" == "true" ]] && [[ "${{ matrix.use_yubikey }}" != "true" ]] && command -v tpm2_ptool &>/dev/null; then
+            tpm2_flushcontext --transient-object 2>/dev/null || true
+            tpm2_flushcontext --loaded-session 2>/dev/null || true
+            tpm2_flushcontext --saved-session 2>/dev/null || true
             HANDLES=$(tpm2_getcap handles-persistent 2>/dev/null | grep -oP '0x[0-9A-Fa-f]+' || true)
             for h in $HANDLES; do
               tpm2_evictcontrol -c "$h" 2>/dev/null || true
