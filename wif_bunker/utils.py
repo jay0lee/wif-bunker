@@ -66,10 +66,7 @@ SYM_CROSS = "\u2717" if _UNICODE else "[X]"
 def yubikey_not_found_hint() -> str:
     """Return platform-specific troubleshooting advice for YubiKey detection."""
     if sys.platform == "linux":
-        return (
-            "Ensure the YubiKey is plugged in and the pcscd service is running "
-            "(sudo systemctl restart pcscd)."
-        )
+        return "Ensure the YubiKey is plugged in and the pcscd service is running (sudo systemctl restart pcscd)."
     if sys.platform == "darwin":
         return (
             "Ensure the YubiKey is plugged in. Try removing and re-inserting it, "
@@ -81,6 +78,7 @@ def yubikey_not_found_hint() -> str:
             "(services.msc > 'Smart Card' > Start)."
         )
     return "Ensure the YubiKey is plugged in."
+
 
 def generate_pin(length: int = 24) -> str:
     """Generate a cryptographically random alphanumeric PIN.

@@ -793,7 +793,12 @@ jobs:
 
           # 3. Initialize a fresh tpm2-pkcs11 store (token is created by WIF Bunker)
           if command -v tpm2_ptool &>/dev/null; then
-            tpm2_ptool init --path="$HOME/.tpm2_pkcs11" 2>/dev/null || true
+            tpm2_ptool init --path="$HOME/.tpm2_pkcs11"
+            # Verify the store DB was actually created
+            if [ ! -f "$HOME/.tpm2_pkcs11/tpm2_pkcs11.sqlite3" ]; then
+              echo "::error::tpm2_ptool init did not create the store database"
+              exit 1
+            fi
             echo "Initialized fresh tpm2-pkcs11 store."
           fi
 
@@ -1067,7 +1072,7 @@ jobs:
               rm -rf "$HOME/.tpm2_pkcs11"
               mkdir -p "$HOME/.tpm2_pkcs11"
               export TPM2_PKCS11_STORE="$HOME/.tpm2_pkcs11"
-              tpm2_ptool init --path="$HOME/.tpm2_pkcs11" 2>/dev/null || true
+              tpm2_ptool init --path="$HOME/.tpm2_pkcs11"
               echo "  [CI] Reset TPM PKCS#11 store for $algo iteration"
             fi
 
@@ -1118,7 +1123,7 @@ jobs:
             rm -rf "$HOME/.tpm2_pkcs11"
             mkdir -p "$HOME/.tpm2_pkcs11"
             export TPM2_PKCS11_STORE="$HOME/.tpm2_pkcs11"
-            tpm2_ptool init --path="$HOME/.tpm2_pkcs11" 2>/dev/null || true
+            tpm2_ptool init --path="$HOME/.tpm2_pkcs11"
             echo "  [CI] Reset TPM PKCS#11 store for attest test"
           fi
 
