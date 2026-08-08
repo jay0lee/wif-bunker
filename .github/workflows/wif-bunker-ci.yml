@@ -21,24 +21,17 @@ on:
 jobs:
   lint:
     name: Lint & Format
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.x'
-      - name: Install system dependencies (Linux)
-        run: |
-          sudo apt-get update && sudo apt-get install -y libpcsclite-dev libtss2-dev swig gcc-14
-          # GCC 15 on Ubuntu 26.04 ships C23 headers (nullptr_t) that
-          # pycparser cannot parse. Hiding the directory forces the
-          # preprocessor to fall back to GCC 14's C17 headers.
-          sudo mv /usr/lib/gcc/x86_64-linux-gnu/15 /usr/lib/gcc/x86_64-linux-gnu/15.bak || true
-          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100
-          sudo update-alternatives --install /usr/bin/cc  cc  /usr/bin/gcc-14 100
-      - run: python -m pip install "pip>=26.2"
-      - run: python -m pip install ruff pylint
-      - run: CC=gcc-14 python -m pip install --only-deps .
+      - run: pip install ruff pylint
+      # Pylint needs the project's deps importable.  Install from
+      # pre-built wheels only — no C compilation needed for linting.
+      - name: Install project dependencies for import resolution
+        run: pip install --only-binary :all: --only-deps . || pip install --only-deps .
 
       - name: Ruff lint
         run: ruff check .
@@ -54,26 +47,87 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-26.04, macos-26, windows-2025-vs2026]
+
+    env:
+      # Paths to pre-built OpenSSL + Python (from build-python-ssl.yml cache)
+      OPENSSL_INSTALL_PATH: ${{ github.workspace }}/bin/ssl
+      PYTHON_INSTALL_PATH: ${{ github.workspace }}/bin/python
+      PYTHONIOENCODING: utf-8
+
+    defaults:
+      run:
+        shell: bash
+
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.x'
+
+      # ── System libs needed at runtime (Linux only) ──
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update && sudo apt-get install -y libpcsclite-dev libtss2-dev swig gcc-14
-          sudo mv /usr/lib/gcc/x86_64-linux-gnu/15 /usr/lib/gcc/x86_64-linux-gnu/15.bak || true
-          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100
-          sudo update-alternatives --install /usr/bin/cc  cc  /usr/bin/gcc-14 100
-      - run: python -m pip install "pip>=26.2"
-      - run: python -m pip install pytest pytest-cov
-      # Use gcc-14 on Linux to work around pycparser vs GCC 15 C23 nullptr_t
-      - name: Install dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: CC=gcc-14 python -m pip install --only-deps .
-      - name: Install dependencies (non-Linux)
-        if: runner.os != 'Linux'
-        run: python -m pip install --only-deps .
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libpcsclite-dev libtss2-dev swig
+
+      # ══════════════════════════════════════════════════════════════════
+      # Restore pre-built OpenSSL + Python from cache
+      # Built daily by build-python-ssl.yml — restore-keys prefix match
+      # falls back to the most recent successful build.
+      # ══════════════════════════════════════════════════════════════════
+      - name: Restore compiled OpenSSL + Python
+        uses: actions/cache/restore@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        id: cache-python-ssl
+        with:
+          path: |
+            bin/ssl
+            bin/python
+          key: python-ssl-${{ matrix.os }}-v2-
+          restore-keys: |
+            python-ssl-${{ matrix.os }}-v2-
+          fail-on-cache-miss: true
+
+      - name: Set PYTHON env var and library paths
+        run: |
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            PYTHON="${PYTHON_INSTALL_PATH}/python.exe"
+            echo "${PYTHON_INSTALL_PATH}" >> "$GITHUB_PATH"
+            echo "${PYTHON_INSTALL_PATH}/Scripts" >> "$GITHUB_PATH"
+          else
+            PYTHON="${PYTHON_INSTALL_PATH}/bin/python3"
+            echo "${PYTHON_INSTALL_PATH}/bin" >> "$GITHUB_PATH"
+          fi
+
+          LD_LIBRARY_PATH="${PYTHON_INSTALL_PATH}/lib:${OPENSSL_INSTALL_PATH}/lib:${LD_LIBRARY_PATH}"
+          echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+          if [[ "${RUNNER_OS}" == "macOS" ]]; then
+            DYLD_LIBRARY_PATH="${PYTHON_INSTALL_PATH}/lib:${OPENSSL_INSTALL_PATH}/lib:${DYLD_LIBRARY_PATH}"
+            echo "DYLD_LIBRARY_PATH=${DYLD_LIBRARY_PATH}" >> $GITHUB_ENV
+          fi
+
+          echo "PYTHON=${PYTHON}" >> $GITHUB_ENV
+          echo "Using compiled Python: ${PYTHON}"
+          "${PYTHON}" --version
+          "${PYTHON}" -c "import ssl; print(f'OpenSSL: {ssl.OPENSSL_VERSION}')"
+
+      # ── Create venv and install (mirrors integration-test.yml) ──
+      - name: Create venv and install dependencies
+        run: |
+          "${PYTHON}" -m venv .venv
+          if [ -d ".venv/Scripts" ]; then
+            source .venv/Scripts/activate
+            VENV_BIN="$PWD/.venv/Scripts"
+          else
+            source .venv/bin/activate
+            VENV_BIN="$PWD/.venv/bin"
+          fi
+          echo "${VENV_BIN}" >> "$GITHUB_PATH"
+
+          VENV_PYTHON="$(which python)"
+          echo "PYTHON=${VENV_PYTHON}" >> $GITHUB_ENV
+          export PYTHON="${VENV_PYTHON}"
+          echo "PYTHON updated to venv: ${PYTHON}"
+
+          pip install pytest pytest-cov
+          pip install .
+
       - name: Run tests
         run: pytest --cov --cov-report=term-missing
