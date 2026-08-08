@@ -178,16 +178,17 @@ def _run_cert_and_mtls_test(config: WorkloadConfig, output_dir: str, debug: bool
     # STS makes client certs RECOMMENDED (not required), so the handshake
     # will succeed even without one.  But if hardmTLS is working, the
     # server will see our cert.  We just verify the TLS handshake works.
+    #
+    # Reuse the same session from Step B — creating a second adapter would
+    # re-load libtpm2_pkcs11.so and try to open a new TPM auth session,
+    # which fails on hardware TPMs with "handle is not correct for the use".
     logger.info("")
     logger.info("=== mTLS Smoke Test: sts.mtls.googleapis.com (recommends client cert) ===")
     try:
-        sts_session = requests.Session()
-        sts_session.mount("https://", _MutualTlsOffloadAdapter(str(cert_config_path)))
-
         # A GET to /v1/token is not a valid STS request but exercises the
         # mTLS handshake.  We expect HTTP 400/405/etc — any HTTP response
         # means the TLS handshake (including client cert) succeeded.
-        sts_resp = sts_session.get("https://sts.mtls.googleapis.com/v1/token", timeout=15)
+        sts_resp = mtls_session.get("https://sts.mtls.googleapis.com/v1/token", timeout=15)
         logger.info("  ✅ PASS: mTLS handshake with Google STS succeeded (HTTP %d)", sts_resp.status_code)
     except requests.exceptions.SSLError as ssl_err:
         logger.error("  ❌ FAIL: mTLS handshake with Google STS failed:")

@@ -695,13 +695,10 @@ def _main_impl() -> None:
             logger.info("    Content-Type: application/json")
             logger.info("    audience: %s", _audience)
 
-            # Reuse an mTLS session
-            sts_session = requests.Session()
-            sts_session.mount(
-                "https://",
-                _MutualTlsOffloadAdapter(str(cert_config_path)),
-            )
-            sts_resp = sts_session.post(
+            # Reuse the mTLS session from Step 7b — creating a second
+            # adapter would re-load libtpm2_pkcs11.so and conflict with
+            # the existing TPM auth session on hardware TPMs.
+            sts_resp = mtls_session.post(
                 "https://sts.mtls.googleapis.com/v1/token",
                 json=sts_body,
                 timeout=30,
