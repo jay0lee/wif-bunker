@@ -117,12 +117,36 @@ impl SigningBackend for Pkcs11Backend {
     /// Signs the given `tbs` (to-be-signed) data using the token's private key.
     fn sign(&self, tbs: &[u8]) -> Result<Vec<u8>, HardmtlsError> {
         self.with_session(|session| {
-            let mut template = vec![Attribute::Class(ObjectClass::PRIVATE_KEY)];
+            // Step 1: Find the certificate's CKA_ID so we can locate the
+            //         matching private key.  OpenSC uses different labels for
+            //         certificate vs. private-key objects (e.g.
+            //         "Certificate for PIV Authentication" vs.
+            //         "Private Key for PIV Authentication"), so we cannot
+            //         reuse the certificate label to search for the key.
+            //         CKA_ID is the standard PKCS#11 correlation attribute.
+            let mut cert_template = vec![Attribute::Class(ObjectClass::CERTIFICATE)];
             if !self.label.is_empty() {
-                template.push(Attribute::Label(self.label.as_bytes().to_vec()));
+                cert_template.push(Attribute::Label(self.label.as_bytes().to_vec()));
+            }
+            let certs = session.find_objects(&cert_template).map_err(|e| {
+                HardmtlsError::Pkcs11Error(format!("Failed to find certificate: {e}"))
+            })?;
+            let cert_handle = certs.first().ok_or_else(|| {
+                HardmtlsError::Pkcs11Error("Certificate not found (for key lookup)".into())
+            })?;
+            let cert_attrs = session
+                .get_attributes(*cert_handle, &[AttributeType::Id])
+                .map_err(|e| {
+                    HardmtlsError::Pkcs11Error(format!("Failed to get cert CKA_ID: {e}"))
+                })?;
+
+            // Step 2: Search for the private key using the cert's CKA_ID.
+            let mut key_template = vec![Attribute::Class(ObjectClass::PRIVATE_KEY)];
+            if let Some(Attribute::Id(id)) = cert_attrs.first() {
+                key_template.push(Attribute::Id(id.clone()));
             }
 
-            let keys = session.find_objects(&template).map_err(|e| {
+            let keys = session.find_objects(&key_template).map_err(|e| {
                 HardmtlsError::Pkcs11Error(format!("Failed to find private key: {e}"))
             })?;
             let key_handle = keys
