@@ -48,6 +48,10 @@ jobs:
       OPENSSL_INSTALL_PATH: ${{ github.workspace }}/bin/ssl
       PYTHON_INSTALL_PATH: ${{ github.workspace }}/bin/python
 
+    defaults:
+      run:
+        shell: bash
+
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -168,6 +172,7 @@ jobs:
 
       - name: Smoke test (Windows)
         if: matrix.platform_name == 'windows'
+        shell: pwsh
         run: |
           dist\wif-bunker\wif-bunker.exe --version
           dist\wif-bunker\wif-bunker.exe --help
@@ -182,6 +187,7 @@ jobs:
 
       - name: Package (Windows — InnoSetup)
         if: matrix.platform_name == 'windows'
+        shell: pwsh
         run: |
           & "C:\Program Files (x86)\Inno Setup 6\iscc.exe" /DVersion=$env:VERSION packaging\windows\wif-bunker.iss
 
