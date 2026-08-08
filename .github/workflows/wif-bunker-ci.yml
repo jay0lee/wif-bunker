@@ -78,6 +78,10 @@ jobs:
           export PYTHON="${VENV_PYTHON}"
           echo "PYTHON updated to venv: ${PYTHON}"
 
+          # Force C11 mode so pycparser (used by tpm2-pytss build) doesn't
+          # choke on GCC 15's C23 headers (bool vs _Bool).
+          export CFLAGS="-std=c11 ${CFLAGS:-}"
+
           pip install ruff pylint
           pip install .
 
@@ -94,7 +98,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-26.04, macos-26, windows-2025-vs2026]
+        os: [ubuntu-24.04, ubuntu-26.04, macos-26, windows-2025-vs2026]
 
     defaults:
       run:
@@ -167,6 +171,12 @@ jobs:
           echo "PYTHON=${VENV_PYTHON}" >> $GITHUB_ENV
           export PYTHON="${VENV_PYTHON}"
           echo "PYTHON updated to venv: ${PYTHON}"
+
+          # Force C11 mode so pycparser (used by tpm2-pytss build) doesn't
+          # choke on GCC 15's C23 headers (bool vs _Bool).
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            export CFLAGS="-std=c11 ${CFLAGS:-}"
+          fi
 
           pip install pytest pytest-cov
           pip install .
