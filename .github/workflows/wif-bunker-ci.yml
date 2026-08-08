@@ -31,7 +31,8 @@ jobs:
       # Pylint needs the project's deps importable.  Install from
       # pre-built wheels only — no C compilation needed for linting.
       - name: Install project dependencies for import resolution
-        run: pip install --only-binary :all: --only-deps . || pip install --only-deps .
+        run: |
+          pip install --only-binary :all: --only-deps . || pip install --only-deps .
 
       - name: Ruff lint
         run: ruff check .
