@@ -39,9 +39,9 @@ jobs:
           path: |
             bin/ssl
             bin/python
-          key: python-ssl-${{ runner.os }}-${{ runner.arch }}-v2-
+          key: python-ssl-${{ matrix.os }}-v2-
           restore-keys: |
-            python-ssl-${{ runner.os }}-${{ runner.arch }}-v2-
+            python-ssl-${{ matrix.os }}-v2-
           fail-on-cache-miss: true
 
       - name: "Verify OpenSSL"
