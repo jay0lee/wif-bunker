@@ -180,6 +180,7 @@ class TestFindHardmtlsLibrary:
             file_path.parent.parent.__truediv__ = fake_truediv
             _find_hardmtls_library()
 
+
 # ---------------------------------------------------------------------------
 # _add_lib_to_path — Windows DLL directory (line 244)
 # ---------------------------------------------------------------------------

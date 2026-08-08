@@ -1,6 +1,7 @@
 import importlib.util
 import subprocess
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -363,8 +364,9 @@ class TestMainModule:
         )
 
         _generate_cert_macos(config)
+        expected_keychain = str(Path.home() / "Library" / "Keychains" / "login.keychain-db")
         mock_run.assert_any_call(
-            ["security", "delete-certificate", "-Z", "12345ABCDE", "/Users/jay/Library/Keychains/login.keychain-db"],
+            ["security", "delete-certificate", "-Z", "12345ABCDE", expected_keychain],
             capture_output=True,
         )
 

@@ -128,7 +128,7 @@ class TestDefaultAttestDir:
         from wif_bunker.modes import _default_attest_dir
 
         result = _default_attest_dir()
-        assert ".config/wif-bunker/attestation" in result
+        assert ".config/wif-bunker/attestation" in result.replace("\\", "/")
 
 
 # ---------------------------------------------------------------------------
@@ -673,6 +673,7 @@ class TestRunCertAndMtlsTest:
             with pytest.raises(SystemExit):
                 _run_cert_and_mtls_test(config, str(tmp_path))
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="reload triggers real OS check")
     @patch("wif_bunker.modes.write_secure_file")
     @patch("wif_bunker.modes.generate_os_keystore_cert")
     def test_full_success_path(self, mock_gen, mock_write, tmp_path, caplog):

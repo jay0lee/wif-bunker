@@ -23,27 +23,27 @@ def test_create_ca_and_sign_with_public_key(sample_config):
     priv = ec.generate_private_key(ec.SECP256R1())
     pub = priv.public_key()
     pub_pem = pub.public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo
-    ).decode('utf-8')
+        encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo
+    ).decode("utf-8")
 
     bundle, workload_pem = _create_ca_and_sign(pub_pem, sample_config)
     assert bundle is not None
     assert "BEGIN CERTIFICATE" in workload_pem
 
+
 def test_create_ca_and_sign_with_certificate(sample_config):
     priv = ec.generate_private_key(ec.SECP256R1())
     pub = priv.public_key()
     pub_pem = pub.public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo
-    ).decode('utf-8')
+        encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo
+    ).decode("utf-8")
 
     _bundle, workload_pem = _create_ca_and_sign(pub_pem, sample_config)
 
     # now pass the cert
     bundle2, _workload_pem2 = _create_ca_and_sign(workload_pem, sample_config)
     assert bundle2 is not None
+
 
 def test_find_hardmtls_library_frozen(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "frozen", True, raising=False)
@@ -52,17 +52,23 @@ def test_find_hardmtls_library_frozen(monkeypatch, tmp_path):
     # create the fake hardmtls library
     target_dir = tmp_path / "bin" / "hardmtls"
     target_dir.mkdir(parents=True)
-    lib_name = "hardmtls.dll" if sys.platform == "win32" else ("libhardmtls.dylib" if sys.platform == "darwin" else "libhardmtls.so")
+    lib_name = (
+        "hardmtls.dll"
+        if sys.platform == "win32"
+        else ("libhardmtls.dylib" if sys.platform == "darwin" else "libhardmtls.so")
+    )
     (target_dir / lib_name).touch()
 
     with patch("wif_bunker.cert._get_hardmtls_lib_name", return_value=lib_name):
         lib = _find_hardmtls_library()
         assert lib.name == lib_name
 
+
 def test_find_hardmtls_library_not_found(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "frozen", False, raising=False)
     with patch("wif_bunker.cert.Path.exists", return_value=False), pytest.raises(FileNotFoundError):
         _find_hardmtls_library()
+
 
 def test_add_lib_to_path_win32(monkeypatch):
     monkeypatch.setattr(sys, "platform", "win32")
@@ -72,6 +78,7 @@ def test_add_lib_to_path_win32(monkeypatch):
         mock_path.__str__.return_value = "fake_path"
         _add_lib_to_path(mock_path)
         mock_add_dll.assert_called_with("fake_path")
+
 
 @patch("wif_bunker.cert.write_secure_file")
 def test_build_certificate_config_yubikey(mock_write, sample_config):
@@ -86,6 +93,7 @@ def test_build_certificate_config_yubikey(mock_write, sample_config):
             cfg, _cfg_path, _wl_path, _tc_path = build_certificate_config(sample_config, bundle, Path("fake_lib"))
             assert "pkcs11" in cfg["cert_configs"]
 
+
 @patch("wif_bunker.cert.write_secure_file")
 @patch("subprocess.run")
 def test_build_certificate_config_linux_pkcs11(mock_run, mock_write, sample_config):
@@ -99,6 +107,7 @@ def test_build_certificate_config_linux_pkcs11(mock_run, mock_write, sample_conf
         assert "pkcs11" in cfg["cert_configs"]
         assert cfg["cert_configs"]["pkcs11"]["slot"] == "123"
 
+
 @patch("wif_bunker.cert.write_secure_file")
 @patch("subprocess.run")
 def test_build_certificate_config_linux_pkcs11_fallback_slot(mock_run, mock_write, sample_config):
@@ -111,16 +120,19 @@ def test_build_certificate_config_linux_pkcs11_fallback_slot(mock_run, mock_writ
         cfg, _cfg_path, _wl_path, _tc_path = build_certificate_config(sample_config, bundle, Path("fake_lib"))
         assert cfg["cert_configs"]["pkcs11"]["slot"] == "1"
 
+
 @patch("wif_bunker.cert.write_secure_file")
 def test_build_adc_config(mock_write, sample_config):
     cfg, _cfg_path = build_adc_config(sample_config, "123", Path("cert_cfg"), Path("tc_cfg"), "sa@e.com", True)
     assert cfg["type"] == "external_account"
     assert "service_account_impersonation_url" in cfg
 
+
 @patch("wif_bunker.cert.write_secure_file")
 def test_build_adc_config_no_sa(mock_write, sample_config):
     cfg, _cfg_path = build_adc_config(sample_config, "123", Path("cert_cfg"), Path("tc_cfg"), None, False)
     assert "service_account_impersonation_url" not in cfg
+
 
 def test_run_hardmtls_diagnostics(tmp_path):
     log = MagicMock()
@@ -131,15 +143,16 @@ def test_run_hardmtls_diagnostics(tmp_path):
 
     run_hardmtls_diagnostics("nonexistent", log)
 
+
 @patch("wif_bunker.cert.hardmtls_get_cert_pem")
 def test_verify_cert_retrieval(mock_get_pem, sample_config):
     mock_get_pem.return_value = b"-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----"
     res = verify_cert_retrieval("cfg", "lib", False)
     assert res == "-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----"
 
+
 @patch("wif_bunker.cert.hardmtls_get_cert_pem")
 def test_verify_cert_retrieval_fail(mock_get_pem):
     mock_get_pem.side_effect = RuntimeError("err")
     with pytest.raises(RuntimeError):
         verify_cert_retrieval("cfg", "lib", True)
-

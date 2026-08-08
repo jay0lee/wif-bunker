@@ -482,7 +482,7 @@ class TestYubikeyUncovered:
         with patch("sys.platform", "win32"), patch("os.environ.get", return_value="C:/temp"):
             assert str(yubikey_config_dir()) == str(Path("C:/temp") / "wif-bunker")
         with patch("sys.platform", "linux"), patch("os.environ.get", return_value="/temp"):
-            assert str(yubikey_config_dir()) == "/temp/wif-bunker"
+            assert str(yubikey_config_dir()) == str(Path("/temp") / "wif-bunker")
 
     @patch("ykman.device.list_all_devices", create=True)
     def test_generate_cert_serial_not_found(self, mock_list, config):

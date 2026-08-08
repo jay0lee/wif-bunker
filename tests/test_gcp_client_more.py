@@ -15,6 +15,7 @@ def _mock_response(status_code: int = 200, json_data: dict | None = None, conten
         resp.raise_for_status.side_effect = requests.HTTPError(response=resp)
     return resp
 
+
 def test_init_adc_mode_tokeninfo_fail():
     mock_creds = MagicMock()
     mock_creds.token = "adc-token"
@@ -25,6 +26,7 @@ def test_init_adc_mode_tokeninfo_fail():
         with patch("requests.Session.get", side_effect=Exception("err")):
             client = GCPClient(use_adc=True)
             assert client._credentials is mock_creds
+
 
 @patch("webbrowser.open")
 @patch("http.server.HTTPServer")
@@ -39,24 +41,33 @@ def test_oauth_user_token(mock_server_cls, mock_open):
         client = GCPClient(use_adc=False)
         assert client._token == "token123"
 
+
 def test_api_call_with_iam_retry_connection_error():
     with patch.object(GCPClient, "_oauth_user_token", return_value="tok"):
         client = GCPClient()
 
-    with patch.object(client.session, "request", side_effect=[requests.exceptions.ConnectionError("err"), _mock_response(json_data={"ok": "yes"})]):
+    with patch.object(
+        client.session,
+        "request",
+        side_effect=[requests.exceptions.ConnectionError("err"), _mock_response(json_data={"ok": "yes"})],
+    ):
         with patch("wif_bunker.gcp_client.time.sleep"):
             res = client.api_call_with_iam_retry("GET", "http://test")
             assert res == {"ok": "yes"}
+
 
 def test_wait_for_wif_resource_404():
     with patch.object(GCPClient, "_oauth_user_token", return_value="tok"):
         client = GCPClient()
 
     resp_404 = _mock_response(404)
-    with patch.object(client, "api_call", side_effect=[requests.exceptions.HTTPError(response=resp_404), {"state": "ACTIVE"}]):
+    with patch.object(
+        client, "api_call", side_effect=[requests.exceptions.HTTPError(response=resp_404), {"state": "ACTIVE"}]
+    ):
         with patch("wif_bunker.gcp_client.time.sleep"):
             res = client.wait_for_wif_resource("http://test")
             assert res == {"state": "ACTIVE"}
+
 
 def test_ensure_project_with_folder():
     with patch.object(GCPClient, "_oauth_user_token", return_value="tok"):
@@ -77,6 +88,7 @@ def test_ensure_project_with_folder():
             res = client.ensure_project("test-proj", folder="folder123")
             assert res == "123"
 
+
 def test_enable_apis():
     with patch.object(GCPClient, "_oauth_user_token", return_value="tok"):
         client = GCPClient()
@@ -84,6 +96,7 @@ def test_enable_apis():
     with patch.object(client, "api_call_with_iam_retry", return_value={"name": "op1"}):
         with patch.object(client, "wait_for_lro"):
             client.enable_apis("123", ["api1"])
+
 
 def test_setup_wif_infrastructure():
     with patch.object(GCPClient, "_oauth_user_token", return_value="tok"):
@@ -106,6 +119,7 @@ def test_setup_wif_infrastructure():
                 assert sa_email == "sa@x.com"
                 assert prov_id == "prov1"
 
+
 def test_apply_iam_bindings():
     with patch.object(GCPClient, "_oauth_user_token", return_value="tok"):
         client = GCPClient()
@@ -118,4 +132,3 @@ def test_apply_iam_bindings():
 
         # Test reuse case
         client.apply_iam_bindings(config, "123", "cn1", "pool1", None, False)
-

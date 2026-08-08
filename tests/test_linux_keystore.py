@@ -1,5 +1,6 @@
 import os
 import subprocess
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -86,6 +87,7 @@ def test_check_tpm_linux_dev_access_ok():
         _check_tpm_linux()  # should not raise
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pwd/grp modules are Unix-only")
 def test_check_tpm_linux_dev_access_denied():
     with patch("wif_bunker.keystore.linux.Path.exists", return_value=True), patch("os.access", return_value=False):
         with patch("pwd.getpwuid") as m_pwd, patch("grp.getgrgid") as m_grp, patch("grp.getgrall") as m_grall:
@@ -101,6 +103,7 @@ def test_check_tpm_linux_dev_access_denied():
                     _check_tpm_linux()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pwd/grp modules are Unix-only")
 def test_check_tpm_linux_dev_access_denied_except():
     with patch("wif_bunker.keystore.linux.Path.exists", return_value=True), patch("os.access", return_value=False):
         with patch("pwd.getpwuid") as m_pwd, patch("grp.getgrgid") as m_grp:

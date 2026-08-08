@@ -1,4 +1,4 @@
-"""Tests for gcp_client.py — covers uncovered lines 71-79, 95-264, 326-341, 365-377, 409, 417-421, 434, 442-448, 461-564, 576-612."""
+"""Tests for gcp_client.py — covers uncovered lines for GCP API interactions."""
 
 from __future__ import annotations
 

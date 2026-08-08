@@ -71,7 +71,8 @@ def test_verify_ek_chain_openssl_loads_intermediates(tmp_path):
 
     ek_pem = _generate_test_cert_pem().decode("utf-8")
     check = _verify_ek_chain_openssl(ek_pem, roots_dir, intermediates_dir)
-    # The chain validation should fail because it's a self-signed cert not in the store (unless the self-signed was generated as root)
+    # The chain validation should fail because it's a self-signed cert
+    # not in the store (unless the self-signed was generated as root)
     assert not check.passed
 
 
