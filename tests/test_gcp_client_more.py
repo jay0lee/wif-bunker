@@ -46,11 +46,14 @@ def test_api_call_with_iam_retry_connection_error():
     with patch.object(GCPClient, "_oauth_user_token", return_value="tok"):
         client = GCPClient()
 
-    with patch.object(
-        client.session,
-        "request",
-        side_effect=[requests.exceptions.ConnectionError("err"), _mock_response(json_data={"ok": "yes"})],
-    ), patch("wif_bunker.gcp_client.time.sleep"):
+    with (
+        patch.object(
+            client.session,
+            "request",
+            side_effect=[requests.exceptions.ConnectionError("err"), _mock_response(json_data={"ok": "yes"})],
+        ),
+        patch("wif_bunker.gcp_client.time.sleep"),
+    ):
         res = client.api_call_with_iam_retry("GET", "http://test")
         assert res == {"ok": "yes"}
 
@@ -60,9 +63,12 @@ def test_wait_for_wif_resource_404():
         client = GCPClient()
 
     resp_404 = _mock_response(404)
-    with patch.object(
-        client, "api_call", side_effect=[requests.exceptions.HTTPError(response=resp_404), {"state": "ACTIVE"}]
-    ), patch("wif_bunker.gcp_client.time.sleep"):
+    with (
+        patch.object(
+            client, "api_call", side_effect=[requests.exceptions.HTTPError(response=resp_404), {"state": "ACTIVE"}]
+        ),
+        patch("wif_bunker.gcp_client.time.sleep"),
+    ):
         res = client.wait_for_wif_resource("http://test")
         assert res == {"state": "ACTIVE"}
 

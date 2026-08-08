@@ -659,7 +659,7 @@ class TestRunCertAndMtlsTest:
     """Tests for _run_cert_and_mtls_test (lines 68-201)."""
 
     @patch("wif_bunker.modes.write_secure_file")
-    @patch("wif_bunker.keystore.generate_os_keystore_cert")
+    @patch("wif_bunker.modes.generate_os_keystore_cert")
     def test_hardmtls_lib_not_found_exits(self, mock_gen, mock_write, tmp_path):
         """Covers lines 96-100: hardmTLS library not found raises SystemExit."""
         config = WorkloadConfig()

@@ -89,6 +89,7 @@ class TestLinuxTpmInfo:
         assert result["firmware"] == "1.2"
         assert result["family"] == "2.0"
 
+
 class TestExtractEkCertificateEsapi:
     @patch("OpenSSL.crypto.load_certificate")
     @patch("OpenSSL.crypto.dump_certificate")
@@ -104,6 +105,7 @@ class TestExtractEkCertificateEsapi:
         mock_ectx.nv_read.return_value = b"mock der data"
 
         from wif_bunker.attestation.linux import _extract_ek_certificate_esapi
+
         check, pem = _extract_ek_certificate_esapi(mock_ectx)
 
         assert check.passed is True
@@ -115,6 +117,7 @@ class TestExtractEkCertificateEsapi:
         mock_ectx.tr_from_tpmpublic.side_effect = Exception("failed")
 
         from wif_bunker.attestation.linux import _extract_ek_certificate_esapi
+
         check, pem = _extract_ek_certificate_esapi(mock_ectx)
         assert check is None
         assert pem is None
