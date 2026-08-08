@@ -426,22 +426,27 @@ jobs:
           # On Windows, CPython installs as python.exe (no python3 symlink).
           # Using $PYTHON everywhere avoids picking up a system Python.
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
-            PYTHON="${PYTHON_INSTALL_PATH}/python.exe"
+            export PYTHON="${PYTHON_INSTALL_PATH}/python.exe"
             echo "${PYTHON_INSTALL_PATH}" >> "$GITHUB_PATH"
             echo "${PYTHON_INSTALL_PATH}/Scripts" >> "$GITHUB_PATH"
           else
-            PYTHON="${PYTHON_INSTALL_PATH}/bin/python3"
+            export PYTHON="${PYTHON_INSTALL_PATH}/bin/python3"
             echo "${PYTHON_INSTALL_PATH}/bin" >> "$GITHUB_PATH"
-            if [[ "${RUNNER_OS}" == "Linux" ]]; then
-              echo "LD_LIBRARY_PATH=${PYTHON_INSTALL_PATH}/lib:${OPENSSL_INSTALL_PATH}/lib:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
-            elif [[ "${RUNNER_OS}" == "macOS" ]]; then
-              echo "DYLD_LIBRARY_PATH=${PYTHON_INSTALL_PATH}/lib:${OPENSSL_INSTALL_PATH}/lib:${DYLD_LIBRARY_PATH}" >> $GITHUB_ENV
-            fi
+          fi
+
+          # Library search paths — set for ALL OSes so our compiled OpenSSL
+          # is always found before any system copy.
+          export LD_LIBRARY_PATH="${PYTHON_INSTALL_PATH}/lib:${OPENSSL_INSTALL_PATH}/lib:${LD_LIBRARY_PATH}"
+          echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+          if [[ "${RUNNER_OS}" == "macOS" ]]; then
+            export DYLD_LIBRARY_PATH="${PYTHON_INSTALL_PATH}/lib:${OPENSSL_INSTALL_PATH}/lib:${DYLD_LIBRARY_PATH}"
+            echo "DYLD_LIBRARY_PATH=${DYLD_LIBRARY_PATH}" >> $GITHUB_ENV
           fi
 
           echo "PYTHON=${PYTHON}" >> $GITHUB_ENV
           echo "Compiled Python binary: ${PYTHON}"
           ls -la "${PYTHON}" 2>/dev/null || echo "WARNING: ${PYTHON} does not exist!"
+          echo "LD_LIBRARY_PATH: ${LD_LIBRARY_PATH}"
 
       - name: "Verify compiled Python + OpenSSL"
         shell: bash

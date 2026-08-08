@@ -69,26 +69,41 @@ jobs:
             python-ssl-${{ runner.os }}-${{ runner.arch }}-v1-
           fail-on-cache-miss: true
 
-      - name: "Add compiled Python to PATH"
+      - name: "Set PYTHON env var and library paths"
         shell: bash
         run: |
+          # Set the exact path to our compiled Python binary.
+          # On Windows, CPython installs as python.exe (no python3 symlink).
+          # Using $PYTHON everywhere avoids picking up a system Python.
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            export PYTHON="${PYTHON_INSTALL_PATH}/python.exe"
             echo "${PYTHON_INSTALL_PATH}" >> "$GITHUB_PATH"
             echo "${PYTHON_INSTALL_PATH}/Scripts" >> "$GITHUB_PATH"
           else
+            export PYTHON="${PYTHON_INSTALL_PATH}/bin/python3"
             echo "${PYTHON_INSTALL_PATH}/bin" >> "$GITHUB_PATH"
-            if [[ "${RUNNER_OS}" == "Linux" ]]; then
-              echo "LD_LIBRARY_PATH=${PYTHON_INSTALL_PATH}/lib:${OPENSSL_INSTALL_PATH}/lib:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
-            elif [[ "${RUNNER_OS}" == "macOS" ]]; then
-              echo "DYLD_LIBRARY_PATH=${PYTHON_INSTALL_PATH}/lib:${OPENSSL_INSTALL_PATH}/lib:${DYLD_LIBRARY_PATH}" >> $GITHUB_ENV
-            fi
           fi
+
+          # Library search paths — set for ALL OSes so our compiled OpenSSL
+          # is always found before any system copy.
+          export LD_LIBRARY_PATH="${PYTHON_INSTALL_PATH}/lib:${OPENSSL_INSTALL_PATH}/lib:${LD_LIBRARY_PATH}"
+          echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+          if [[ "${RUNNER_OS}" == "macOS" ]]; then
+            export DYLD_LIBRARY_PATH="${PYTHON_INSTALL_PATH}/lib:${OPENSSL_INSTALL_PATH}/lib:${DYLD_LIBRARY_PATH}"
+            echo "DYLD_LIBRARY_PATH=${DYLD_LIBRARY_PATH}" >> $GITHUB_ENV
+          fi
+
+          echo "PYTHON=${PYTHON}" >> $GITHUB_ENV
+          echo "Compiled Python binary: ${PYTHON}"
+          ls -la "${PYTHON}" 2>/dev/null || echo "WARNING: ${PYTHON} does not exist!"
+          echo "LD_LIBRARY_PATH: ${LD_LIBRARY_PATH}"
 
       - name: "Verify compiled Python + OpenSSL"
         shell: bash
         run: |
-          echo "Python: $(python3 --version)"
-          python3 -c "import ssl; print(f'Python ssl module OpenSSL: {ssl.OPENSSL_VERSION}')"
+          echo "PYTHON=${PYTHON}"
+          "${PYTHON}" --version
+          "${PYTHON}" -c "import ssl; print(f'Python ssl module OpenSSL: {ssl.OPENSSL_VERSION}')"
 
       - name: Inject version
         shell: bash
@@ -138,9 +153,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install pyinstaller
-          python3 -m pip install --only-deps ".[yubikey]"
+          "${PYTHON}" -m pip install --upgrade pip
+          "${PYTHON}" -m pip install pyinstaller
+          "${PYTHON}" -m pip install --only-deps ".[yubikey]"
 
       - name: Run PyInstaller
         run: pyinstaller wif-bunker.spec
