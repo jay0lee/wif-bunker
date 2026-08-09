@@ -1,6 +1,5 @@
 import importlib.util
 import subprocess
-import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -53,7 +52,6 @@ def config():
 
 
 class TestMacOSKeystoreFlow:
-    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS only")
     @patch("wif_bunker.keystore.macos._create_ca_and_sign")
     @patch("wif_bunker.keystore.macos.require_commands")
     @patch("wif_bunker.keystore.macos.subprocess.run")
@@ -97,7 +95,6 @@ class TestMacOSKeystoreFlow:
         # Verify delete-ctk-identity was called for the stale identity
         mock_run.assert_any_call(["sc_auth", "delete-ctk-identity", "-h", "stale-hash"], capture_output=True)
 
-    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS only")
     @patch("wif_bunker.keystore.macos.platform.mac_ver")
     @patch("wif_bunker.keystore.macos.require_commands")
     def test_version_check_rejects_old_macos(self, mock_require, mock_mac_ver, config):
@@ -108,7 +105,6 @@ class TestMacOSKeystoreFlow:
         with pytest.raises(RuntimeError, match="macOS 15\\+"):
             _generate_cert_macos(config)
 
-    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS only")
     @patch("wif_bunker.keystore.macos._create_ca_and_sign")
     @patch("wif_bunker.keystore.macos.platform.mac_ver")
     @patch("wif_bunker.keystore.macos.require_commands")
@@ -149,7 +145,6 @@ class TestMacOSKeystoreFlow:
         # Should not raise
         _generate_cert_macos(config)
 
-    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS only")
     @patch("wif_bunker.keystore.macos.require_commands")
     @patch("wif_bunker.keystore.macos.subprocess.run")
     def test_se_auth_failed_gives_clear_error(self, mock_run, mock_require, config):
@@ -330,7 +325,6 @@ class TestMainModule:
             runpy.run_module("wif_bunker.__main__", run_name="__main__")
             mock_main.assert_called_once()
 
-    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS only")
     @patch("wif_bunker.keystore.macos._create_ca_and_sign")
     @patch("wif_bunker.keystore.macos.require_commands")
     @patch("wif_bunker.keystore.macos.subprocess.run")
@@ -370,7 +364,6 @@ class TestMainModule:
             capture_output=True,
         )
 
-    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS only")
     @patch("wif_bunker.keystore.macos.require_commands")
     @patch("wif_bunker.keystore.macos.subprocess.run")
     @patch("wif_bunker.keystore.macos.time.sleep", return_value=None)
@@ -387,7 +380,6 @@ class TestMainModule:
         with pytest.raises(RuntimeError, match="Could not find key hash"):
             _generate_cert_macos(config)
 
-    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS only")
     @patch("wif_bunker.keystore.macos.require_commands")
     @patch("wif_bunker.keystore.macos.subprocess.run")
     def test_csr_file_not_found(self, mock_run, mock_require, config):
@@ -403,7 +395,6 @@ class TestMainModule:
         with pytest.raises(FileNotFoundError, match="CSR not found"):
             _generate_cert_macos(config)
 
-    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS only")
     @patch("wif_bunker.keystore.macos.require_commands")
     @patch("wif_bunker.keystore.macos.subprocess.run")
     def test_generic_subprocess_error(self, mock_run, mock_require, config):
