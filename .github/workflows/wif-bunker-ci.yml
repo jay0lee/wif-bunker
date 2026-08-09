@@ -41,6 +41,7 @@ jobs:
         uses: eclipse-score/apt-install@bd30e2e74a4850389719cb8c3e312bb26aada4e0 # v1.0.0
         with:
           packages: libpcsclite-dev libtss2-dev swig pkg-config
+          cache: false
 
       - name: Restore compiled OpenSSL + Python
         uses: actions/cache/restore@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3

@@ -96,6 +96,7 @@ jobs:
         uses: eclipse-score/apt-install@bd30e2e74a4850389719cb8c3e312bb26aada4e0 # v1.0.0
         with:
           packages: build-essential libffi-dev libsqlite3-dev zlib1g-dev libbz2-dev libreadline-dev libncurses-dev liblzma-dev
+          cache: false
 
       # ════════════════════════════════════════════════════════════════
       # OpenSSL

@@ -383,6 +383,7 @@ jobs:
         uses: eclipse-score/apt-install@bd30e2e74a4850389719cb8c3e312bb26aada4e0 # v1.0.0
         with:
           packages: swtpm swtpm-tools tpm2-tools tpm2-abrmd libtss2-tcti-tabrmd0 libtss2-dev dbus libtpm2-pkcs11-1 libtpm2-pkcs11-tools python3-tpm2-pkcs11-tools libpcsclite-dev pkg-config gnutls-bin opensc
+          cache: false
 
       - name: "Linux: Setup Software TPM (swtpm)"
         if: runner.os == 'Linux' && !matrix.self_hosted
