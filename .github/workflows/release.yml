@@ -299,11 +299,11 @@ jobs:
 
       - name: Package (Windows — InnoSetup)
         if: runner.os == 'Windows' && env.TOTP_SECRET == ''
-        shell: pwsh
+        shell: bash
         env:
           TOTP_SECRET: ${{ secrets.TOTP_SECRET }}
         run: |
-          & "C:\Program Files (x86)\Inno Setup 6\iscc.exe" /DVersion=$env:VERSION packaging\windows\wif-bunker.iss
+          iscc /DVersion="$VERSION" 'packaging\windows\wif-bunker.iss'
 
       - name: Package (Windows — InnoSetup, signed)
         if: runner.os == 'Windows' && env.TOTP_SECRET != ''
@@ -315,7 +315,7 @@ jobs:
           iscc \
             /S"wifbunkersigntool=$signtool sign /sha1 $WINDOWS_CODESIGN_CERT_HASH /tr http://time.certum.pl /td SHA256 /fd SHA256 /v \$f" \
             /DVersion="$VERSION" \
-            packaging/windows/wif-bunker.iss
+            'packaging\windows\wif-bunker.iss'
 
       - name: Upload artifact (Linux/macOS)
         if: runner.os != 'Windows'
