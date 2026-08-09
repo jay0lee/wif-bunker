@@ -54,7 +54,7 @@ def test_api_call_with_iam_retry_connection_error():
         ),
         patch("wif_bunker.gcp_client.time.sleep"),
     ):
-        res = client.api_call_with_iam_retry("GET", "http://test")
+        res = client._api_call_with_retry("GET", "http://test")
         assert res == {"ok": "yes"}
 
 
@@ -65,11 +65,11 @@ def test_wait_for_wif_resource_404():
     resp_404 = _mock_response(404)
     with (
         patch.object(
-            client, "api_call", side_effect=[requests.exceptions.HTTPError(response=resp_404), {"state": "ACTIVE"}]
+            client, "_api_call", side_effect=[requests.exceptions.HTTPError(response=resp_404), {"state": "ACTIVE"}]
         ),
         patch("wif_bunker.gcp_client.time.sleep"),
     ):
-        res = client.wait_for_wif_resource("http://test")
+        res = client._wait_for_wif_resource("http://test")
         assert res == {"state": "ACTIVE"}
 
 
@@ -87,8 +87,8 @@ def test_ensure_project_with_folder():
             return {"name": "op1"}
         return {"projectNumber": "123"}
 
-    with patch.object(client, "api_call", side_effect=mock_api_call), patch.object(client, "wait_for_lro"):
-        with patch.object(client, "api_call_with_iam_retry", return_value={"projectNumber": "123"}):
+    with patch.object(client, "_api_call", side_effect=mock_api_call), patch.object(client, "_wait_for_lro"):
+        with patch.object(client, "_api_call_with_retry", return_value={"projectNumber": "123"}):
             res = client.ensure_project("test-proj", folder="folder123")
             assert res == "123"
 
@@ -97,8 +97,8 @@ def test_enable_apis():
     with patch.object(GCPClient, "_oauth_user_token", return_value="tok"):
         client = GCPClient()
 
-    with patch.object(client, "api_call_with_iam_retry", return_value={"name": "op1"}):
-        with patch.object(client, "wait_for_lro"):
+    with patch.object(client, "_api_call_with_retry", return_value={"name": "op1"}):
+        with patch.object(client, "_wait_for_lro"):
             client.enable_apis("123", ["api1"])
 
 
@@ -116,9 +116,9 @@ def test_setup_wif_infrastructure():
     cert_bundle.sha256_fingerprint = "fp"
     cert_bundle.trust_anchor_pem = "pem"
 
-    with patch.object(client, "api_call_with_iam_retry", return_value={"name": "op", "email": "sa@x.com"}):
-        with patch.object(client, "wait_for_lro"):
-            with patch.object(client, "wait_for_wif_resource"):
+    with patch.object(client, "_api_call_with_retry", return_value={"name": "op", "email": "sa@x.com"}):
+        with patch.object(client, "_wait_for_lro"):
+            with patch.object(client, "_wait_for_wif_resource"):
                 sa_email, prov_id = client.setup_wif_infrastructure(config, "123", cert_bundle, False, True)
                 assert sa_email == "sa@x.com"
                 assert prov_id == "prov1"
@@ -131,7 +131,7 @@ def test_apply_iam_bindings():
     config = MagicMock()
     config.project_id = "proj1"
 
-    with patch.object(client, "api_call_with_iam_retry", return_value={"bindings": []}):
+    with patch.object(client, "_api_call_with_retry", return_value={"bindings": []}):
         client.apply_iam_bindings(config, "123", "cn1", "pool1", "sa@x.com", True)
 
         # Test reuse case
