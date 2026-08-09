@@ -9,7 +9,11 @@ dependencies = [
     "cryptography>=44.0",
     "pyOpenSSL>=24.0",
     "python-pkcs11>=0.7",
-    "tpm2-pytss>=2.0; sys_platform == 'linux'",
+    # Pin to upstream 3.0.0-rc1 (d462fb4): PyPI v2.3.0 fails to build on
+    # GCC 15 / C23 (Ubuntu 26.04) due to pycparser header incompatibilities.
+    # Upstream master has the fix but no release yet.  Track:
+    # https://github.com/tpm2-software/tpm2-pytss/issues/639
+    "tpm2-pytss @ git+https://github.com/tpm2-software/tpm2-pytss.git@d462fb475e313074a07badab50e67f2944182f36 ; sys_platform == 'linux'",
     "yubikey-manager>=5.0",
     "google-auth @ https://github.com/jay0lee/google-cloud-python/releases/download/google-auth-v2.56.2-bunker4/google_auth-2.56.2+bunker4-py3-none-any.whl",
 ]

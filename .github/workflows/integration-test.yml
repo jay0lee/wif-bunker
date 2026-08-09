@@ -243,12 +243,13 @@ jobs:
             soft_key_flag: ""
             artifact_name: wif-bunker-ubuntu-24.04
             expected_algos: "es256 es384 rsa2048 rsa3072"
-#          - os: ubuntu-26.04
-#            name: Linux x64 (26.04)
-#            runner_id: linux-swtpm
-#            soft_key_flag: ""
-#            artifact_name: wif-bunker-ubuntu-24.04
-#            expected_algos: "es256 es384 rsa2048 rsa3072"
+          # Uses 24.04 artifact on 26.04 runner (forward-compat test)
+          - os: ubuntu-26.04
+            name: Linux x64 (26.04)
+            runner_id: linux-swtpm
+            soft_key_flag: ""
+            artifact_name: wif-bunker-ubuntu-24.04
+            expected_algos: "es256 es384 rsa2048 rsa3072"
           # ── Linux ARM64 ──
           - os: ubuntu-22.04-arm
             name: Linux ARM64 (22.04)
@@ -262,12 +263,13 @@ jobs:
             soft_key_flag: ""
             artifact_name: wif-bunker-ubuntu-24.04-arm
             expected_algos: "es256 es384 rsa2048 rsa3072"
-#          - os: ubuntu-26.04-arm
-#            name: Linux ARM64 (26.04)
-#            runner_id: linux-swtpm
-#            soft_key_flag: ""
-#            artifact_name: wif-bunker-ubuntu-24.04-arm
-#            expected_algos: "es256 es384 rsa2048 rsa3072"
+          # Uses 24.04-arm artifact on 26.04-arm runner (forward-compat test)
+          - os: ubuntu-26.04-arm
+            name: Linux ARM64 (26.04)
+            runner_id: linux-swtpm
+            soft_key_flag: ""
+            artifact_name: wif-bunker-ubuntu-24.04-arm
+            expected_algos: "es256 es384 rsa2048 rsa3072"
           # ── macOS ARM64 (Apple Silicon — requires macOS 15+ for CryptoTokenKit) ──
           - os: macos-15
             name: macOS ARM64 (15)

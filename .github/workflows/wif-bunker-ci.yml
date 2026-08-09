@@ -79,8 +79,9 @@ jobs:
           export PYTHON="${VENV_PYTHON}"
           echo "PYTHON updated to venv: ${PYTHON}"
 
-          # Force C11 mode so pycparser (used by tpm2-pytss build) doesn't
-          # choke on GCC 15's C23 headers (bool vs _Bool).
+          # Belt-and-suspenders for GCC 15 / C23:  primary fix is the
+          # tpm2-pytss pin to 3.0.0-rc1 in pyproject.toml; this CFLAGS
+          # fallback keeps pycparser's CFFI build working regardless.
           export CFLAGS="-std=c11 ${CFLAGS:-}"
 
           pip install ruff pylint
