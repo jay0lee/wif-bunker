@@ -27,6 +27,44 @@ from wif_bunker.config import CertificateBundle, WorkloadConfig
 logger = logging.getLogger(__name__)
 
 
+def _system_env() -> dict[str, str]:
+    """Return a copy of ``os.environ`` with bundle paths stripped from
+    ``LD_LIBRARY_PATH`` / ``DYLD_LIBRARY_PATH``.
+
+    PyInstaller frozen builds prepend the bundle's ``lib/`` directory to
+    ``LD_LIBRARY_PATH`` so the embedded Python and OpenSSL are found first.
+    That's correct for *our* process, but when we shell out to system tools
+    (``tpm2_ptool``, ``pkcs11-tool``, ``p11-kit``) they inherit the same
+    ``LD_LIBRARY_PATH`` and their system-compiled ``cryptography`` picks up
+    our OpenSSL 4.x ``libcrypto`` instead of the system's 3.x — boom.
+
+    For non-frozen (source) runs, this returns ``os.environ`` unchanged.
+    """
+    import sys
+
+    if not getattr(sys, "frozen", False):
+        return dict(os.environ)
+
+    # Determine the bundle's lib directory.
+    # PyInstaller one-dir layout: <bundle>/wif-bunker + <bundle>/lib/
+    bundle_dir = Path(sys.executable).resolve().parent
+    lib_dir = str(bundle_dir / "lib")
+
+    env = dict(os.environ)
+    for var in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
+        val = env.get(var)
+        if not val:
+            continue
+        cleaned = os.pathsep.join(
+            p for p in val.split(os.pathsep) if not p.startswith(lib_dir)
+        )
+        if cleaned:
+            env[var] = cleaned
+        else:
+            del env[var]
+    return env
+
+
 # ── PKCS#11 mechanism → wif-bunker algorithm mapping ──
 
 _ALGO_TO_PKCS11 = {
@@ -127,6 +165,7 @@ def _query_p11kit() -> str | None:
             capture_output=True,
             text=True,
             timeout=5,
+            env=_system_env(),
         )
         if result.returncode != 0:
             return None
@@ -318,6 +357,7 @@ def _ensure_token_via_tpm2_ptool(pin: str, tpm_store: str, module_path: str) -> 
         capture_output=True,
         text=True,
         check=False,
+        env=_system_env(),
     )
     token_exists = _TOKEN_LABEL in (result.stdout + result.stderr)
 
@@ -335,6 +375,7 @@ def _ensure_token_via_tpm2_ptool(pin: str, tpm_store: str, module_path: str) -> 
             capture_output=True,
             text=True,
             check=False,
+            env=_system_env(),
         )
         logger.info(
             "    Token '%s' existed, removed (rc=%d)",
@@ -364,6 +405,7 @@ def _ensure_token_via_tpm2_ptool(pin: str, tpm_store: str, module_path: str) -> 
             check=True,
             capture_output=True,
             text=True,
+            env=_system_env(),
         )
         logger.info(
             "    Created PKCS#11 token '%s' via tpm2_ptool addtoken",
@@ -499,6 +541,7 @@ def _run_pkcs11_tool_keygen(
             check=True,
             capture_output=True,
             text=True,
+            env=_system_env(),
         )
         logger.debug("    pkcs11-tool keygen output: %s", result.stdout.strip())
     except subprocess.CalledProcessError as exc:
