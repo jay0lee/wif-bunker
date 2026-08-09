@@ -38,10 +38,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install system dependencies (Linux)
-        uses: eclipse-score/apt-install@bd30e2e74a4850389719cb8c3e312bb26aada4e0 # v1.0.0
-        with:
-          packages: libpcsclite-dev libtss2-dev swig pkg-config
-          cache: false
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libpcsclite-dev libtss2-dev swig pkg-config
 
       - name: Restore compiled OpenSSL + Python
         uses: actions/cache/restore@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
@@ -113,9 +112,9 @@ jobs:
       # ── System libs needed at runtime (Linux only) ──
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
-        uses: eclipse-score/apt-install@bd30e2e74a4850389719cb8c3e312bb26aada4e0 # v1.0.0
-        with:
-          packages: libpcsclite-dev libtss2-dev swig pkg-config
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libpcsclite-dev libtss2-dev swig pkg-config
 
       # ══════════════════════════════════════════════════════════════════
       # Restore pre-built OpenSSL + Python from cache

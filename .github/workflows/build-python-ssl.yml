@@ -93,10 +93,11 @@ jobs:
       # ── Linux: build dependencies ──
       - name: "Linux: install build dependencies"
         if: runner.os == 'Linux' && steps.cache-python-ssl.outputs.cache-hit != 'true'
-        uses: eclipse-score/apt-install@bd30e2e74a4850389719cb8c3e312bb26aada4e0 # v1.0.0
-        with:
-          packages: build-essential libffi-dev libsqlite3-dev zlib1g-dev libbz2-dev libreadline-dev libncurses-dev liblzma-dev
-          cache: false
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential libffi-dev libsqlite3-dev zlib1g-dev \
+            libbz2-dev libreadline-dev libncurses-dev liblzma-dev
 
       # ════════════════════════════════════════════════════════════════
       # OpenSSL

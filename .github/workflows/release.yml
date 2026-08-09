@@ -147,10 +147,9 @@ jobs:
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
-        uses: eclipse-score/apt-install@bd30e2e74a4850389719cb8c3e312bb26aada4e0 # v1.0.0
-        with:
-          packages: libpcsclite-dev libtss2-dev pkg-config
-          cache: false
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libpcsclite-dev libtss2-dev pkg-config
 
       - name: Install dependencies
         run: |
@@ -212,7 +211,7 @@ jobs:
         env:
           TOTP_SECRET: ${{ secrets.TOTP_SECRET }}
         run: |
-          $url = "https://files.certum.eu/software/SimplySignDesktop/Windows/9.4.3.90/SimplySignDesktop-9.4.3.90-64-bit-en.msi"
+          $url = "https://files.certum.eu/software/SimplySignDesktop/Windows/9.4.4.92/SimplySignDesktop-9.4.4.92-64-bit-en.msi"
           $file = "SimplySignDesktop.msi"
           Invoke-WebRequest $url -OutFile $file
           $log = "install.log"
