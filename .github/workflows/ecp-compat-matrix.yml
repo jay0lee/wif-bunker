@@ -39,15 +39,13 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db
 
+      - name: "Install Software TPM packages"
+        uses: eclipse-score/apt-install@bd30e2e74a4850389719cb8c3e312bb26aada4e0 # v1.0.0
+        with:
+          packages: swtpm swtpm-tools tpm2-tools tpm2-abrmd libtss2-tcti-tabrmd0 dbus libtpm2-pkcs11-1 libtpm2-pkcs11-tools python3-tpm2-pkcs11-tools gnutls-bin opensc
+
       - name: "Setup Software TPM"
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            swtpm swtpm-tools \
-            tpm2-tools tpm2-abrmd libtss2-tcti-tabrmd0 dbus \
-            libtpm2-pkcs11-1 libtpm2-pkcs11-tools python3-tpm2-pkcs11-tools \
-            gnutls-bin opensc
-
           SWTPM_DIR=$(mktemp -d)
           swtpm socket \
             --tpmstate dir="$SWTPM_DIR" \
@@ -263,15 +261,13 @@ jobs:
           echo "=== Installed to bunker-ecp ==="
           ls -la "$ECP_DIR"
 
+      - name: "Install Software TPM packages"
+        uses: eclipse-score/apt-install@bd30e2e74a4850389719cb8c3e312bb26aada4e0 # v1.0.0
+        with:
+          packages: swtpm swtpm-tools tpm2-tools tpm2-abrmd libtss2-tcti-tabrmd0 dbus libtpm2-pkcs11-1 libtpm2-pkcs11-tools python3-tpm2-pkcs11-tools gnutls-bin opensc
+
       - name: "Setup Software TPM"
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            swtpm swtpm-tools \
-            tpm2-tools tpm2-abrmd libtss2-tcti-tabrmd0 dbus \
-            libtpm2-pkcs11-1 libtpm2-pkcs11-tools python3-tpm2-pkcs11-tools \
-            gnutls-bin opensc
-
           SWTPM_DIR=$(mktemp -d)
           swtpm socket \
             --tpmstate dir="$SWTPM_DIR" \
