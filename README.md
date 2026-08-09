@@ -15,26 +15,30 @@ This single command:
 2. Generates a non-exportable private key on your device's hardware security module
 3. Creates a Workload Identity Federation pool with X.509 certificate authentication
 4. Configures [Application Default Credentials (ADC)](https://cloud.google.com/docs/authentication/application-default-credentials) for seamless `gcloud` and SDK usage
+5. Verifies the full chain end-to-end: hardware key → mTLS → Google STS → API call
 
 ## Why WIF Bunker?
 
 | | Service Account Keys | WIF Bunker |
 |---|---|---|
-| **Key location** | JSON file on disk (exportable) | Hardware security module (non-exportable) |
-| **Risk if stolen** | Full impersonation | Key cannot be extracted |
-| **Rotation** | Manual, error-prone | Re-run before expiry (max 390 days) |
+| **Key location** | 🔴 JSON file on disk (exportable) | 🟢 Hardware security module (non-exportable) |
+| **Risk if stolen** | 🔴 Full impersonation | 🟢 Key cannot be extracted |
+| **Rotation** | 🔴 Manual, error-prone | 🟢 Re-run before expiry (max 390 days) |
 | **Setup complexity** | Download a file | One command |
-| **Compliance** | Fails most security audits | Hardware-backed identity |
-| **Attestation** | None | Cryptographic proof of hardware residency |
+| **Compliance** | 🔴 Fails most security audits | 🟢 Hardware-backed identity |
+| **Attestation** | 🔴 None | 🟢 Cryptographic proof of hardware residency |
 
 ## Supported Hardware
 
 | Platform | Hardware | Algorithms |
 |---|---|---|
-| **Linux** | TPM 2.0 | ES256, ES384, RSA 2048/3072/4096 |
-| **macOS** | Secure Enclave (Apple Silicon) | ES256, ES384 |
-| **Windows** | TPM 2.0 | ES256, ES384, RSA 2048/3072/4096 |
+| **Linux** | TPM 2.0 | ES256, ES384, RSA 2048/3072/4096¹ |
+| **macOS** | Secure Enclave (Apple Silicon) | ES256, ES384² |
+| **Windows** | TPM 2.0 | ES256, ES384, RSA 2048/3072/4096¹ |
 | **Cross-platform** | YubiKey 5 ([PIV](https://csrc.nist.gov/pubs/fips/201-3/final)) | ES256, ES384, RSA 2048 (4096 on fw 5.7+) |
+
+¹ RSA algorithm support varies by TPM manufacturer and model. Most TPMs support RSA 2048; RSA 3072 and 4096 are common but not universal. Use `wif-bunker --supported-algorithms` to query your hardware.
+² EC-only is a hardware constraint of the Apple Secure Enclave, which does not support RSA key generation.
 
 ## Installation
 
@@ -70,7 +74,7 @@ bash <(curl -s -S -L https://raw.githubusercontent.com/jay0lee/wif-bunker/master
 
 ### Windows
 
-**Prerequisites:** TPM 2.0 - present on all Windows 11 PCs, thanks M$!.
+**Prerequisites:** TPM 2.0 — present on all Windows 11 PCs.
 
 Download and run the installer from the [Releases](https://github.com/jay0lee/wif-bunker/releases) page:
 
@@ -128,6 +132,55 @@ credentials, project = google.auth.default()
 # Authenticated via hardware-backed mTLS — no key files involved
 ```
 
+## Modes
+
+WIF Bunker supports several operational modes beyond the default full-provisioning workflow.
+
+### Certificate-only mode
+
+Generate a hardware-backed certificate without creating any GCP resources. Useful for testing your hardware keystore or using the certificate with non-GCP services:
+
+```bash
+wif-bunker --cert-only --output-dir /tmp/certs
+```
+
+### mTLS smoke test
+
+Generate a certificate and validate the full mTLS signing pipeline against external test endpoints — no GCP credentials needed:
+
+```bash
+wif-bunker --cert-and-mtls-test --output-dir /tmp/test
+```
+
+This tests TLS handshakes against `certauth.idrix.fr` (requires client certs) and `sts.mtls.googleapis.com` (accepts client certs), verifying your hardware key can sign TLS connections end-to-end.
+
+### Status check
+
+Inspect your current configuration, certificate expiry, and connectivity:
+
+```bash
+wif-bunker --status
+```
+
+Reports configuration file status, certificate metadata and expiration (warns at <15 days, errors if expired), hardmTLS cert retrieval, and performs a live ADC API call to verify authentication.
+
+### Diagnostics
+
+Dump all version info, dependency versions, environment variables, and system details — useful for bug reports:
+
+```bash
+wif-bunker --all-versions
+```
+
+### Query supported algorithms
+
+Ask the active keystore what algorithms it supports:
+
+```bash
+wif-bunker --supported-algorithms          # one per line
+wif-bunker --supported-algorithms --debug  # verbose table
+```
+
 ## YubiKey Support
 
 WIF Bunker supports YubiKey 5 series devices as a cross-platform hardware keystore using the PIV (Personal Identity Verification) applet. This is ideal for:
@@ -139,7 +192,7 @@ WIF Bunker supports YubiKey 5 series devices as a cross-platform hardware keysto
 ### Basic usage
 
 ```bash
-# Use the platform TPM (default, no flag needed)
+# Use the platform TPM/Secure Enclave (default, no flag needed)
 wif-bunker --create-project my-project --folder 123456789
 
 # Use a YubiKey instead
@@ -233,8 +286,21 @@ WIF Bunker bridges your OS hardware security module to Google Cloud's [Workload 
 | **2. Certificate** | Generates a non-exportable private key in your hardware security module and creates an ephemeral CA to sign it |
 | **3. WIF Pool** | Creates a Workload Identity Federation pool with an X.509 provider, pinned to your certificate's fingerprint |
 | **4. IAM** | Grants the federated identity permission to act on the project (optionally via a service account) |
-| **5. ADC Config** | Writes `adc.json` and `certificate_config.json` that tell [google-auth](https://cloud.google.com/docs/authentication/application-default-credentials) how to use ECP for mTLS |
-| **6. Verification** | Validates the full chain: hardware key → ECP → mTLS → Google STS → API call |
+| **5. ADC Config** | Writes `adc.json` and `certificate_config.json` that tell google-auth how to use hardmTLS for signing |
+| **6. Verification** | Validates the full chain: hardware key → hardmTLS → mTLS → Google STS → API call |
+
+### hardmTLS — the signing engine
+
+WIF Bunker ships **hardmTLS**, an open-source Rust shared library (`libhardmtls.so` / `libhardmtls.dylib` / `hardmtls.dll`) that performs all TLS client certificate operations. It implements the [Enterprise Certificate Proxy (ECP)](https://cloud.google.com/endpoint-verification/docs/ecp-overview) C-API interface and talks directly to your OS hardware keystore:
+
+| Platform | Backend |
+|---|---|
+| Linux | `tpm2-pkcs11` PKCS#11 interface |
+| macOS | CryptoTokenKit / Secure Enclave |
+| Windows | Platform Crypto Provider (CNG/NCrypt) |
+| YubiKey | Native PIV bindings |
+
+The private key never leaves the hardware — hardmTLS sends the data to be signed *to* the hardware module and receives only the signature back.
 
 ### Platform Details
 
@@ -293,6 +359,18 @@ WIF Bunker bridges your OS hardware security module to Google Cloud's [Workload 
 wif-bunker [OPTIONS]
 ```
 
+### Modes
+
+| Flag | Description |
+|------|-------------|
+| *(default)* | Full provisioning: project → certificate → WIF pool → IAM → ADC config → verify |
+| `--cert-only` | Generate a hardware-backed certificate without GCP setup |
+| `--cert-and-mtls-test` | Generate a certificate and test mTLS handshakes (no GCP credentials needed) |
+| `--status` | Show configuration status, certificate expiry, and test connectivity |
+| `--attest` | Generate hardware attestation artifacts proving keys reside in hardware |
+| `--supported-algorithms` | Query the active keystore for supported key algorithms |
+| `--all-versions` | Print version info, dependencies, and system details for bug reports |
+
 ### Project
 
 | Flag | Description |
@@ -307,7 +385,7 @@ wif-bunker [OPTIONS]
 |------|-------------|
 | `--create-service-account NAME` | Create a service account (default: `bunker-wif-sa`) |
 | `--use-service-account EMAIL` | Use an existing service account |
-| `--no-service-account` | Authenticate directly as the WIF principal |
+| `--no-service-account` | Authenticate directly as the WIF principal (no SA impersonation) |
 
 ### WIF Pool
 
@@ -323,22 +401,13 @@ wif-bunker [OPTIONS]
 | `--use-adc` | Use [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials) (for CI/CD) |
 | `--client-secrets-file FILE` | OAuth client secrets file (for interactive use) |
 
-### Modes
-
-| Flag | Description |
-|------|-------------|
-| `--cert-only` | Generate a hardware-backed certificate without setting up WIF or GCP resources |
-| `--attest` | Generate hardware attestation artifacts proving keys reside in hardware |
-| `--status` | Show current configuration status, certificate expiry, and test ECP/ADC connectivity |
-| `--supported-algorithms` | Query the active keystore for supported key algorithms |
-
 ### Key Options
 
 | Flag | Description |
 |------|-------------|
 | `--key-algorithm ALGO` | `es256` (default), `es384`, `rsa2048`, `rsa3072`, `rsa4096` |
-| `--cert-lifetime DAYS` | Certificate validity in days (1-390, default: 90) |
-| `--output-dir DIR` | Output directory for `--cert-only` or `--attest` artifacts |
+| `--cert-lifetime DAYS` | Certificate validity in days (1–390, default: 90) |
+| `--output-dir DIR` | Output directory for `--cert-only`, `--cert-and-mtls-test`, or `--attest` artifacts |
 | `--cert-file PATH` | Path to workload certificate PEM (used with `--attest`) |
 | `--debug` | Enable verbose debug logging |
 | `--version` | Show version |
@@ -364,6 +433,26 @@ wif-bunker \
   --use-service-account bunker-wif-sa@my-wif-project.iam.gserviceaccount.com
 ```
 
+## Certificate Rotation
+
+By default, WIF Bunker certificates expire after 90 days. GCP Workload Identity Federation enforces a **maximum certificate lifetime of 390 days**. Before your certificate expires, re-run WIF Bunker with `--use-project` and `--use-pool` to generate a new hardware-backed key and update the WIF provider:
+
+```bash
+wif-bunker \
+  --use-project my-wif-project \
+  --use-pool bunker-wif-pool \
+  --use-service-account bunker-wif-sa@my-wif-project.iam.gserviceaccount.com
+```
+
+This generates a fresh certificate and replaces the old WIF provider trust anchor and fingerprint pin. The old key remains in the hardware keystore but is no longer trusted by GCP.
+
+You can check remaining validity at any time with `wif-bunker --status`, and adjust lifetime with `--cert-lifetime`:
+
+```bash
+# 180-day certificate
+wif-bunker --create-project my-project --folder 123456 --cert-lifetime 180
+```
+
 ## CI/CD Integration
 
 WIF Bunker works in CI/CD pipelines using `--use-adc`. Example with GitHub Actions:
@@ -383,75 +472,17 @@ WIF Bunker works in CI/CD pipelines using `--use-adc`. Example with GitHub Actio
       --use-service-account sa@my-project.iam.gserviceaccount.com
 ```
 
-## Development
-
-### From source
-
-```bash
-git clone https://github.com/jay0lee/wif-bunker.git
-cd wif-bunker
-pip install -e ".[dev]"
-python wif_bunker.py --help
-```
-
-### Running tests
-
-```bash
-# Lint
-ruff check .
-
-# Unit tests
-pytest
-
-# With coverage
-pytest --cov=wif_bunker
-```
-
-### Building binaries
-
-```bash
-pip install pyinstaller
-pyinstaller wif-bunker.spec
-# Output: dist/wif-bunker/
-```
-
-## Certificate Rotation
-
-By default, per best-practice, WIF Bunker certificates expire after 90 days. GCP Workload Identity Federation enforces a **maximum certificate lifetime of 390 days**. Before your certificate expires, re-run WIF Bunker with `--use-project` and `--use-pool` to generate a new hardware-backed key and update the WIF provider:
-
-```bash
-wif-bunker \
-  --use-project my-wif-project \
-  --use-pool bunker-wif-pool \
-  --use-service-account bunker-wif-sa@my-wif-project.iam.gserviceaccount.com
-```
-
-This generates a fresh certificate and replaces the old WIF provider trust anchor and fingerprint pin. The old key remains in the hardware keystore but is no longer trusted by GCP.
-
-You can adjust lifetime with `--cert-lifetime`:
-
-```bash
-# 90-day certificate
-wif-bunker --create-project my-project --folder 123456 --cert-lifetime 90
-```
-
 ## Dependencies
 
-WIF Bunker currently requires **forked versions** of two Google libraries because the upstream releases do not fully support hardware-backed (non-exportable) keys:
+WIF Bunker currently requires a **forked version** of one Google library because the upstream release does not fully support hardware-backed (non-exportable) keys:
 
 ### google-auth (Python)
 
-The upstream [`google-auth`](https://github.com/googleapis/google-auth-library-python) library assumes that both a certificate *and* a private key file are present on disk when configuring mutual TLS (mTLS). With hardware-backed keys, the private key lives inside the TPM or Secure Enclave and is never available as a file — only the [Enterprise Certificate Proxy (ECP)](https://cloud.google.com/endpoint-verification/docs/ecp-overview) can perform signing operations. WIF Bunker uses a [forked google-auth](https://github.com/jay0lee/google-cloud-python) that tolerates a missing `key_path` in the certificate configuration and delegates all TLS signing to ECP.
+The upstream [`google-auth`](https://github.com/googleapis/google-auth-library-python) library assumes that both a certificate *and* a private key file are present on disk when configuring mutual TLS (mTLS). With hardware-backed keys, the private key lives inside the TPM or Secure Enclave and is never available as a file — only hardmTLS can perform signing operations. WIF Bunker uses a [forked google-auth](https://github.com/jay0lee/google-cloud-python) that tolerates a missing `key_path` in the certificate configuration and delegates all TLS signing to the hardmTLS library.
 
 **Upstream issue:** [googleapis/google-cloud-python#17967](https://github.com/googleapis/google-cloud-python/issues/17967)
 
-### Enterprise Certificate Proxy (ECP)
-
-The upstream [ECP](https://github.com/googleapis/enterprise-certificate-proxy) binary has issues loading hardware-backed certificates from OS keystores in certain configurations, particularly on Linux with TPM 2.0 PKCS#11 stores and on macOS with Secure Enclave keys managed via CryptoTokenKit. WIF Bunker uses a [forked ECP](https://github.com/jay0lee/enterprise-certificate-proxy) with fixes for these hardware keystore access patterns.
-
-**Upstream issue:** [googleapis/enterprise-certificate-proxy#220](https://github.com/googleapis/enterprise-certificate-proxy/issues/220)
-
-> **Note:** Once these upstream issues are resolved, WIF Bunker will switch to the official releases. No changes to your configuration will be required.
+> **Note:** Once this upstream issue is resolved, WIF Bunker will switch to the official release. No changes to your configuration will be required.
 
 ## Security
 
@@ -462,6 +493,16 @@ The upstream [ECP](https://github.com/googleapis/enterprise-certificate-proxy) b
 - **Good citizen:** WIF Bunker does not interfere with other applications using the TPM (disk encryption, Secure Boot, etc.). Only handles it creates are managed.
 - **Build provenance:** All release binaries include [SLSA build provenance attestations](https://slsa.dev/) verifiable via `gh attestation verify`.
 - **Pinned dependencies:** All GitHub Actions in CI/CD workflows are pinned to commit SHAs.
+
+## Architecture & Stack
+
+WIF Bunker is a Python CLI application backed by a Rust native library:
+
+- **CLI & orchestration:** Python 3.10+ — handles GCP API calls, certificate management, configuration, and the user-facing workflow.
+- **TLS signing engine:** [hardmTLS](hardmtls-native/) — a Rust shared library implementing the ECP C-API interface. Talks directly to OS hardware keystores (TPM 2.0 via PKCS#11, macOS Secure Enclave via CryptoTokenKit, Windows CNG/NCrypt, YubiKey PIV).
+- **Distribution:** PyInstaller single-directory bundles with bundled Python runtime, hardmTLS library, and root certificate stores.
+
+For development setup, clone the repo and run `pip install -e ".[dev]"` from the repo root.
 
 ## License
 
