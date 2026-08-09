@@ -22,7 +22,7 @@ ChangesEnvironment=yes
 DirExistsWarning=no
 
 [Files]
-Source: "..\..\dist\wif-bunker\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "dist\wif-bunker\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Registry]
 ; Add {app} to user PATH
