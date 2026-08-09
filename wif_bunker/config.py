@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 # --- Tuning Constants ---
 MAX_BACKOFF_SECONDS = 60
-API_RETRY_ATTEMPTS = 15  # 1+2+4+8+16+32+(60x9) ~ 10 min total
+API_RETRY_TIMEOUT_SECONDS = 900  # 15 minutes max total retry time
 LRO_TIMEOUT_SECONDS = 300
 
 

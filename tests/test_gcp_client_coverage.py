@@ -37,13 +37,13 @@ def _mock_response(status_code: int = 200, json_data: dict | None = None, conten
 
 
 # ---------------------------------------------------------------------------
-# ADC init — tokeninfo fallback (lines 71-79)
+# ADC init — tokeninfo fallback
 # ---------------------------------------------------------------------------
 
 
 class TestAdcTokenInfoFallback:
     def test_adc_user_creds_fetches_email_from_tokeninfo(self):
-        """Covers lines 71-76: no SA email → calls tokeninfo for identity."""
+        """No SA email → calls tokeninfo for identity."""
         mock_creds = MagicMock()
         mock_creds.token = "adc-token"
         # No service_account_email or signer_email
@@ -64,7 +64,7 @@ class TestAdcTokenInfoFallback:
         client.session.close()
 
     def test_adc_user_creds_tokeninfo_exception(self):
-        """Covers lines 77-79: tokeninfo fails gracefully → identity='unknown'."""
+        """Tokeninfo fails gracefully → identity='unknown'."""
         mock_creds = MagicMock()
         mock_creds.token = "adc-token"
         mock_creds.service_account_email = None
@@ -80,7 +80,7 @@ class TestAdcTokenInfoFallback:
         client.session.close()
 
     def test_adc_uses_signer_email_if_no_sa_email(self):
-        """Covers line 67: falls back to signer_email."""
+        """Falls back to signer_email."""
         mock_creds = MagicMock()
         mock_creds.token = "adc-token"
         mock_creds.service_account_email = None
@@ -94,13 +94,13 @@ class TestAdcTokenInfoFallback:
 
 
 # ---------------------------------------------------------------------------
-# api_call_with_iam_retry — connection errors (lines 326-341)
+# _api_call_with_retry — connection errors
 # ---------------------------------------------------------------------------
 
 
-class TestApiCallWithIamRetryConnectionErrors:
+class TestApiCallWithRetryConnectionErrors:
     def test_retries_on_connection_error(self):
-        """Covers lines 326-340: ConnectionError is retried."""
+        """ConnectionError is retried and recovers."""
         client = _make_client_with_token()
         resp_ok = _mock_response(json_data={"result": "ok"})
 
@@ -116,38 +116,31 @@ class TestApiCallWithIamRetryConnectionErrors:
         with (
             patch.object(client.session, "request", side_effect=mock_request),
             patch("wif_bunker.gcp_client.time.sleep"),
+            patch("wif_bunker.gcp_client.random.uniform", return_value=0.1),
         ):
-            result = client.api_call_with_iam_retry("GET", "https://example.com/v1/resource")
+            result = client._api_call_with_retry("GET", "https://example.com/v1/resource")
 
         assert result == {"result": "ok"}
         assert call_count == 2
         client.session.close()
 
-    def test_retries_on_transport_error(self):
-        """Covers lines 326-340: google.auth TransportError is retried."""
+    def test_transport_error_not_retried(self):
+        """TransportError (mTLS) is NOT retried — propagates immediately."""
         client = _make_client_with_token()
-        resp_ok = _mock_response(json_data={"result": "ok"})
-
-        call_count = 0
 
         def mock_request(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise TransportError("TLS handshake failed")
-            return resp_ok
+            raise TransportError("TLS handshake failed")
 
         with (
             patch.object(client.session, "request", side_effect=mock_request),
-            patch("wif_bunker.gcp_client.time.sleep"),
+            pytest.raises(TransportError),
         ):
-            result = client.api_call_with_iam_retry("GET", "https://example.com/v1/resource")
+            client._api_call_with_retry("GET", "https://example.com/v1/resource")
 
-        assert result == {"result": "ok"}
         client.session.close()
 
     def test_retries_on_os_error(self):
-        """Covers lines 326-340: OSError is retried."""
+        """OSError is retried and recovers."""
         client = _make_client_with_token()
         resp_ok = _mock_response(json_data={"result": "ok"})
 
@@ -163,14 +156,15 @@ class TestApiCallWithIamRetryConnectionErrors:
         with (
             patch.object(client.session, "request", side_effect=mock_request),
             patch("wif_bunker.gcp_client.time.sleep"),
+            patch("wif_bunker.gcp_client.random.uniform", return_value=0.1),
         ):
-            result = client.api_call_with_iam_retry("GET", "https://example.com/v1/resource")
+            result = client._api_call_with_retry("GET", "https://example.com/v1/resource")
 
         assert result == {"result": "ok"}
         client.session.close()
 
-    def test_connection_error_exhausts_attempts_raises(self):
-        """Covers line 340: raises after exhausting retries on ConnectionError."""
+    def test_connection_error_exhausts_timeout_raises(self):
+        """Raises after exhausting timeout on ConnectionError."""
         client = _make_client_with_token()
 
         with (
@@ -180,14 +174,17 @@ class TestApiCallWithIamRetryConnectionErrors:
                 side_effect=requests.exceptions.ConnectionError("reset"),
             ),
             patch("wif_bunker.gcp_client.time.sleep"),
+            # Start at 0, first check still within deadline, second check past deadline
+            patch("wif_bunker.gcp_client.time.monotonic", side_effect=[0, 5, 1000]),
+            patch("wif_bunker.gcp_client.random.uniform", return_value=0.1),
             pytest.raises(requests.exceptions.ConnectionError),
         ):
-            client.api_call_with_iam_retry("GET", "https://example.com/v1/resource", max_attempts=2)
+            client._api_call_with_retry("GET", "https://example.com/v1/resource", timeout=10)
 
         client.session.close()
 
-    def test_retries_on_404_then_succeeds(self):
-        """Covers lines 313-324: 404 is also retried."""
+    def test_retries_on_404_with_propagation(self):
+        """404 is retried when retry_on_propagation=True."""
         client = _make_client_with_token()
         resp_404 = _mock_response(404)
         resp_ok = _mock_response(json_data={"name": "pool/123"})
@@ -195,21 +192,58 @@ class TestApiCallWithIamRetryConnectionErrors:
         with (
             patch.object(client.session, "request", side_effect=[resp_404, resp_ok]),
             patch("wif_bunker.gcp_client.time.sleep"),
+            patch("wif_bunker.gcp_client.random.uniform", return_value=0.1),
         ):
-            result = client.api_call_with_iam_retry("POST", "https://example.com/v1/pool")
+            result = client._api_call_with_retry(
+                "POST",
+                "https://example.com/v1/pool",
+                retry_on_propagation=True,
+            )
 
         assert result == {"name": "pool/123"}
         client.session.close()
 
+    def test_retries_on_429(self):
+        """429 (rate limit) is always retried."""
+        client = _make_client_with_token()
+        resp_429 = _mock_response(429)
+        resp_ok = _mock_response(json_data={"result": "ok"})
+
+        with (
+            patch.object(client.session, "request", side_effect=[resp_429, resp_ok]),
+            patch("wif_bunker.gcp_client.time.sleep"),
+            patch("wif_bunker.gcp_client.random.uniform", return_value=0.1),
+        ):
+            result = client._api_call_with_retry("GET", "https://example.com/v1/resource")
+
+        assert result == {"result": "ok"}
+        client.session.close()
+
+    def test_retries_on_503(self):
+        """503 (service unavailable) is always retried."""
+        client = _make_client_with_token()
+        resp_503 = _mock_response(503)
+        resp_ok = _mock_response(json_data={"result": "ok"})
+
+        with (
+            patch.object(client.session, "request", side_effect=[resp_503, resp_ok]),
+            patch("wif_bunker.gcp_client.time.sleep"),
+            patch("wif_bunker.gcp_client.random.uniform", return_value=0.1),
+        ):
+            result = client._api_call_with_retry("GET", "https://example.com/v1/resource")
+
+        assert result == {"result": "ok"}
+        client.session.close()
+
 
 # ---------------------------------------------------------------------------
-# wait_for_wif_resource — 404 retry (lines 365-377)
+# _wait_for_wif_resource — 404 retry
 # ---------------------------------------------------------------------------
 
 
 class TestWaitForWifResource404:
     def test_retries_on_404_then_active(self):
-        """Covers lines 365-377: 404 on first attempt, ACTIVE on second."""
+        """404 on first attempt, ACTIVE on second."""
         client = _make_client_with_token()
 
         resp_404 = _mock_response(404)
@@ -224,19 +258,19 @@ class TestWaitForWifResource404:
             return {"state": "ACTIVE", "name": "pool/123"}
 
         with (
-            patch.object(client, "api_call", side_effect=mock_api_call),
+            patch.object(client, "_api_call", side_effect=mock_api_call),
             patch("wif_bunker.gcp_client.time.sleep"),
+            patch("wif_bunker.gcp_client.random.uniform", return_value=0.1),
         ):
-            result = client.wait_for_wif_resource(
+            result = client._wait_for_wif_resource(
                 "https://iam.googleapis.com/v1/pool/123",
-                max_attempts=3,
             )
 
         assert result["state"] == "ACTIVE"
         client.session.close()
 
     def test_non_404_error_raises_immediately(self):
-        """Covers line 377: non-404 HTTPError raises immediately."""
+        """Non-404 HTTPError raises immediately."""
         client = _make_client_with_token()
 
         resp_500 = _mock_response(500)
@@ -245,22 +279,22 @@ class TestWaitForWifResource404:
             resp_500.raise_for_status()
 
         with (
-            patch.object(client, "api_call", side_effect=mock_api_call),
+            patch.object(client, "_api_call", side_effect=mock_api_call),
             pytest.raises(requests.HTTPError),
         ):
-            client.wait_for_wif_resource("https://iam.googleapis.com/v1/pool/123", max_attempts=3)
+            client._wait_for_wif_resource("https://iam.googleapis.com/v1/pool/123")
 
         client.session.close()
 
 
 # ---------------------------------------------------------------------------
-# ensure_project — non-403/404 error raises (line 409)
+# ensure_project — non-403/404 error raises
 # ---------------------------------------------------------------------------
 
 
 class TestEnsureProjectRaises:
     def test_non_403_404_get_raises(self):
-        """Covers line 409: non-403/404 HTTPError on GET raises immediately."""
+        """Non-403/404 HTTPError on GET raises immediately."""
         client = _make_client_with_token()
 
         resp_500 = _mock_response(500)
@@ -269,7 +303,7 @@ class TestEnsureProjectRaises:
             resp_500.raise_for_status()
 
         with (
-            patch.object(client, "api_call", side_effect=mock_api_call),
+            patch.object(client, "_api_call", side_effect=mock_api_call),
             pytest.raises(requests.HTTPError),
         ):
             client.ensure_project("my-project")
@@ -278,13 +312,13 @@ class TestEnsureProjectRaises:
 
 
 # ---------------------------------------------------------------------------
-# ensure_project — folder parent (lines 417-421)
+# ensure_project — folder parent
 # ---------------------------------------------------------------------------
 
 
 class TestEnsureProjectWithFolder:
     def test_create_with_folder_parent(self):
-        """Covers lines 416-421: project creation with folder parent."""
+        """Project creation with folder parent."""
         client = _make_client_with_token()
 
         resp_403 = _mock_response(403)
@@ -306,9 +340,9 @@ class TestEnsureProjectWithFolder:
             return None
 
         with (
-            patch.object(client, "api_call", side_effect=mock_api_call),
-            patch.object(client, "wait_for_lro"),
-            patch.object(client, "api_call_with_iam_retry", return_value={"projectNumber": "789"}),
+            patch.object(client, "_api_call", side_effect=mock_api_call),
+            patch.object(client, "_wait_for_lro"),
+            patch.object(client, "_api_call_with_retry", return_value={"projectNumber": "789"}),
         ):
             result = client.ensure_project("new-project", folder="12345")
 
@@ -317,13 +351,13 @@ class TestEnsureProjectWithFolder:
 
 
 # ---------------------------------------------------------------------------
-# ensure_project — POST non-409 error raises (line 434)
+# ensure_project — POST non-409 error raises
 # ---------------------------------------------------------------------------
 
 
 class TestEnsureProjectPostError:
     def test_post_non_409_raises(self):
-        """Covers line 434: POST returns non-409 HTTPError."""
+        """POST returns non-409 HTTPError."""
         client = _make_client_with_token()
 
         resp_403 = _mock_response(403)
@@ -341,7 +375,7 @@ class TestEnsureProjectPostError:
             return None
 
         with (
-            patch.object(client, "api_call", side_effect=mock_api_call),
+            patch.object(client, "_api_call", side_effect=mock_api_call),
             pytest.raises(requests.HTTPError),
         ):
             client.ensure_project("new-project")
@@ -350,22 +384,22 @@ class TestEnsureProjectPostError:
 
 
 # ---------------------------------------------------------------------------
-# enable_apis (lines 442-448)
+# enable_apis
 # ---------------------------------------------------------------------------
 
 
 class TestEnableApis:
     def test_enable_apis_calls_batch_enable_and_waits(self):
-        """Covers lines 442-448: batch enables APIs and waits for LRO."""
+        """Batch enables APIs and waits for LRO."""
         client = _make_client_with_token()
 
         with (
             patch.object(
                 client,
-                "api_call_with_iam_retry",
+                "_api_call_with_retry",
                 return_value={"name": "operations/enable-op"},
             ) as mock_retry,
-            patch.object(client, "wait_for_lro") as mock_lro,
+            patch.object(client, "_wait_for_lro") as mock_lro,
         ):
             client.enable_apis("123456", ["iam.googleapis.com", "sts.googleapis.com"])
 
@@ -380,7 +414,7 @@ class TestEnableApis:
 
 
 # ---------------------------------------------------------------------------
-# setup_wif_infrastructure (lines 461-564)
+# setup_wif_infrastructure
 # ---------------------------------------------------------------------------
 
 
@@ -402,7 +436,7 @@ class TestSetupWifInfrastructure:
         return bundle
 
     def test_creates_sa_and_pool_and_provider(self):
-        """Covers lines 461-564: full WIF infrastructure creation with new SA."""
+        """Full WIF infrastructure creation with new SA."""
         client = _make_client_with_token()
         config = self._make_mock_config()
         bundle = self._make_mock_cert_bundle()
@@ -410,7 +444,7 @@ class TestSetupWifInfrastructure:
         with (
             patch.object(
                 client,
-                "api_call_with_iam_retry",
+                "_api_call_with_retry",
                 side_effect=[
                     # create_sa_task result
                     {"email": "sa@test-proj.iam.gserviceaccount.com"},
@@ -420,8 +454,8 @@ class TestSetupWifInfrastructure:
                     {"name": "operations/prov-op"},
                 ],
             ),
-            patch.object(client, "wait_for_lro"),
-            patch.object(client, "wait_for_wif_resource"),
+            patch.object(client, "_wait_for_lro"),
+            patch.object(client, "_wait_for_wif_resource"),
             patch("wif_bunker.gcp_client.time.sleep"),
         ):
             sa_email, provider_id = client.setup_wif_infrastructure(
@@ -437,7 +471,7 @@ class TestSetupWifInfrastructure:
         client.session.close()
 
     def test_creates_provider_only_when_pool_reused(self):
-        """Covers lines 504-548: reuse_pool=True skips pool creation, cleans stale providers."""
+        """reuse_pool=True skips pool creation, cleans stale providers."""
         client = _make_client_with_token()
         config = self._make_mock_config()
         bundle = self._make_mock_cert_bundle()
@@ -452,7 +486,7 @@ class TestSetupWifInfrastructure:
         with (
             patch.object(
                 client,
-                "api_call",
+                "_api_call",
                 side_effect=[
                     stale_providers,  # GET providers list
                     {"name": "operations/del-op"},  # DELETE stale provider
@@ -460,11 +494,11 @@ class TestSetupWifInfrastructure:
             ),
             patch.object(
                 client,
-                "api_call_with_iam_retry",
+                "_api_call_with_retry",
                 return_value={"name": "operations/prov-op"},
             ),
-            patch.object(client, "wait_for_lro"),
-            patch.object(client, "wait_for_wif_resource"),
+            patch.object(client, "_wait_for_lro"),
+            patch.object(client, "_wait_for_wif_resource"),
             patch("wif_bunker.gcp_client.time.sleep"),
         ):
             sa_email, provider_id = client.setup_wif_infrastructure(
@@ -480,7 +514,7 @@ class TestSetupWifInfrastructure:
         client.session.close()
 
     def test_sa_already_exists_409(self):
-        """Covers lines 479-484: SA creation returns 409 (already exists)."""
+        """SA creation returns 409 (already exists)."""
         client = _make_client_with_token()
         config = self._make_mock_config()
         bundle = self._make_mock_cert_bundle()
@@ -489,7 +523,7 @@ class TestSetupWifInfrastructure:
 
         sa_call_count = 0
 
-        def mock_api_call_with_retry(method, url, json_payload=None, max_attempts=15):
+        def mock_api_call_with_retry(method, url, json_payload=None, *, retry_on_propagation=False, timeout=900):
             nonlocal sa_call_count
             if "serviceAccounts" in url:
                 sa_call_count += 1
@@ -501,9 +535,9 @@ class TestSetupWifInfrastructure:
             return None
 
         with (
-            patch.object(client, "api_call_with_iam_retry", side_effect=mock_api_call_with_retry),
-            patch.object(client, "wait_for_lro"),
-            patch.object(client, "wait_for_wif_resource"),
+            patch.object(client, "_api_call_with_retry", side_effect=mock_api_call_with_retry),
+            patch.object(client, "_wait_for_lro"),
+            patch.object(client, "_wait_for_wif_resource"),
             patch("wif_bunker.gcp_client.time.sleep"),
         ):
             sa_email, _ = client.setup_wif_infrastructure(
@@ -518,7 +552,7 @@ class TestSetupWifInfrastructure:
         client.session.close()
 
     def test_existing_sa_email_provided(self):
-        """Covers lines 552-553: pre-existing sa_email skips SA creation."""
+        """Pre-existing sa_email skips SA creation."""
         client = _make_client_with_token()
         config = self._make_mock_config()
         bundle = self._make_mock_cert_bundle()
@@ -526,14 +560,14 @@ class TestSetupWifInfrastructure:
         with (
             patch.object(
                 client,
-                "api_call_with_iam_retry",
+                "_api_call_with_retry",
                 side_effect=[
                     {"name": "operations/pool-op"},  # pool creation
                     {"name": "operations/prov-op"},  # provider creation
                 ],
             ),
-            patch.object(client, "wait_for_lro"),
-            patch.object(client, "wait_for_wif_resource"),
+            patch.object(client, "_wait_for_lro"),
+            patch.object(client, "_wait_for_wif_resource"),
             patch("wif_bunker.gcp_client.time.sleep"),
         ):
             sa_email, _ = client.setup_wif_infrastructure(
@@ -549,7 +583,7 @@ class TestSetupWifInfrastructure:
         client.session.close()
 
     def test_reuse_pool_list_providers_error(self):
-        """Covers lines 520-521: exception listing providers is caught silently."""
+        """Exception listing providers is caught and logged."""
         client = _make_client_with_token()
         config = self._make_mock_config()
         bundle = self._make_mock_cert_bundle()
@@ -557,16 +591,16 @@ class TestSetupWifInfrastructure:
         with (
             patch.object(
                 client,
-                "api_call",
+                "_api_call",
                 side_effect=Exception("network error"),
             ),
             patch.object(
                 client,
-                "api_call_with_iam_retry",
+                "_api_call_with_retry",
                 return_value={"name": "operations/prov-op"},
             ),
-            patch.object(client, "wait_for_lro"),
-            patch.object(client, "wait_for_wif_resource"),
+            patch.object(client, "_wait_for_lro"),
+            patch.object(client, "_wait_for_wif_resource"),
             patch("wif_bunker.gcp_client.time.sleep"),
         ):
             sa_email, _ = client.setup_wif_infrastructure(
@@ -581,7 +615,7 @@ class TestSetupWifInfrastructure:
         client.session.close()
 
     def test_reuse_pool_delete_stale_provider_error(self):
-        """Covers lines 518-519: exception deleting stale provider is caught silently."""
+        """Exception deleting stale provider is caught and logged as warning."""
         client = _make_client_with_token()
         config = self._make_mock_config()
         bundle = self._make_mock_cert_bundle()
@@ -592,6 +626,8 @@ class TestSetupWifInfrastructure:
             ]
         }
 
+        resp_500 = _mock_response(500)
+
         api_call_count = 0
 
         def mock_api_call(method, url, json_payload=None):
@@ -599,18 +635,18 @@ class TestSetupWifInfrastructure:
             api_call_count += 1
             if api_call_count == 1:
                 return stale_providers  # GET providers list
-            # DELETE stale provider fails
-            raise Exception("delete failed")
+            # DELETE stale provider fails with HTTPError
+            resp_500.raise_for_status()
 
         with (
-            patch.object(client, "api_call", side_effect=mock_api_call),
+            patch.object(client, "_api_call", side_effect=mock_api_call),
             patch.object(
                 client,
-                "api_call_with_iam_retry",
+                "_api_call_with_retry",
                 return_value={"name": "operations/prov-op"},
             ),
-            patch.object(client, "wait_for_lro"),
-            patch.object(client, "wait_for_wif_resource"),
+            patch.object(client, "_wait_for_lro"),
+            patch.object(client, "_wait_for_wif_resource"),
         ):
             sa_email, _ = client.setup_wif_infrastructure(
                 config=config,
@@ -624,7 +660,7 @@ class TestSetupWifInfrastructure:
         client.session.close()
 
     def test_pool_already_exists_409(self):
-        """Covers lines 497-501: pool creation returns 409."""
+        """Pool creation returns 409."""
         client = _make_client_with_token()
         config = self._make_mock_config()
         bundle = self._make_mock_cert_bundle()
@@ -633,7 +669,7 @@ class TestSetupWifInfrastructure:
 
         pool_call_done = False
 
-        def mock_api_call_with_retry(method, url, json_payload=None, max_attempts=15):
+        def mock_api_call_with_retry(method, url, json_payload=None, *, retry_on_propagation=False, timeout=900):
             nonlocal pool_call_done
             if "workloadIdentityPools?" in url and not pool_call_done:
                 pool_call_done = True
@@ -643,9 +679,9 @@ class TestSetupWifInfrastructure:
             return None
 
         with (
-            patch.object(client, "api_call_with_iam_retry", side_effect=mock_api_call_with_retry),
-            patch.object(client, "wait_for_lro"),
-            patch.object(client, "wait_for_wif_resource"),
+            patch.object(client, "_api_call_with_retry", side_effect=mock_api_call_with_retry),
+            patch.object(client, "_wait_for_lro"),
+            patch.object(client, "_wait_for_wif_resource"),
             patch("wif_bunker.gcp_client.time.sleep"),
         ):
             _, _ = client.setup_wif_infrastructure(
@@ -660,7 +696,7 @@ class TestSetupWifInfrastructure:
 
 
 # ---------------------------------------------------------------------------
-# apply_iam_bindings (lines 576-612)
+# apply_iam_bindings
 # ---------------------------------------------------------------------------
 
 
@@ -671,19 +707,19 @@ class TestApplyIamBindings:
         return config
 
     def test_sa_and_project_bindings(self):
-        """Covers lines 576-612: applies both SA and project IAM bindings."""
+        """Applies both SA and project IAM bindings."""
         client = _make_client_with_token()
         config = self._make_mock_config()
 
         call_log = []
 
-        def mock_api_call_with_retry(method, url, json_payload=None, max_attempts=15):
+        def mock_api_call_with_retry(method, url, json_payload=None, *, retry_on_propagation=False, timeout=900):
             call_log.append((method, url, json_payload))
             if "getIamPolicy" in url:
                 return {"bindings": []}
             return {"bindings": []}
 
-        with patch.object(client, "api_call_with_iam_retry", side_effect=mock_api_call_with_retry):
+        with patch.object(client, "_api_call_with_retry", side_effect=mock_api_call_with_retry):
             client.apply_iam_bindings(
                 config=config,
                 project_number="123456",
@@ -703,19 +739,19 @@ class TestApplyIamBindings:
         client.session.close()
 
     def test_project_bindings_only_no_sa(self):
-        """Covers lines 598-612: only project bindings when use_sa=False."""
+        """Only project bindings when use_sa=False."""
         client = _make_client_with_token()
         config = self._make_mock_config()
 
         call_log = []
 
-        def mock_api_call_with_retry(method, url, json_payload=None, max_attempts=15):
+        def mock_api_call_with_retry(method, url, json_payload=None, *, retry_on_propagation=False, timeout=900):
             call_log.append((method, url, json_payload))
             if "getIamPolicy" in url:
                 return {"bindings": []}
             return {}
 
-        with patch.object(client, "api_call_with_iam_retry", side_effect=mock_api_call_with_retry):
+        with patch.object(client, "_api_call_with_retry", side_effect=mock_api_call_with_retry):
             client.apply_iam_bindings(
                 config=config,
                 project_number="123456",
@@ -730,19 +766,19 @@ class TestApplyIamBindings:
         client.session.close()
 
     def test_sa_policy_none_defaults_to_empty(self):
-        """Covers lines 591-592: SA policy returns None → defaults to {}."""
+        """SA policy returns None → defaults to {}."""
         client = _make_client_with_token()
         config = self._make_mock_config()
 
         call_log = []
 
-        def mock_api_call_with_retry(method, url, json_payload=None, max_attempts=15):
+        def mock_api_call_with_retry(method, url, json_payload=None, *, retry_on_propagation=False, timeout=900):
             call_log.append((method, url, json_payload))
             if "getIamPolicy" in url:
                 return None  # Simulate None response
             return {}
 
-        with patch.object(client, "api_call_with_iam_retry", side_effect=mock_api_call_with_retry):
+        with patch.object(client, "_api_call_with_retry", side_effect=mock_api_call_with_retry):
             client.apply_iam_bindings(
                 config=config,
                 project_number="123456",
@@ -759,19 +795,19 @@ class TestApplyIamBindings:
         client.session.close()
 
     def test_project_member_uses_wif_principal_when_no_sa(self):
-        """Covers lines 607-608: direct WIF principal binding when use_sa=False."""
+        """Direct WIF principal binding when use_sa=False."""
         client = _make_client_with_token()
         config = self._make_mock_config()
 
         call_log = []
 
-        def mock_api_call_with_retry(method, url, json_payload=None, max_attempts=15):
+        def mock_api_call_with_retry(method, url, json_payload=None, *, retry_on_propagation=False, timeout=900):
             call_log.append((method, url, json_payload))
             if "getIamPolicy" in url:
                 return {"bindings": []}
             return {}
 
-        with patch.object(client, "api_call_with_iam_retry", side_effect=mock_api_call_with_retry):
+        with patch.object(client, "_api_call_with_retry", side_effect=mock_api_call_with_retry):
             client.apply_iam_bindings(
                 config=config,
                 project_number="123456",
@@ -789,19 +825,19 @@ class TestApplyIamBindings:
         client.session.close()
 
     def test_project_member_uses_sa_when_use_sa(self):
-        """Covers lines 605-606: serviceAccount: prefix when use_sa=True."""
+        """serviceAccount: prefix when use_sa=True."""
         client = _make_client_with_token()
         config = self._make_mock_config()
 
         call_log = []
 
-        def mock_api_call_with_retry(method, url, json_payload=None, max_attempts=15):
+        def mock_api_call_with_retry(method, url, json_payload=None, *, retry_on_propagation=False, timeout=900):
             call_log.append((method, url, json_payload))
             if "getIamPolicy" in url:
                 return {"bindings": []}
             return {}
 
-        with patch.object(client, "api_call_with_iam_retry", side_effect=mock_api_call_with_retry):
+        with patch.object(client, "_api_call_with_retry", side_effect=mock_api_call_with_retry):
             client.apply_iam_bindings(
                 config=config,
                 project_number="123456",
@@ -816,4 +852,191 @@ class TestApplyIamBindings:
         policy = proj_set_call[2]["policy"]
         member = policy["bindings"][-1]["members"][0]
         assert member.startswith("serviceAccount:")
+        client.session.close()
+
+
+# ---------------------------------------------------------------------------
+# _wait_for_lro — error in completed operation (lines 384-387)
+# ---------------------------------------------------------------------------
+
+
+class TestWaitForLroError:
+    def test_lro_completed_with_error_raises_runtime_error(self):
+        """LRO completes but with an error field → raises RuntimeError."""
+        client = _make_client_with_token()
+
+        lro_response = {
+            "done": True,
+            "error": {
+                "code": 403,
+                "message": "Permission denied on resource project my-project",
+            },
+        }
+
+        with (
+            patch.object(client, "_api_call", return_value=lro_response),
+            pytest.raises(RuntimeError, match="Permission denied"),
+        ):
+            client._wait_for_lro("cloudresourcemanager.googleapis.com", "operations/fail-op")
+
+        client.session.close()
+
+
+# ---------------------------------------------------------------------------
+# setup_wif_infrastructure — SA non-409 error re-raises (line 528)
+# ---------------------------------------------------------------------------
+
+
+class TestSetupWifSaNon409:
+    def _make_mock_config(self):
+        config = MagicMock()
+        config.project_id = "test-proj"
+        config.pool_id = "bunker-wif-pool"
+        config.provider_id = "bunker-x509-prov-123"
+        config.sa_name = "bunker-wif-sa"
+        return config
+
+    def _make_mock_cert_bundle(self):
+        bundle = MagicMock()
+        bundle.trust_anchor_pem = "-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----"
+        bundle.sha256_fingerprint = "abc123fp"
+        return bundle
+
+    def test_sa_creation_non_409_error_reraises(self):
+        """SA creation returns non-409 HTTPError → re-raised, not swallowed."""
+        client = _make_client_with_token()
+        config = self._make_mock_config()
+        bundle = self._make_mock_cert_bundle()
+
+        resp_500 = _mock_response(500)
+
+        def mock_api_call_with_retry(method, url, json_payload=None, *, retry_on_propagation=False, timeout=900):
+            if "serviceAccounts" in url:
+                resp_500.raise_for_status()
+            # Pool creation succeeds
+            return {"name": "operations/pool-op"}
+
+        with (
+            patch.object(client, "_api_call_with_retry", side_effect=mock_api_call_with_retry),
+            patch.object(client, "_wait_for_lro"),
+            patch.object(client, "_wait_for_wif_resource"),
+            patch("wif_bunker.gcp_client.time.sleep"),
+            pytest.raises(requests.HTTPError),
+        ):
+            client.setup_wif_infrastructure(
+                config=config,
+                project_number="123456",
+                cert_bundle=bundle,
+                reuse_pool=False,
+                use_sa=True,
+            )
+
+        client.session.close()
+
+
+# ---------------------------------------------------------------------------
+# setup_wif_infrastructure — pool non-409 error re-raises (line 546)
+# ---------------------------------------------------------------------------
+
+
+class TestSetupWifPoolNon409:
+    def _make_mock_config(self):
+        config = MagicMock()
+        config.project_id = "test-proj"
+        config.pool_id = "bunker-wif-pool"
+        config.provider_id = "bunker-x509-prov-123"
+        config.sa_name = "bunker-wif-sa"
+        return config
+
+    def _make_mock_cert_bundle(self):
+        bundle = MagicMock()
+        bundle.trust_anchor_pem = "-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----"
+        bundle.sha256_fingerprint = "abc123fp"
+        return bundle
+
+    def test_pool_creation_non_409_error_reraises(self):
+        """Pool creation returns non-409 HTTPError → re-raised."""
+        client = _make_client_with_token()
+        config = self._make_mock_config()
+        bundle = self._make_mock_cert_bundle()
+
+        resp_500 = _mock_response(500)
+
+        def mock_api_call_with_retry(method, url, json_payload=None, *, retry_on_propagation=False, timeout=900):
+            if "workloadIdentityPools?" in url:
+                resp_500.raise_for_status()
+            return {"name": "operations/prov-op"}
+
+        with (
+            patch.object(client, "_api_call_with_retry", side_effect=mock_api_call_with_retry),
+            patch.object(client, "_wait_for_lro"),
+            patch.object(client, "_wait_for_wif_resource"),
+            patch("wif_bunker.gcp_client.time.sleep"),
+            pytest.raises(requests.HTTPError),
+        ):
+            client.setup_wif_infrastructure(
+                config=config,
+                project_number="123456",
+                cert_bundle=bundle,
+                reuse_pool=False,
+                use_sa=False,
+            )
+
+        client.session.close()
+
+
+# ---------------------------------------------------------------------------
+# setup_wif_infrastructure — provider listing HTTPError (line 570)
+# ---------------------------------------------------------------------------
+
+
+class TestSetupWifProviderListHTTPError:
+    def _make_mock_config(self):
+        config = MagicMock()
+        config.project_id = "test-proj"
+        config.pool_id = "bunker-wif-pool"
+        config.provider_id = "bunker-x509-prov-123"
+        config.sa_name = "bunker-wif-sa"
+        return config
+
+    def _make_mock_cert_bundle(self):
+        bundle = MagicMock()
+        bundle.trust_anchor_pem = "-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----"
+        bundle.sha256_fingerprint = "abc123fp"
+        return bundle
+
+    def test_provider_list_http_error_logged_as_warning(self):
+        """HTTPError listing providers in reuse_pool mode is caught and logged."""
+        client = _make_client_with_token()
+        config = self._make_mock_config()
+        bundle = self._make_mock_cert_bundle()
+
+        resp_403 = _mock_response(403)
+
+        def mock_api_call(method, url, json_payload=None):
+            if "/providers" in url and method == "GET":
+                resp_403.raise_for_status()
+            return {"name": "operations/del-op"}
+
+        with (
+            patch.object(client, "_api_call", side_effect=mock_api_call),
+            patch.object(
+                client,
+                "_api_call_with_retry",
+                return_value={"name": "operations/prov-op"},
+            ),
+            patch.object(client, "_wait_for_lro"),
+            patch.object(client, "_wait_for_wif_resource"),
+            patch("wif_bunker.gcp_client.time.sleep"),
+        ):
+            sa_email, _ = client.setup_wif_infrastructure(
+                config=config,
+                project_number="123456",
+                cert_bundle=bundle,
+                reuse_pool=True,
+                use_sa=False,
+            )
+
+        # Should complete successfully despite the HTTPError
+        assert sa_email is None
         client.session.close()

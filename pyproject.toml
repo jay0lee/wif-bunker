@@ -77,4 +77,11 @@ source = ["wif_bunker"]
 
 [tool.coverage.report]
 show_missing = true
-fail_under = 75
+fail_under = 100
+exclude_lines = [
+    "pragma: no cover",
+    "def _oauth_user_token",
+]
+exclude_also = [
+    "if __name__ == .__main__.",
+]

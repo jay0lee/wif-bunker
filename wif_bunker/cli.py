@@ -807,6 +807,9 @@ def main() -> None:
     except RuntimeError as exc:
         logger.error("%s %s", SYM_FAIL, exc)
         sys.exit(1)
+    except TimeoutError as exc:
+        logger.error("%s Operation timed out: %s", SYM_FAIL, exc)
+        sys.exit(1)
     except KeyboardInterrupt:
         logger.info("\nInterrupted.")
         sys.exit(130)

@@ -7,16 +7,16 @@ import concurrent.futures
 import hashlib
 import json
 import logging
+import random
 import threading
 import time
 from typing import Any, ClassVar
 
 import google.auth
 import requests
-from google.auth.exceptions import TransportError
 from google.auth.transport.requests import Request as GoogleAuthRequest
 
-from wif_bunker.config import API_RETRY_ATTEMPTS, LRO_TIMEOUT_SECONDS, MAX_BACKOFF_SECONDS
+from wif_bunker.config import API_RETRY_TIMEOUT_SECONDS, LRO_TIMEOUT_SECONDS, MAX_BACKOFF_SECONDS
 
 logger = logging.getLogger(__name__)
 
@@ -269,7 +269,13 @@ class GCPClient:
     def __exit__(self, *exc: Any) -> None:
         self.session.close()
 
-    def api_call(
+    # --- Retry-related constants ---
+    # HTTP status codes that are always safe to retry (server-side transient errors).
+    _RETRYABLE_STATUS_CODES: ClassVar[set[int]] = {429, 500, 502, 503}
+    # HTTP status codes that indicate propagation delay (retry only when expected).
+    _PROPAGATION_STATUS_CODES: ClassVar[set[int]] = {403, 404}
+
+    def _api_call(
         self,
         method: str,
         url: str,
@@ -288,116 +294,140 @@ class GCPClient:
         res.raise_for_status()
         return res.json() if res.content else None
 
-    def api_call_with_iam_retry(
+    def _api_call_with_retry(
         self,
         method: str,
         url: str,
         json_payload: dict | None = None,
-        max_attempts: int = API_RETRY_ATTEMPTS,
+        *,
+        retry_on_propagation: bool = False,
+        timeout: int = API_RETRY_TIMEOUT_SECONDS,
     ) -> dict | None:
-        """api_call with retry on transient errors.
+        """Unified retry wrapper around _api_call with exponential backoff + jitter.
 
         Retries on:
-          - HTTP 403 (IAM propagation delay after project/API setup)
-          - HTTP 404 (newly created resource not yet visible)
+          - HTTP 429, 500, 502, 503 (always)
+          - HTTP 403, 404 (only when ``retry_on_propagation=True``)
           - ConnectionError / ConnectionResetError (transient network)
-          - google.auth TransportError (STS/mTLS handshake reset)
+
+        Never retries:
+          - google.auth TransportError (mTLS / STS handshake — permanent)
+          - Other 4xx client errors (permanent)
+
+        Backoff: ``min(2 ** attempt, MAX_BACKOFF) + random(0, 1)``
+        Timeout: ``timeout`` seconds total (default 15 minutes).
         """
-        # Extract a human-readable API name from the URL for log messages
-        # e.g. "POST iam.googleapis.com/.../serviceAccounts"
         api_label = url.split("//")[-1] if "//" in url else url
-        for attempt in range(max_attempts):
+        deadline = time.monotonic() + timeout
+        attempt = 0
+        while True:
             try:
-                return self.api_call(method, url, json_payload)
+                return self._api_call(method, url, json_payload)
             except requests.exceptions.HTTPError as exc:
-                if exc.response is not None and exc.response.status_code in (403, 404) and attempt < max_attempts - 1:
-                    sleep_time = min(2**attempt, MAX_BACKOFF_SECONDS)
+                status = exc.response.status_code if exc.response is not None else None
+                retryable = status in self._RETRYABLE_STATUS_CODES
+                if not retryable and retry_on_propagation:
+                    retryable = status in self._PROPAGATION_STATUS_CODES
+                if retryable and time.monotonic() < deadline:
+                    sleep_time = min(2**attempt, MAX_BACKOFF_SECONDS) + random.uniform(0, 1)
+                    label = "propagation" if status in self._PROPAGATION_STATUS_CODES else "transient"
                     logger.info(
-                        "    Waiting for IAM/resource propagation (%d/%d), %ds... [%s %s]",
-                        attempt + 1,
-                        max_attempts,
+                        "    Waiting for %s (HTTP %s), retrying in %.1fs... [%s %s]",
+                        label,
+                        status,
                         sleep_time,
                         method,
                         api_label,
                     )
                     time.sleep(sleep_time)
+                    attempt += 1
                     continue
+                # Permanent error or timeout exhausted — let it propagate.
                 raise
-            except (requests.exceptions.ConnectionError, TransportError, OSError) as exc:
-                if attempt < max_attempts - 1:
-                    sleep_time = min(2**attempt, MAX_BACKOFF_SECONDS)
+            except (requests.exceptions.ConnectionError, OSError) as exc:
+                # Transient network errors — retry. Note: TransportError (mTLS)
+                # is NOT caught here; it will propagate immediately.
+                if time.monotonic() < deadline:
+                    sleep_time = min(2**attempt, MAX_BACKOFF_SECONDS) + random.uniform(0, 1)
                     logger.warning(
-                        "    Transient connection error (%d/%d), retrying in %ds: %s [%s %s]",
-                        attempt + 1,
-                        max_attempts,
+                        "    Connection error, retrying in %.1fs: %s [%s %s]",
                         sleep_time,
                         exc,
                         method,
                         api_label,
                     )
                     time.sleep(sleep_time)
+                    attempt += 1
                     continue
                 raise
-        return None  # unreachable, but satisfies type checker
 
-    def wait_for_lro(
+    def _wait_for_lro(
         self,
         api_domain: str,
         op_name: str,
         timeout: int = LRO_TIMEOUT_SECONDS,
     ) -> dict:
-        """Polls a Long-Running Operation until done, with a hard timeout.
+        """Polls a Long-Running Operation until done, with graduated backoff.
 
+        Backoff: 2s → 4s → 8s → ... capped at 15s, with jitter.
         Raises RuntimeError if the completed operation contains an error
         (e.g. quota exceeded, permission denied).
         """
         url = f"https://{api_domain}/v1/{op_name}"
         deadline = time.monotonic() + timeout
+        attempt = 0
         while time.monotonic() < deadline:
-            op_data = self.api_call("GET", url)
+            op_data = self._api_call("GET", url)
             if op_data and op_data.get("done"):
                 if "error" in op_data:
                     err = op_data["error"]
                     code = err.get("code", "?")
                     msg = err.get("message", "unknown error")
-                    raise RuntimeError(
-                        f"LRO {op_name} failed (code {code}): {msg}"
-                    )
+                    raise RuntimeError(f"LRO {op_name} failed (code {code}): {msg}")
                 return op_data
-            time.sleep(2)
+            sleep_time = min(2**attempt, 15) + random.uniform(0, 0.5)
+            time.sleep(sleep_time)
+            attempt += 1
         raise TimeoutError(f"LRO {op_name} did not complete within {timeout}s")
 
-    def wait_for_wif_resource(self, url: str, max_attempts: int = API_RETRY_ATTEMPTS) -> dict:
-        """Polls a WIF resource until it reaches ACTIVE state."""
+    def _wait_for_wif_resource(
+        self,
+        url: str,
+        timeout: int = API_RETRY_TIMEOUT_SECONDS,
+    ) -> dict:
+        """Polls a WIF resource until it reaches ACTIVE state.
+
+        Uses exponential backoff with jitter, time-based timeout.
+        """
         api_label = url.split("//")[-1] if "//" in url else url
-        for attempt in range(max_attempts):
+        deadline = time.monotonic() + timeout
+        attempt = 0
+        while time.monotonic() < deadline:
             try:
-                data = self.api_call("GET", url)
+                data = self._api_call("GET", url)
             except requests.exceptions.HTTPError as exc:
-                if exc.response is not None and exc.response.status_code == 404 and attempt < max_attempts - 1:
-                    sleep_time = min(2**attempt, MAX_BACKOFF_SECONDS)
+                if exc.response is not None and exc.response.status_code == 404:
+                    sleep_time = min(2**attempt, MAX_BACKOFF_SECONDS) + random.uniform(0, 1)
                     logger.debug(
-                        "WIF resource not found yet (attempt %d/%d), sleeping %ds [GET %s]",
-                        attempt + 1,
-                        max_attempts,
+                        "WIF resource not found yet, retrying in %.1fs [GET %s]",
                         sleep_time,
                         api_label,
                     )
                     time.sleep(sleep_time)
+                    attempt += 1
                     continue
                 raise
             if data and data.get("state") == "ACTIVE":
                 return data
-            sleep_time = min(2**attempt, MAX_BACKOFF_SECONDS)
+            sleep_time = min(2**attempt, MAX_BACKOFF_SECONDS) + random.uniform(0, 1)
             logger.debug(
-                "WIF resource not ACTIVE yet (attempt %d/%d), sleeping %ds [GET %s]",
-                attempt + 1,
-                max_attempts,
+                "WIF resource not ACTIVE yet, retrying in %.1fs [GET %s]",
                 sleep_time,
                 api_label,
             )
             time.sleep(sleep_time)
-        raise TimeoutError(f"WIF resource at {url} did not become ACTIVE within {max_attempts} attempts")
+            attempt += 1
+        raise TimeoutError(f"WIF resource at {url} did not become ACTIVE within {timeout}s")
 
     def ensure_project(self, project_id: str, folder: str | None = None) -> str:
         """Create or reuse GCP project.
@@ -412,7 +442,7 @@ class GCPClient:
 
         # Step 1: check if the project already exists (no retry — 403/404 is the answer).
         try:
-            return self.api_call("GET", project_url)["projectNumber"]
+            return self._api_call("GET", project_url)["projectNumber"]
         except requests.exceptions.HTTPError as exc:
             if exc.response is not None and exc.response.status_code in (403, 404):
                 pass  # Project doesn't exist — create it below.
@@ -432,12 +462,12 @@ class GCPClient:
             logger.info("    Parent folder: %s", folder)
 
         try:
-            operation = self.api_call(
+            operation = self._api_call(
                 "POST",
                 f"https://{crm_base}/v1/projects",
                 create_payload,
             )
-            self.wait_for_lro(crm_base, operation["name"])
+            self._wait_for_lro(crm_base, operation["name"])
         except requests.exceptions.HTTPError as exc:
             if exc.response is not None and exc.response.status_code == 409:
                 logger.info("    Project already exists (409), reusing.")
@@ -445,18 +475,19 @@ class GCPClient:
                 raise
 
         # Step 3: fetch project number (retry for IAM propagation after creation).
-        result = self.api_call_with_iam_retry("GET", project_url)
+        result = self._api_call_with_retry("GET", project_url, retry_on_propagation=True)
         return result["projectNumber"]
 
     def enable_apis(self, project_number: str, api_list: list[str]) -> None:
         """Batch-enables the given APIs for the project."""
         su_base = "serviceusage.googleapis.com"
-        operation = self.api_call_with_iam_retry(
+        operation = self._api_call_with_retry(
             "POST",
             f"https://{su_base}/v1/projects/{project_number}/services:batchEnable",
             {"serviceIds": api_list},
+            retry_on_propagation=True,
         )
-        self.wait_for_lro(su_base, operation["name"])
+        self._wait_for_lro(su_base, operation["name"])
 
     def setup_wif_infrastructure(
         self,
@@ -478,13 +509,14 @@ class GCPClient:
         def create_sa_task() -> str:
             logger.info("[Thread] Creating Service Account...")
             try:
-                result = self.api_call_with_iam_retry(
+                result = self._api_call_with_retry(
                     "POST",
                     f"https://{iam_base}/v1/projects/{config.project_id}/serviceAccounts",
                     {
                         "accountId": sa_name or config.sa_name,
                         "serviceAccount": {"displayName": "WIF Bunker SA"},
                     },
+                    retry_on_propagation=True,
                 )
                 return result["email"]
             except requests.exceptions.HTTPError as exc:
@@ -497,25 +529,26 @@ class GCPClient:
         def create_pool_task() -> None:
             logger.info("[Thread] Creating WIF Pool...")
             try:
-                pool_op = self.api_call_with_iam_retry(
+                pool_op = self._api_call_with_retry(
                     "POST",
                     f"https://{iam_base}/v1/projects/{project_number}"
                     f"/locations/global/workloadIdentityPools"
                     f"?workloadIdentityPoolId={config.pool_id}",
                     {"displayName": "WIF Bunker Pool", "disabled": False},
+                    retry_on_propagation=True,
                 )
-                self.wait_for_lro(iam_base, pool_op["name"])
+                self._wait_for_lro(iam_base, pool_op["name"])
             except requests.exceptions.HTTPError as exc:
                 if exc.response is not None and exc.response.status_code == 409:
                     logger.info("    Pool already exists: %s", config.pool_id)
                 else:
                     raise
-            self.wait_for_wif_resource(pool_res_url)
+            self._wait_for_wif_resource(pool_res_url)
 
         def create_provider_task() -> None:
             if reuse_pool:
                 try:
-                    provs = self.api_call(
+                    provs = self._api_call(
                         "GET",
                         f"{pool_res_url}/providers",
                     ).get("workloadIdentityPoolProviders", [])
@@ -524,10 +557,19 @@ class GCPClient:
                         if pname.startswith("bunker-x509-prov-") and pname != config.provider_id:
                             logger.info("    Deleting stale provider: %s", pname)
                             try:
-                                del_op = self.api_call("DELETE", f"{pool_res_url}/providers/{pname}")
-                                self.wait_for_lro(iam_base, del_op["name"])
-                            except Exception:
-                                logger.debug("Failed to delete stale provider", exc_info=True)
+                                del_op = self._api_call("DELETE", f"{pool_res_url}/providers/{pname}")
+                                self._wait_for_lro(iam_base, del_op["name"])
+                            except requests.exceptions.HTTPError as exc:
+                                logger.warning(
+                                    "Failed to delete stale provider %s: HTTP %s",
+                                    pname,
+                                    exc.response.status_code if exc.response else "?",
+                                )
+                except requests.exceptions.HTTPError as exc:
+                    logger.warning(
+                        "Failed to list providers: HTTP %s",
+                        exc.response.status_code if exc.response else "?",
+                    )
                 except Exception:
                     logger.debug("Failed to list/delete providers", exc_info=True)
 
@@ -550,13 +592,14 @@ class GCPClient:
                 logger.info("[Thread] Reusing WIF pool: %s", config.pool_id)
 
             logger.info("[Thread] Creating WIF X.509 Provider: %s", config.provider_id)
-            prov_op = self.api_call_with_iam_retry(
+            prov_op = self._api_call_with_retry(
                 "POST",
                 f"{pool_res_url}/providers?workloadIdentityPoolProviderId={config.provider_id}",
                 provider_payload,
+                retry_on_propagation=True,
             )
-            self.wait_for_lro(iam_base, prov_op["name"])
-            self.wait_for_wif_resource(provider_res_url)
+            self._wait_for_lro(iam_base, prov_op["name"])
+            self._wait_for_wif_resource(provider_res_url)
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
             futures = []
@@ -595,21 +638,23 @@ class GCPClient:
 
         if use_sa and sa_email:
             sa_iam_url = f"https://{iam_base}/v1/projects/{config.project_id}/serviceAccounts/{sa_email}:setIamPolicy"
-            sa_policy = self.api_call_with_iam_retry(
+            sa_policy = self._api_call_with_retry(
                 "POST",
                 sa_iam_url.replace(":setIamPolicy", ":getIamPolicy"),
+                retry_on_propagation=True,
             )
             if sa_policy is None:
                 sa_policy = {}
             sa_policy.setdefault("bindings", []).append(
                 {"role": "roles/iam.workloadIdentityUser", "members": [wif_principal]},
             )
-            self.api_call_with_iam_retry("POST", sa_iam_url, {"policy": sa_policy})
+            self._api_call_with_retry("POST", sa_iam_url, {"policy": sa_policy}, retry_on_propagation=True)
 
         proj_iam_url = f"https://{crm_base}/v1/projects/{config.project_id}:setIamPolicy"
-        proj_policy = self.api_call_with_iam_retry(
+        proj_policy = self._api_call_with_retry(
             "POST",
             proj_iam_url.replace(":setIamPolicy", ":getIamPolicy"),
+            retry_on_propagation=True,
         )
         if proj_policy is None:
             proj_policy = {}
@@ -620,4 +665,4 @@ class GCPClient:
         proj_policy.setdefault("bindings", []).append(
             {"role": "roles/browser", "members": [proj_member]},
         )
-        self.api_call_with_iam_retry("POST", proj_iam_url, {"policy": proj_policy})
+        self._api_call_with_retry("POST", proj_iam_url, {"policy": proj_policy}, retry_on_propagation=True)
