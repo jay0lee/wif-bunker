@@ -346,12 +346,23 @@ class GCPClient:
         op_name: str,
         timeout: int = LRO_TIMEOUT_SECONDS,
     ) -> dict:
-        """Polls a Long-Running Operation until done, with a hard timeout."""
+        """Polls a Long-Running Operation until done, with a hard timeout.
+
+        Raises RuntimeError if the completed operation contains an error
+        (e.g. quota exceeded, permission denied).
+        """
         url = f"https://{api_domain}/v1/{op_name}"
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             op_data = self.api_call("GET", url)
             if op_data and op_data.get("done"):
+                if "error" in op_data:
+                    err = op_data["error"]
+                    code = err.get("code", "?")
+                    msg = err.get("message", "unknown error")
+                    raise RuntimeError(
+                        f"LRO {op_name} failed (code {code}): {msg}"
+                    )
                 return op_data
             time.sleep(2)
         raise TimeoutError(f"LRO {op_name} did not complete within {timeout}s")
