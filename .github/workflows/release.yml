@@ -152,9 +152,16 @@ jobs:
           sudo apt-get install -y --no-install-recommends libpcsclite-dev libtss2-dev pkg-config
 
       - name: Install dependencies
+        env:
+          OPENSSL_DIR: ${{ github.workspace }}/bin/ssl
         run: |
           "${PYTHON}" -m pip install --upgrade pip
           "${PYTHON}" -m pip install pyinstaller
+          # Build cryptography from source against our compiled OpenSSL so the
+          # bundled cryptography, Python, hardmTLS, and libcrypto all link the
+          # same OpenSSL.  Pre-built PyPI wheels are compiled against OpenSSL
+          # 3.x which conflicts with our bundled OpenSSL 4.x libcrypto.
+          "${PYTHON}" -m pip install --no-binary cryptography --no-cache-dir cryptography
           "${PYTHON}" -m pip install --only-deps ".[yubikey]"
 
       # ══════════════════════════════════════════════════════════════════════
