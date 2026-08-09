@@ -303,19 +303,44 @@ jobs:
         env:
           TOTP_SECRET: ${{ secrets.TOTP_SECRET }}
         run: |
-          iscc /DVersion="$VERSION" wif-bunker.iss
+          iscc /DVersion="$VERSION" 'packaging\windows\wif-bunker.iss'
+
+      - name: "Debug: dump iscc signed command"
+        if: runner.os == 'Windows' && env.TOTP_SECRET != ''
+        shell: bash
+        env:
+          TOTP_SECRET: ${{ secrets.TOTP_SECRET }}
+        run: |
+          echo "=== Working directory ==="
+          pwd
+          echo "=== ISS file ==="
+          ls -la 'packaging\windows\wif-bunker.iss' || ls -la packaging/windows/wif-bunker.iss
+          echo "=== WINDOWS_CODESIGN_CERT_HASH ==="
+          echo "$WINDOWS_CODESIGN_CERT_HASH"
+          echo "=== VERSION ==="
+          echo "$VERSION"
+          echo "=== iscc location ==="
+          which iscc || echo "iscc not on PATH, using full path"
+          echo "=== Command that will run ==="
+          signtool="C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe"
+          printf 'Arg: %q\n' \
+            /S"wifbunkersigntool=$signtool sign /sha1 $WINDOWS_CODESIGN_CERT_HASH /tr http://time.certum.pl /td SHA256 /fd SHA256 /v \$f" \
+            /DVersion="$VERSION" \
+            'packaging\windows\wif-bunker.iss'
 
       - name: Package (Windows — InnoSetup, signed)
         if: runner.os == 'Windows' && env.TOTP_SECRET != ''
         shell: bash
         env:
           TOTP_SECRET: ${{ secrets.TOTP_SECRET }}
+          MSYS_NO_PATHCONV: "1"
+          MSYS2_ARG_CONV_EXCL: "*"
         run: |
           signtool="C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe"
           iscc \
             /S"wifbunkersigntool=$signtool sign /sha1 $WINDOWS_CODESIGN_CERT_HASH /tr http://time.certum.pl /td SHA256 /fd SHA256 /v \$f" \
             /DVersion="$VERSION" \
-            wif-bunker.iss
+            'packaging\windows\wif-bunker.iss'
 
       - name: Upload artifact (Linux/macOS)
         if: runner.os != 'Windows'
@@ -329,7 +354,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: wif-bunker-${{ matrix.os }}
-          path: Output\wif-bunker-*-setup.exe
+          path: packaging\windows\Output\wif-bunker-*-setup.exe
 
       # Upload raw build directory for integration testing (InnoSetup
       # installer can't be silently extracted in CI).

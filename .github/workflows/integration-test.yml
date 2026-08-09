@@ -1239,7 +1239,7 @@ jobs:
             --debug \
             --use-adc \
             --create-project="${{ steps.config.outputs.project_id }}" \
-            --folder="$TESTS_FOLDER" \
+            --gcp-folder="$TESTS_FOLDER" \
             ${{ matrix.soft_key_flag }} $YUBIKEY_FLAGS
 
       # ── Step 3: WIF Bunker reuse run (detects existing resources) ──

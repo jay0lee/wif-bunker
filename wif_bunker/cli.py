@@ -204,13 +204,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--folder",
+        "--gcp-folder",
+        dest="folder",
         metavar="FOLDER_ID",
         help=(
             "GCP folder ID to create the project in.  "
             "Only used when creating a new project (e.g. with --create-project)."
         ),
     )
+    # Hidden alias so existing scripts using --folder keep working.
+    parser.add_argument("--folder", dest="folder", help=argparse.SUPPRESS)
 
     # --- YubiKey options ---
     yubikey_group = parser.add_argument_group("YubiKey options")

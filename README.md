@@ -7,7 +7,7 @@ WIF Bunker makes authenticating to Google Cloud as simple as downloading a servi
 One command. No key files. No secrets to rotate.
 
 ```bash
-wif-bunker --create-project my-project --folder 123456789
+wif-bunker --create-project my-project --gcp-folder 123456789
 ```
 
 This single command:
@@ -104,11 +104,11 @@ WIF Bunker needs a Google identity to create GCP resources on your behalf. Use o
 
 ```bash
 # Option A: Browser-based OAuth (interactive)
-wif-bunker --create-project my-wif-project --folder FOLDER_ID
+wif-bunker --create-project my-wif-project --gcp-folder FOLDER_ID
 
 # Option B: Application Default Credentials (CI/CD)
 # See: https://cloud.google.com/docs/authentication/application-default-credentials
-wif-bunker --use-adc --create-project my-wif-project --folder FOLDER_ID
+wif-bunker --use-adc --create-project my-wif-project --gcp-folder FOLDER_ID
 ```
 
 ### 2. Set environment variables
@@ -193,10 +193,10 @@ WIF Bunker supports YubiKey 5 series devices as a cross-platform hardware keysto
 
 ```bash
 # Use the platform TPM/Secure Enclave (default, no flag needed)
-wif-bunker --create-project my-project --folder 123456789
+wif-bunker --create-project my-project --gcp-folder 123456789
 
 # Use a YubiKey instead
-wif-bunker --use-yubikey --create-project my-project --folder 123456789
+wif-bunker --use-yubikey --create-project my-project --gcp-folder 123456789
 ```
 
 ### Multiple YubiKeys
@@ -204,7 +204,7 @@ wif-bunker --use-yubikey --create-project my-project --folder 123456789
 If multiple YubiKeys are connected, specify which one:
 
 ```bash
-wif-bunker --use-yubikey --yubikey-serial 20602167 --create-project my-project --folder 123456789
+wif-bunker --use-yubikey --yubikey-serial 20602167 --create-project my-project --gcp-folder 123456789
 ```
 
 ### PIV slots
@@ -219,7 +219,7 @@ By default, WIF Bunker uses slot `9a` (Authentication). You can use other PIV sl
 | `9e` | Card Authentication | Contactless authentication |
 
 ```bash
-wif-bunker --use-yubikey --yubikey-slot 9c --create-project my-project --folder 123456789
+wif-bunker --use-yubikey --yubikey-slot 9c --create-project my-project --gcp-folder 123456789
 ```
 
 ### Touch policy
@@ -233,7 +233,7 @@ Control whether physical touch is required for cryptographic operations:
 | `always` | Touch for every operation | Maximum security |
 
 ```bash
-wif-bunker --use-yubikey --yubikey-touch-policy cached --create-project my-project --folder 123456789
+wif-bunker --use-yubikey --yubikey-touch-policy cached --create-project my-project --gcp-folder 123456789
 ```
 
 ## Hardware Attestation
@@ -377,7 +377,7 @@ wif-bunker [OPTIONS]
 |------|-------------|
 | `--create-project NAME` | Create a new GCP project with this ID |
 | `--use-project ID` | Use an existing GCP project |
-| `--folder ID` | Parent folder for project creation |
+| `--gcp-folder ID` | Parent folder for project creation |
 
 ### Identity
 
@@ -450,7 +450,7 @@ You can check remaining validity at any time with `wif-bunker --status`, and adj
 
 ```bash
 # 180-day certificate
-wif-bunker --create-project my-project --folder 123456 --cert-lifetime 180
+wif-bunker --create-project my-project --gcp-folder 123456 --cert-lifetime 180
 ```
 
 ## CI/CD Integration
