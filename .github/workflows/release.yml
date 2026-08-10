@@ -187,21 +187,14 @@ jobs:
 
       - name: Run PyInstaller
         run: |
-          mv packaging/wif-bunker.spec .
-          pyinstaller wif-bunker.spec
+          mv packaging/wif-bunker.spec wif-bunker/
+          pyinstaller wif-bunker/wif-bunker.spec
 
-      - name: Smoke test (Unix)
-        if: runner.os != 'Windows'
+      - name: Smoke test
         run: |
           dist/wif-bunker/wif-bunker --version
           dist/wif-bunker/wif-bunker --help
 
-      - name: Smoke test (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          dist\wif-bunker\wif-bunker.exe --version
-          dist\wif-bunker\wif-bunker.exe --help
 
       # ══════════════════════════════════════════════════════════════════════
       # Windows: Code signing with Certum SimplySign Desktop
