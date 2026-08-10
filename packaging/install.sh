@@ -75,9 +75,10 @@ CLEAN_VERSION="${ACTUAL_VERSION#v}"
 # Release tarballs are named: wif-bunker-VERSION-{runner}.tar.gz
 # where {runner} is e.g. macos-26, ubuntu-24.04, ubuntu-24.04-arm.
 # We pick the highest-versioned runner matching our OS+arch.
+ASSET_EXCLUDE=""
 case "${OS}-${ARCH}" in
     macos-arm64)   ASSET_PATTERN="macos-" ;;
-    linux-x86_64)  ASSET_PATTERN="ubuntu-[0-9]" ;;     # matches ubuntu-NN.NN but NOT ubuntu-NN.NN-arm
+    linux-x86_64)  ASSET_PATTERN="ubuntu-" ; ASSET_EXCLUDE="-arm" ;;
     linux-arm64)   ASSET_PATTERN="ubuntu-.*-arm" ;;
     *)             echo "Error: No release artifact for ${OS}-${ARCH}"; exit 1 ;;
 esac
@@ -87,6 +88,7 @@ DOWNLOAD_URL=$(echo "$RELEASE_DATA" \
     | grep -o '"browser_download_url": *"[^"]*\.tar\.gz"' \
     | sed 's/"browser_download_url": *"//;s/"$//' \
     | grep "$ASSET_PATTERN" \
+    | { [ -n "$ASSET_EXCLUDE" ] && grep -v "$ASSET_EXCLUDE" || cat; } \
     | sort -V \
     | tail -n 1)
 
