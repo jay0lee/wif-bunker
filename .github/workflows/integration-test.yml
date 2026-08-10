@@ -653,21 +653,6 @@ jobs:
           export PYTHON="${VENV_PYTHON}"
           echo "PYTHON updated to venv: ${PYTHON}"
 
-          # Windows ARM64 has no PyPI cryptography wheel — install from jay0lee/cryptography-wheels
-          if [ "$RUNNER_OS" = "Windows" ] && [ "$RUNNER_ARCH" = "ARM64" ]; then
-            WHEEL_URL=$("${PYTHON}" -c "
-          import json, urllib.request, sys
-          rel = json.loads(urllib.request.urlopen('https://api.github.com/repos/jay0lee/cryptography-wheels/releases/latest').read())
-          py_ver = f'cp{sys.version_info.major}{sys.version_info.minor}'
-          for a in rel['assets']:
-              if 'win_arm64' in a['name'] and (py_ver in a['name'] or 'abi3' in a['name']):
-                  print(a['browser_download_url']); break
-          ")
-            echo "Installing cryptography wheel: $WHEEL_URL"
-            pip install "$WHEEL_URL"
-          fi
-          pip install .
-
       # ── Generate unique project ID for this job ──
       - name: Set project ID
         id: config
