@@ -4,10 +4,6 @@
 import os
 from PyInstaller.utils.hooks import copy_metadata
 
-# This spec lives in packaging/ but all paths are relative to the repo root.
-# PyInstaller injects SPECPATH as the directory containing the .spec file.
-os.chdir(os.path.join(SPECPATH, '..'))
-
 block_cipher = None
 
 # ── Hidden imports ──
@@ -84,7 +80,7 @@ if not os.path.exists(_hardmtls_lib):
 hardmtls_binaries = [(_hardmtls_lib, 'hardmtls')]
 
 a = Analysis(
-    ['wif_bunker/cli.py'],
+    ['../wif_bunker/cli.py'],
     pathex=[],
     binaries=hardmtls_binaries,
     datas=datas,
