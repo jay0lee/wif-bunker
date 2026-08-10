@@ -86,10 +86,12 @@ The installer adds `wif-bunker` to your PATH automatically.
 
 ### Verify (optional)
 
-All release artifacts include SHA-256 checksums and [build provenance attestations](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations):
+All release artifacts are code-signed, notarized, and include build provenance attestations. See **[Verifying a WIF Bunker Build is Legitimate and Official](https://github.com/jay0lee/wif-bunker/wiki/Verifying-a-WIF-Bunker-Build-is-Legitimate-and-Official)** for full details.
+
+Quick verification:
 
 ```bash
-# Verify checksums
+# Verify SHA-256 checksums
 sha256sum -c SHA256SUMS.txt
 
 # Verify build provenance (requires GitHub CLI)
