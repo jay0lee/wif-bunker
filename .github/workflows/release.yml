@@ -187,7 +187,7 @@ jobs:
 
       - name: Run PyInstaller
         run: |
-          mv packaging/wif-bunker.spec
+          mv packaging/wif-bunker.spec .
           pyinstaller wif-bunker.spec
 
       - name: Smoke test (Unix)
