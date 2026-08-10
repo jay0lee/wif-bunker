@@ -636,26 +636,23 @@ jobs:
 
       - name: Create venv and install dependencies
         run: |
-          "${PYTHON}" -m venv .venv
-          if [ -d ".venv/Scripts" ]; then
-            source .venv/Scripts/activate
-            VENV_BIN="$PWD/.venv/Scripts"
+          "${PYTHON}" -m venv venv
+          #if [ -d "venv/Scripts" ]; then
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            PYTHON="$PWD/venv/Scripts/python.exe"
           else
-            source .venv/bin/activate
-            VENV_BIN="$PWD/.venv/bin"
+            PYTHON="$PWD/venv/bin/python3"
           fi
-          echo "${VENV_BIN}" >> "$GITHUB_PATH"
-
-          # Update PYTHON to point to the venv's Python so all subsequent
-          # steps using "${PYTHON}" see installed packages.
-          VENV_PYTHON="$(which python)"
-          echo "PYTHON=${VENV_PYTHON}" >> $GITHUB_ENV
-          export PYTHON="${VENV_PYTHON}"
+          echo "PYTHON=${PYTHON}" >> "$GITHUB_ENV"
           echo "PYTHON updated to venv: ${PYTHON}"
 
           # Install wif-bunker required packages
+          echo "Upgrading pip..."
           $PYTHON -m pip install --upgrade pip
+          echo "pip upgraded."
+          echo "installing wif-bunker deps..."
           $PYTHON -m pip install --upgrade --only-deps .
+          echo "wif-bunker deps installed."
 
       # ── Generate unique project ID for this job ──
       - name: Set project ID
