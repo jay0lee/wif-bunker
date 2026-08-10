@@ -444,10 +444,7 @@ def _ensure_token_via_tpm2_ptool(pin: str, tpm_store: str, module_path: str) -> 
                 "\n"
                 "Then re-run wif-bunker.\n"
             ) from exc
-        raise RuntimeError(
-            f"Failed to create PKCS#11 token '{_TOKEN_LABEL}':\n"
-            f"{exc.stderr}\n"
-        ) from exc
+        raise RuntimeError(f"Failed to create PKCS#11 token '{_TOKEN_LABEL}':\n{exc.stderr}\n") from exc
 
 
 def _init_token(lib, pin: str, module_path: str):
