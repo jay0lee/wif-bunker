@@ -653,6 +653,10 @@ jobs:
           export PYTHON="${VENV_PYTHON}"
           echo "PYTHON updated to venv: ${PYTHON}"
 
+          # Install wif-bunker required packages
+          $PYTHON -m pip install --upgrade pip
+          $PYTHON -m pip install --upgrade --only-deps .
+
       # ── Generate unique project ID for this job ──
       - name: Set project ID
         id: config
