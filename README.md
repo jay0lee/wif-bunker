@@ -38,10 +38,13 @@ This single command:
 | **Linux** | TPM 2.0 | ES256, ES384, RSA 2048/3072/4096¹ |
 | **macOS** | Secure Enclave (Apple Silicon) | ES256, ES384² |
 | **Windows** | TPM 2.0 | ES256, ES384, RSA 2048/3072/4096¹ |
-| **Cross-platform** | YubiKey 5 ([PIV](https://csrc.nist.gov/pubs/fips/201-3/final)) | ES256, ES384, RSA 2048 (4096 on fw 5.7+) |
+| **Cross-platform** | YubiKey 5 ([PIV](https://csrc.nist.gov/pubs/fips/201-3/final)) | ES256, ES384, RSA 2048/4096³ |
 
 ¹ RSA algorithm support varies by TPM manufacturer and model. Most TPMs support RSA 2048; RSA 3072 and 4096 are common but not universal. Use `wif-bunker --supported-algorithms` to query your hardware.
+
 ² EC-only is a hardware constraint of the Apple Secure Enclave, which does not support RSA key generation.
+
+³ RSA 4096 requires YubiKey firmware 5.7 or later.
 
 ## Installation
 
