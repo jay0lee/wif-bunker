@@ -13,18 +13,18 @@ block_cipher = None
 # google-auth, not our code.
 hiddenimports = [
     # google-auth credential types (loaded dynamically by _default.py)
-    'google.auth.identity_pool',
-    'google.auth.external_account',
-    'google.auth.impersonated_credentials',
-    'google.auth._default',
+#    'google.auth.identity_pool',
+#    'google.auth.external_account',
+#    'google.auth.impersonated_credentials',
+#    'google.auth._default',
     # cryptography backends (loaded via entry points)
-    'cryptography.hazmat.backends.openssl',
-    'cryptography.hazmat.backends.openssl.backend',
-    'cryptography.hazmat.bindings.openssl.binding',
+#    'cryptography.hazmat.backends.openssl',
+#    'cryptography.hazmat.backends.openssl.backend',
+#    'cryptography.hazmat.bindings.openssl.binding',
     # YubiKey PIV support (lazy imports — PyInstaller traces
     # ykman/yubikit/smartcard transitively from these entry points)
-    'wif_bunker.keystore.yubikey',
-    'wif_bunker.attestation.yubikey',
+#    'wif_bunker.keystore.yubikey',
+#    'wif_bunker.attestation.yubikey',
 ]
 
 # ── Package metadata ──
