@@ -186,7 +186,7 @@ jobs:
           echo "codesign_identity=Jay Lee" >> $GITHUB_ENV
 
       - name: Run PyInstaller
-        run: pyinstaller wif-bunker.spec
+        run: pyinstaller packaging/wif-bunker.spec
 
       - name: Smoke test (Unix)
         if: runner.os != 'Windows'

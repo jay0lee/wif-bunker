@@ -688,7 +688,7 @@ jobs:
         run: |
           echo "=== ADC baseline with GHA CI credentials ==="
           # -u: unbuffered stdout so tee captures the complete output
-          "${PYTHON}" -u minimal-adc.py | tee "$RUNNER_TEMP/adc_baseline.txt"
+          "${PYTHON}" -u scripts/minimal-adc.py | tee "$RUNNER_TEMP/adc_baseline.txt"
 
           # Confirm we see the expected CI service account
           GHA_SA="$RUNNER_SA"
@@ -1271,7 +1271,7 @@ jobs:
           # Clear GHA's OIDC credential file to prove we're using bunker creds
           unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE 2>/dev/null || true
 
-          "${PYTHON}" minimal-adc.py | tee "$RUNNER_TEMP/adc_output.txt"
+          "${PYTHON}" scripts/minimal-adc.py | tee "$RUNNER_TEMP/adc_output.txt"
 
           # Validate we're NOT accidentally using the GHA CI service account
           echo ""
@@ -1316,7 +1316,7 @@ jobs:
           export GOOGLE_API_CERTIFICATE_CONFIG="$PWD/certificate_config.json"
           unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE 2>/dev/null || true
 
-          "${PYTHON}" minimal-adc.py | tee "$RUNNER_TEMP/adc_output_nosa.txt"
+          "${PYTHON}" scripts/minimal-adc.py | tee "$RUNNER_TEMP/adc_output_nosa.txt"
 
           # Validate we're NOT accidentally using the GHA CI service account
           echo ""

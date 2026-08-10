@@ -8,7 +8,7 @@ on:
       - 'wif_bunker/**'
       - 'tests/**'
       - 'pyproject.toml'
-      - 'wif-bunker.spec'
+      - 'packaging/wif-bunker.spec'
       - '.github/workflows/wif-bunker-ci.yml'
   pull_request:
     branches: [main]
@@ -16,7 +16,7 @@ on:
       - 'wif_bunker/**'
       - 'tests/**'
       - 'pyproject.toml'
-      - 'wif-bunker.spec'
+      - 'packaging/wif-bunker.spec'
       - '.github/workflows/wif-bunker-ci.yml'
 
 # ── Shared env for both jobs (pre-built Python + OpenSSL from cache) ──
