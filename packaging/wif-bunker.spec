@@ -80,7 +80,7 @@ if not os.path.exists(_hardmtls_lib):
 hardmtls_binaries = [(_hardmtls_lib, 'hardmtls')]
 
 a = Analysis(
-    ['../wif_bunker/cli.py'],
+    ['wif_bunker/cli.py'],
     pathex=[],
     binaries=hardmtls_binaries,
     datas=datas,
