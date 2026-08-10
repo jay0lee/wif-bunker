@@ -2,6 +2,9 @@
 
 **Hardware-backed Workload Identity Federation for Google Cloud**
 
+> [!WARNING]
+> **Beta Software** — WIF Bunker is under active development and has not yet been proven in production environments. It is suitable for development, testing, and non-critical workloads. Please test thoroughly before relying on it for vital production infrastructure. Bug reports and field testing feedback are welcome via [Issues](https://github.com/jay0lee/wif-bunker/issues).
+
 WIF Bunker makes authenticating to Google Cloud as simple as downloading a service account key — but without the security risk. Instead of exportable JSON keys sitting on disk, your credentials are locked inside your machine's Trusted Platform Module (TPM), Secure Enclave, or YubiKey and can never be extracted.
 
 One command. No key files. No secrets to rotate.
