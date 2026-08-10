@@ -382,9 +382,30 @@ def _ensure_token_via_tpm2_ptool(pin: str, tpm_store: str, module_path: str) -> 
         )
 
     # Create the token with both PINs.
-    # Assumes the PKCS#11 store is already initialized with a primary
-    # object (pid=1).  CI setup steps handle this; on production systems
-    # the admin runs tpm2_ptool init during initial provisioning.
+    # Requires the PKCS#11 store to be initialized with a primary object
+    # (pid=1).  We check for this first and give a clear error rather
+    # than auto-initializing, since `tpm2_ptool init` creates a new
+    # primary object on the TPM which could affect other applications.
+    #
+    # Check if the store has a primary object by verifying the SQLite DB
+    # exists and has primary objects.  A missing DB or empty primaries
+    # table means `tpm2_ptool init` hasn't been run.
+    store_db = os.path.join(tpm_store, "tpm2_pkcs11.sqlite3")
+    if not os.path.isfile(store_db):
+        raise RuntimeError(
+            f"TPM PKCS#11 store not initialized (no database at {store_db}).\n"
+            "\n"
+            "WIF Bunker requires a one-time PKCS#11 store initialization before\n"
+            "it can generate hardware-backed keys.  This creates a primary object\n"
+            "on the TPM that WIF Bunker's token will be created under.\n"
+            "\n"
+            "Run the following command to initialize the store:\n"
+            "\n"
+            f"  tpm2_ptool init --path={tpm_store}\n"
+            "\n"
+            "Then re-run wif-bunker.\n"
+        )
+
     try:
         subprocess.run(
             [
@@ -410,11 +431,22 @@ def _ensure_token_via_tpm2_ptool(pin: str, tpm_store: str, module_path: str) -> 
             _TOKEN_LABEL,
         )
     except subprocess.CalledProcessError as exc:
+        if "No primary object" in exc.stderr:
+            raise RuntimeError(
+                "TPM PKCS#11 store exists but has no primary object.\n"
+                "\n"
+                "This usually means the store was partially initialized or\n"
+                "the TPM was cleared since initialization.\n"
+                "\n"
+                "To fix, re-initialize the store:\n"
+                "\n"
+                f"  tpm2_ptool init --path={tpm_store}\n"
+                "\n"
+                "Then re-run wif-bunker.\n"
+            ) from exc
         raise RuntimeError(
             f"Failed to create PKCS#11 token '{_TOKEN_LABEL}':\n"
             f"{exc.stderr}\n"
-            "Ensure the PKCS#11 store is initialized:\n"
-            f"  tpm2_ptool init --path={tpm_store}\n"
         ) from exc
 
 
