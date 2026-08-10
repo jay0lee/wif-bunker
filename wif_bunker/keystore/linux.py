@@ -55,9 +55,7 @@ def _system_env() -> dict[str, str]:
         val = env.get(var)
         if not val:
             continue
-        cleaned = os.pathsep.join(
-            p for p in val.split(os.pathsep) if not p.startswith(lib_dir)
-        )
+        cleaned = os.pathsep.join(p for p in val.split(os.pathsep) if not p.startswith(lib_dir))
         if cleaned:
             env[var] = cleaned
         else:
