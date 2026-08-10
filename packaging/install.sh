@@ -71,15 +71,33 @@ fi
 # Strip 'v' prefix if we want to match the tarball name explicitly, assuming naming is wif-bunker-1.0.0-...
 CLEAN_VERSION="${ACTUAL_VERSION#v}"
 
-# Assuming asset names are wif-bunker-VERSION-OS-ARCH.tar.gz
-TARBALL="wif-bunker-${CLEAN_VERSION}-${OS}-${ARCH}.tar.gz"
+# Build a grep pattern to find the right tarball from release assets.
+# Release tarballs are named: wif-bunker-VERSION-{runner}.tar.gz
+# where {runner} is e.g. macos-26, ubuntu-24.04, ubuntu-24.04-arm.
+# We pick the highest-versioned runner matching our OS+arch.
+case "${OS}-${ARCH}" in
+    macos-arm64)   ASSET_PATTERN="macos-" ;;
+    linux-x86_64)  ASSET_PATTERN="ubuntu-[0-9]" ;;     # matches ubuntu-NN.NN but NOT ubuntu-NN.NN-arm
+    linux-arm64)   ASSET_PATTERN="ubuntu-.*-arm" ;;
+    *)             echo "Error: No release artifact for ${OS}-${ARCH}"; exit 1 ;;
+esac
 
-DOWNLOAD_URL=$(echo "$RELEASE_DATA" | grep -o "https://.*releases/download/.*/$TARBALL" | head -n 1)
+# Extract all .tar.gz download URLs from the release JSON
+DOWNLOAD_URL=$(echo "$RELEASE_DATA" \
+    | grep -o '"browser_download_url": *"[^"]*\.tar\.gz"' \
+    | sed 's/"browser_download_url": *"//;s/"$//' \
+    | grep "$ASSET_PATTERN" \
+    | sort -V \
+    | tail -n 1)
 
 if [ -z "$DOWNLOAD_URL" ]; then
-    echo "Error: Could not find download URL for $TARBALL in release $ACTUAL_VERSION"
+    echo "Error: Could not find a ${OS}/${ARCH} tarball in release $ACTUAL_VERSION"
+    echo "Available assets:"
+    echo "$RELEASE_DATA" | grep -o '"browser_download_url": *"[^"]*"' | sed 's/"browser_download_url": *"//;s/"$//'
     exit 1
 fi
+
+TARBALL=$(basename "$DOWNLOAD_URL")
 
 echo "Downloading $TARBALL..."
 curl -L -f -o "$TARBALL" "$DOWNLOAD_URL" || { echo "Download failed"; exit 1; }
