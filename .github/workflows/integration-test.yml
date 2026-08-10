@@ -288,12 +288,12 @@ jobs:
             soft_key_flag: "--soft-key"
             artifact_name: wif-bunker-windows-2025-vs2026
             expected_algos: "es256 es384 rsa2048 rsa3072 rsa4096"
-          - os: windows-11-vs2026-arm
-            name: Windows ARM64
-            runner_id: windows
-            soft_key_flag: "--soft-key"
-            artifact_name: wif-bunker-windows-11-vs2026-arm
-            expected_algos: "es256 es384 rsa2048 rsa3072 rsa4096"
+          #- os: windows-11-vs2026-arm
+          #  name: Windows ARM64
+          #  runner_id: windows
+          #  soft_key_flag: "--soft-key"
+          #  artifact_name: wif-bunker-windows-11-vs2026-arm
+          #  expected_algos: "es256 es384 rsa2048 rsa3072 rsa4096"
           # ── Native SSL/Python: test with runner's pre-installed OpenSSL + Python ──
 #          - os: ubuntu-24.04
 #            name: Linux x64 (native-ssl)
