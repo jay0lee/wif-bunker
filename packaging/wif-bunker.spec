@@ -2,7 +2,12 @@
 """WIF Bunker PyInstaller spec — single-directory build."""
 
 import os
+from pathlib import Path
 from PyInstaller.utils.hooks import copy_metadata
+
+# This spec lives in packaging/ but all paths are relative to the repo root.
+SPECPATH = str(Path(__file__).resolve().parent.parent)
+os.chdir(SPECPATH)
 
 block_cipher = None
 
