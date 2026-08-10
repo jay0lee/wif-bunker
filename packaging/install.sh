@@ -71,31 +71,73 @@ fi
 # Strip 'v' prefix if we want to match the tarball name explicitly, assuming naming is wif-bunker-1.0.0-...
 CLEAN_VERSION="${ACTUAL_VERSION#v}"
 
-# Build a grep pattern to find the right tarball from release assets.
-# Release tarballs are named: wif-bunker-VERSION-{runner}.tar.gz
-# where {runner} is e.g. macos-26, ubuntu-24.04, ubuntu-24.04-arm.
-# We pick the highest-versioned runner matching our OS+arch.
-ASSET_EXCLUDE=""
-case "${OS}-${ARCH}" in
-    macos-arm64)   ASSET_PATTERN="macos-" ;;
-    linux-x86_64)  ASSET_PATTERN="ubuntu-" ; ASSET_EXCLUDE="-arm" ;;
-    linux-arm64)   ASSET_PATTERN="ubuntu-.*-arm" ;;
-    *)             echo "Error: No release artifact for ${OS}-${ARCH}"; exit 1 ;;
-esac
+# Helper: is $1 >= $2 using version sort?
+version_ge() {
+    [ "$(printf '%s\n%s' "$1" "$2" | sort -V | head -n1)" = "$2" ]
+}
 
 # Extract all .tar.gz download URLs from the release JSON
-DOWNLOAD_URL=$(echo "$RELEASE_DATA" \
+ALL_URLS=$(echo "$RELEASE_DATA" \
     | grep -o '"browser_download_url": *"[^"]*\.tar\.gz"' \
-    | sed 's/"browser_download_url": *"//;s/"$//' \
-    | grep "$ASSET_PATTERN" \
-    | { [ -n "$ASSET_EXCLUDE" ] && grep -v "$ASSET_EXCLUDE" || cat; } \
-    | sort -V \
-    | tail -n 1)
+    | sed 's/"browser_download_url": *"//;s/"$//')
+
+# Select the right tarball based on OS, architecture, and local system version.
+# Release tarballs are named:
+#   Linux:  wif-bunker-VERSION-linux-ARCH-glibcVER.tar.gz
+#   macOS:  wif-bunker-VERSION-macos-arm64-OSVER.tar.gz
+DOWNLOAD_URL=""
+if [ "$OS" = "linux" ]; then
+    # Detect local glibc version
+    LOCAL_GLIBC=$(ldd --version 2>&1 | head -n1 | awk '{print $NF}')
+    if [ -z "$LOCAL_GLIBC" ]; then
+        echo "Error: Could not detect glibc version"
+        exit 1
+    fi
+    echo "Local glibc: $LOCAL_GLIBC"
+
+    # Find all builds for our architecture, pick highest glibc <= local
+    ASSET_PATTERN="linux-${ARCH}-glibc"
+    DOWNLOAD_URL=$(echo "$ALL_URLS" \
+        | grep "$ASSET_PATTERN" \
+        | while read -r url; do
+            build_ver=$(echo "$url" | grep -o "glibc[0-9.]*" | sed 's/glibc//')
+            if version_ge "$LOCAL_GLIBC" "$build_ver"; then
+                echo "$build_ver $url"
+            fi
+        done \
+        | sort -t' ' -k1 -V \
+        | tail -n1 \
+        | cut -d' ' -f2-)
+
+elif [ "$OS" = "macos" ]; then
+    # Detect local macOS major version
+    LOCAL_MACOS=$(sw_vers -productVersion | cut -d. -f1)
+    echo "Local macOS version: $LOCAL_MACOS"
+
+    # Find all macOS builds, pick highest OS version <= local
+    ASSET_PATTERN="macos-arm64-"
+    DOWNLOAD_URL=$(echo "$ALL_URLS" \
+        | grep "$ASSET_PATTERN" \
+        | while read -r url; do
+            build_ver=$(echo "$url" | grep -o "macos-arm64-[0-9]*" | sed 's/macos-arm64-//')
+            if version_ge "$LOCAL_MACOS" "$build_ver"; then
+                echo "$build_ver $url"
+            fi
+        done \
+        | sort -t' ' -k1 -V \
+        | tail -n1 \
+        | cut -d' ' -f2-)
+fi
 
 if [ -z "$DOWNLOAD_URL" ]; then
-    echo "Error: Could not find a ${OS}/${ARCH} tarball in release $ACTUAL_VERSION"
+    echo "Error: Could not find a compatible ${OS}/${ARCH} tarball in release $ACTUAL_VERSION"
+    if [ "$OS" = "linux" ]; then
+        echo "Local glibc $LOCAL_GLIBC may be older than all available builds."
+    elif [ "$OS" = "macos" ]; then
+        echo "Local macOS $LOCAL_MACOS may be older than all available builds."
+    fi
     echo "Available assets:"
-    echo "$RELEASE_DATA" | grep -o '"browser_download_url": *"[^"]*"' | sed 's/"browser_download_url": *"//;s/"$//'
+    echo "$ALL_URLS"
     exit 1
 fi
 

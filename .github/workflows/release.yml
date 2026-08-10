@@ -102,6 +102,28 @@ jobs:
           rm -f wif_bunker/__init__.py.bak
           grep __version__ wif_bunker/__init__.py
 
+      # ══════════════════════════════════════════════════════════════════════
+      # Detect platform identifier for release artifact naming.
+      # Linux:   linux-x86_64-glibc2.35, linux-arm64-glibc2.39, ...
+      # macOS:   macos-arm64-15, macos-arm64-26, ...
+      # Windows: windows-x86_64 (set by InnoSetup, not here)
+      # ══════════════════════════════════════════════════════════════════════
+
+      - name: Detect platform identifier
+        if: runner.os != 'Windows'
+        run: |
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            GLIBC_VER=$(ldd --version | head -n1 | awk '{print $NF}')
+            ARCH=$(uname -m)
+            [ "$ARCH" = "aarch64" ] && ARCH="arm64"
+            PLATFORM_ID="linux-${ARCH}-glibc${GLIBC_VER}"
+          elif [[ "$RUNNER_OS" == "macOS" ]]; then
+            MACOS_VER=$(sw_vers -productVersion | cut -d. -f1)
+            PLATFORM_ID="macos-arm64-${MACOS_VER}"
+          fi
+          echo "PLATFORM_ID=${PLATFORM_ID}" >> $GITHUB_ENV
+          echo "Platform identifier: ${PLATFORM_ID}"
+
       - name: Generate Windows version info
         if: runner.os == 'Windows'
         run: |
@@ -282,7 +304,7 @@ jobs:
 
       - name: Package (Linux/macOS)
         if: runner.os != 'Windows'
-        run: tar -czf wif-bunker-${VERSION}-${{ matrix.os }}.tar.gz -C dist wif-bunker/
+        run: tar -czf wif-bunker-${VERSION}-${PLATFORM_ID}.tar.gz -C dist wif-bunker/
 
       # macOS: Submit for Apple notarization (fire-and-forget).
       # Skipped when APPLE_KEY secret is not set.
