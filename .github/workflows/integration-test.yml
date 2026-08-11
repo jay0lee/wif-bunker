@@ -148,9 +148,24 @@ jobs:
                 fi
                 sleep 1
               done
+              # Extra wait — describe succeeds before IAM fully propagates
+              sleep 10
+
+              # Retry wrapper for IAM bindings (eventual consistency)
+              iam_bind() {
+                for attempt in 1 2 3 4 5; do
+                  if "$@" 2>/dev/null; then
+                    return 0
+                  fi
+                  echo "    IAM bind attempt $attempt failed, retrying in 10s..."
+                  sleep 10
+                done
+                echo "    IAM bind failed after 5 attempts: $*"
+                return 1
+              }
 
               # SA is owner of its own project
-              gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+              iam_bind gcloud projects add-iam-policy-binding "$PROJECT_ID" \
                 --member="serviceAccount:${SA_EMAIL}" \
                 --role="roles/owner"
 
@@ -160,14 +175,14 @@ jobs:
                 roles/resourcemanager.projectDeleter \
                 roles/browser \
                 roles/serviceusage.serviceUsageAdmin; do
-                gcloud resource-manager folders add-iam-policy-binding "$TESTS_FOLDER_ID" \
+                iam_bind gcloud resource-manager folders add-iam-policy-binding "$TESTS_FOLDER_ID" \
                   --member="serviceAccount:${SA_EMAIL}" \
                   --role="$ROLE" \
                   --condition=None
               done
 
               # Allow GHA OIDC to impersonate this SA
-              gcloud iam service-accounts add-iam-policy-binding "${SA_EMAIL}" \
+              iam_bind gcloud iam service-accounts add-iam-policy-binding "${SA_EMAIL}" \
                 --project="$PROJECT_ID" \
                 --role="roles/iam.workloadIdentityUser" \
                 --member="principalSet://iam.googleapis.com/${WIF_POOL}/attribute.repository/${GH_REPO}"
