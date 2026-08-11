@@ -68,7 +68,7 @@ jobs:
           GH_REPO="${{ github.repository }}"
 
           # Runner IDs — MUST match matrix.runner_id values exactly
-          RUNNERS="linux-swtpm macos windows nuc8-tpm nuc8-yk"
+          RUNNERS="u2204-x64 u2404-x64 u2604-x64 u2204-arm u2404-arm u2604-arm macos-15 macos-26 windows nuc8-tpm nuc8-yk"
 
           declare -A RUNNER_SA
           declare -A RUNNER_TESTS_FOLDER
@@ -233,51 +233,51 @@ jobs:
           # ── Linux x64 ──
           - os: ubuntu-22.04
             name: Linux x64 (22.04)
-            runner_id: linux-swtpm
+            runner_id: u2204-x64
             soft_key_flag: ""
             artifact_name: wif-bunker-ubuntu-22.04
             expected_algos: "es256 es384 rsa2048 rsa3072"
           - os: ubuntu-24.04
             name: Linux x64 (24.04)
-            runner_id: linux-swtpm
+            runner_id: u2404-x64
             soft_key_flag: ""
             artifact_name: wif-bunker-ubuntu-24.04
             expected_algos: "es256 es384 rsa2048 rsa3072"
           - os: ubuntu-26.04
             name: Linux x64 (26.04)
-            runner_id: linux-swtpm
+            runner_id: u2604-x64
             soft_key_flag: ""
             artifact_name: wif-bunker-ubuntu-26.04
             expected_algos: "es256 es384 rsa2048 rsa3072"
           # ── Linux ARM64 ──
           - os: ubuntu-22.04-arm
             name: Linux ARM64 (22.04)
-            runner_id: linux-swtpm
+            runner_id: u2204-arm
             soft_key_flag: ""
             artifact_name: wif-bunker-ubuntu-22.04-arm
             expected_algos: "es256 es384 rsa2048 rsa3072"
           - os: ubuntu-24.04-arm
             name: Linux ARM64 (24.04)
-            runner_id: linux-swtpm
+            runner_id: u2404-arm
             soft_key_flag: ""
             artifact_name: wif-bunker-ubuntu-24.04-arm
             expected_algos: "es256 es384 rsa2048 rsa3072"
           - os: ubuntu-26.04-arm
             name: Linux ARM64 (26.04)
-            runner_id: linux-swtpm
+            runner_id: u2604-arm
             soft_key_flag: ""
             artifact_name: wif-bunker-ubuntu-26.04-arm
             expected_algos: "es256 es384 rsa2048 rsa3072"
           # ── macOS ARM64 (Apple Silicon — requires macOS 15+ for CryptoTokenKit) ──
           - os: macos-15
             name: macOS ARM64 (15)
-            runner_id: macos
+            runner_id: macos-15
             soft_key_flag: ""
             artifact_name: wif-bunker-macos-15
             expected_algos: "es256 es384"
           - os: macos-26
             name: macOS ARM64 (26)
-            runner_id: macos
+            runner_id: macos-26
             soft_key_flag: ""
             artifact_name: wif-bunker-macos-26
             expected_algos: "es256 es384"
@@ -341,9 +341,6 @@ jobs:
     runs-on: ${{ matrix.runs_on && fromJSON(matrix.runs_on) || matrix.os }}
     name: ${{ matrix.name }}
     environment: ${{ matrix.self_hosted && 'tpm-hardware' || '' }}
-    #concurrency:
-    #  group: wif-ci-${{ matrix.runner_id }}-${{ matrix.use_native_ssl_and_python && 'native' || 'cached' }}
-    #  cancel-in-progress: true
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       RUNNER_SA: ${{ fromJSON(needs.bootstrap.outputs.runner_map)[matrix.runner_id].sa }}
