@@ -672,7 +672,7 @@ jobs:
         shell: bash
         run: |
           PROJECT_ID="wif-ci-${{ matrix.runner_id }}"
-          POOL_ID="bunker-pool-${{ github.run_id }}"
+          POOL_ID="bunker-pool-${{ github.run_id }}-${{ github.run_attempt }}"
           echo "project_id=$PROJECT_ID" >> "$GITHUB_OUTPUT"
           echo "pool_id=$POOL_ID" >> "$GITHUB_OUTPUT"
           echo "Project ID: $PROJECT_ID"
