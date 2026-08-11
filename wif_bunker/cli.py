@@ -778,10 +778,44 @@ def _main_impl() -> None:
                         logger.info("   Principal:        %s", info["email"])
                     elif info.get("sub"):
                         logger.info("   Subject:          %s", info["sub"])
-            except Exception:
+            except (google.auth.exceptions.GoogleAuthError, requests.exceptions.RequestException):
                 logger.debug("   Principal identity check skipped", exc_info=True)
-        except Exception:
-            logger.exception("ADC verification failed")
+        except google.auth.exceptions.OAuthError as exc:
+            logger.error(
+                "%s WIF token exchange failed \u2014 the pool or provider may not exist, "
+                "may be disabled, or may have been recently deleted.",
+                SYM_FAIL,
+            )
+            logger.error("   %s", exc)
+            logger.error(
+                "%s Re-run with --debug for detailed hardmTLS and TLS offload diagnostics.",
+                SYM_FAIL,
+            )
+            sys.exit(1)
+        except google.auth.exceptions.RefreshError as exc:
+            logger.error("%s Credential refresh failed: %s", SYM_FAIL, exc)
+            logger.error(
+                "%s Re-run with --debug for detailed hardmTLS and TLS offload diagnostics.",
+                SYM_FAIL,
+            )
+            sys.exit(1)
+        except google.auth.exceptions.DefaultCredentialsError as exc:
+            logger.error(
+                "%s No credentials found.  Ensure adc.json and certificate_config.json were written correctly.",
+                SYM_FAIL,
+            )
+            logger.error("   %s", exc)
+            sys.exit(1)
+        except google.auth.exceptions.TransportError as exc:
+            logger.error("%s Network/mTLS transport error: %s", SYM_FAIL, exc)
+            logger.error(
+                "%s Re-run with --debug for detailed hardmTLS and TLS offload diagnostics.",
+                SYM_FAIL,
+            )
+            sys.exit(1)
+        except requests.exceptions.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else "?"
+            logger.error("%s ADC verification API call failed (HTTP %s): %s", SYM_FAIL, status, exc)
             logger.error(
                 "%s Re-run with --debug for detailed hardmTLS and TLS offload diagnostics.",
                 SYM_FAIL,
@@ -809,6 +843,33 @@ def main() -> None:
         sys.exit(1)
     except RuntimeError as exc:
         logger.error("%s %s", SYM_FAIL, exc)
+        sys.exit(1)
+    except google.auth.exceptions.OAuthError as exc:
+        logger.error(
+            "%s WIF token exchange failed \u2014 the pool or provider may not exist, "
+            "may be disabled, or may have been recently deleted.\n   %s",
+            SYM_FAIL,
+            exc,
+        )
+        sys.exit(1)
+    except google.auth.exceptions.RefreshError as exc:
+        logger.error("%s Credential refresh failed: %s", SYM_FAIL, exc)
+        sys.exit(1)
+    except google.auth.exceptions.DefaultCredentialsError as exc:
+        logger.error(
+            "%s No Google credentials found.  Run "
+            "`gcloud auth application-default login` or set "
+            "GOOGLE_APPLICATION_CREDENTIALS.\n   %s",
+            SYM_FAIL,
+            exc,
+        )
+        sys.exit(1)
+    except google.auth.exceptions.TransportError as exc:
+        logger.error(
+            "%s Network error during authentication: %s",
+            SYM_FAIL,
+            exc,
+        )
         sys.exit(1)
     except TimeoutError as exc:
         logger.error("%s Operation timed out: %s", SYM_FAIL, exc)

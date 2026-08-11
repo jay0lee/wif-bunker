@@ -56,11 +56,35 @@ class GCPClient:
         self._token_lock = threading.Lock()
 
         if use_adc:
-            self._credentials, _ = google.auth.default(
-                scopes=self._OAUTH_SCOPES,
-            )
+            try:
+                self._credentials, _ = google.auth.default(
+                    scopes=self._OAUTH_SCOPES,
+                )
+            except google.auth.exceptions.DefaultCredentialsError as exc:
+                raise RuntimeError(
+                    "No Google credentials found.  Run "
+                    "`gcloud auth application-default login` or set "
+                    "GOOGLE_APPLICATION_CREDENTIALS."
+                ) from exc
             self._auth_request = GoogleAuthRequest()
-            self._credentials.refresh(self._auth_request)
+            try:
+                self._credentials.refresh(self._auth_request)
+            except google.auth.exceptions.OAuthError as exc:
+                raise RuntimeError(
+                    f"WIF token exchange failed: {exc}\n"
+                    "The WIF pool or provider may not exist, may be "
+                    "disabled, or may have been recently deleted."
+                ) from exc
+            except google.auth.exceptions.RefreshError as exc:
+                raise RuntimeError(
+                    f"Failed to refresh Google credentials: {exc}\n"
+                    "Check that your credentials are valid and not revoked."
+                ) from exc
+            except google.auth.exceptions.TransportError as exc:
+                raise RuntimeError(
+                    f"Network error during authentication: {exc}\n"
+                    "Check your internet connectivity and firewall settings."
+                ) from exc
             self._token = None
             # Log the identity we're authenticated as.
             identity = getattr(self._credentials, "service_account_email", None) or getattr(
@@ -74,7 +98,7 @@ class GCPClient:
                         params={"access_token": self._credentials.token},
                     ).json()
                     identity = info.get("email", "unknown")
-                except Exception:
+                except requests.exceptions.RequestException:
                     logger.debug("Failed to get email from ADC token", exc_info=True)
                     identity = "unknown"
             logger.info("Authenticated via Application Default Credentials as: %s", identity)

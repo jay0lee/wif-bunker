@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 import google.auth
+import requests
 from cryptography import x509 as cx509
 from cryptography.x509.oid import NameOID
 from google.auth.transport.requests import AuthorizedSession
@@ -170,7 +171,10 @@ def _run_cert_and_mtls_test(config: WorkloadConfig, output_dir: str, debug: bool
 
             run_hardmtls_diagnostics(cert_config_path, logger)
         sys.exit(1)
-    except Exception as mtls_err:
+    except (google.auth.exceptions.TransportError, google.auth.exceptions.MutualTLSChannelError) as mtls_err:
+        logger.error("  ❌ FAIL: mTLS transport error: %s", mtls_err)
+        sys.exit(1)
+    except requests.exceptions.RequestException as mtls_err:
         logger.error("  ❌ FAIL: mTLS verification error: %s", mtls_err)
         sys.exit(1)
 
@@ -194,7 +198,7 @@ def _run_cert_and_mtls_test(config: WorkloadConfig, output_dir: str, debug: bool
         logger.error("  ❌ FAIL: mTLS handshake with Google STS failed:")
         logger.error("    %s", ssl_err)
         sys.exit(1)
-    except Exception as sts_err:
+    except (google.auth.exceptions.TransportError, requests.exceptions.ConnectionError) as sts_err:
         logger.error("  ❌ FAIL: STS connection error: %s", sts_err)
         sys.exit(1)
 
@@ -344,8 +348,34 @@ def _run_status() -> None:
         )
         target_res.raise_for_status()
         logger.info("ADC:       %s API call successful", SYM_CHECK)
-    except Exception as exc:
-        logger.error("ADC:       %s %s", SYM_CROSS, exc)
+    except google.auth.exceptions.OAuthError as exc:
+        logger.error(
+            "ADC:       %s WIF token exchange failed — the pool or provider "
+            "may not exist, may be disabled, or may have been deleted.",
+            SYM_CROSS,
+        )
+        logger.error("           %s", exc)
+        logger.error("Re-run with --debug for detailed hardmTLS and TLS diagnostics.")
+    except google.auth.exceptions.RefreshError as exc:
+        logger.error("ADC:       %s Credential refresh failed: %s", SYM_CROSS, exc)
+        logger.error("Re-run with --debug for detailed hardmTLS and TLS diagnostics.")
+    except google.auth.exceptions.DefaultCredentialsError as exc:
+        logger.error(
+            "ADC:       %s No credentials found.  Ensure adc.json and "
+            "certificate_config.json exist in the current directory.",
+            SYM_CROSS,
+        )
+        logger.error("           %s", exc)
+    except google.auth.exceptions.TransportError as exc:
+        logger.error("ADC:       %s Network/mTLS transport error: %s", SYM_CROSS, exc)
+        logger.error("Re-run with --debug for detailed hardmTLS and TLS diagnostics.")
+    except requests.exceptions.HTTPError as exc:
+        logger.error(
+            "ADC:       %s API call failed (HTTP %s): %s",
+            SYM_CROSS,
+            exc.response.status_code if exc.response is not None else "?",
+            exc,
+        )
         logger.error("Re-run with --debug for detailed hardmTLS and TLS diagnostics.")
 
 
