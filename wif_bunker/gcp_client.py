@@ -541,6 +541,23 @@ class GCPClient:
             except requests.exceptions.HTTPError as exc:
                 if exc.response is not None and exc.response.status_code == 409:
                     logger.info("    Pool already exists: %s", config.pool_id)
+                    # Verify the existing pool is actually usable — it could
+                    # be soft-deleted (state: DELETE_REQUESTED) after a recent
+                    # deletion.  In that case waiting for ACTIVE will never
+                    # succeed, so fail fast with a clear message.
+                    try:
+                        pool_data = self._api_call("GET", pool_res_url)
+                        pool_state = pool_data.get("state", "UNKNOWN")
+                        if pool_state != "ACTIVE":
+                            raise RuntimeError(
+                                f"WIF pool '{config.pool_id}' exists but is in "
+                                f"state '{pool_state}' (likely soft-deleted).  "
+                                f"GCP retains deleted pools for 30 days.  Use a "
+                                f"different pool name with --create-pool=<name> "
+                                f"or wait for the deletion to complete."
+                            )
+                    except requests.exceptions.HTTPError:
+                        pass  # GET failed — let _wait_for_wif_resource handle it
                 else:
                     raise
             self._wait_for_wif_resource(pool_res_url)

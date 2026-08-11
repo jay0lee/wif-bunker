@@ -667,13 +667,16 @@ jobs:
           echo "wif-bunker deps installed."
 
       # ── Use the fixed per-runner project (created by bootstrap job) ──
-      - name: Set project ID
+      - name: Set project and pool IDs
         id: config
         shell: bash
         run: |
           PROJECT_ID="wif-ci-${{ matrix.runner_id }}"
+          POOL_ID="bunker-pool-${{ github.run_id }}"
           echo "project_id=$PROJECT_ID" >> "$GITHUB_OUTPUT"
+          echo "pool_id=$POOL_ID" >> "$GITHUB_OUTPUT"
           echo "Project ID: $PROJECT_ID"
+          echo "Pool ID: $POOL_ID"
 
 
 
@@ -714,10 +717,17 @@ jobs:
           echo "=== Cleaning up previous WIF resources ==="
           PROJECT_ID="${{ steps.config.outputs.project_id }}"
 
-          # Delete existing WIF pool (cascades to providers)
-          echo "Deleting WIF pool bunker-wif-pool (if exists)..."
-          gcloud iam workload-identity-pools delete bunker-wif-pool \
-            --project="$PROJECT_ID" --location=global --quiet 2>/dev/null || true
+          # Delete old WIF pools from previous runs (best-effort)
+          echo "Deleting old WIF pools (if any)..."
+          OLD_POOLS=$(gcloud iam workload-identity-pools list \
+            --project="$PROJECT_ID" --location=global \
+            --filter="state=ACTIVE" \
+            --format="value(name.basename())" 2>/dev/null || true)
+          for pool in $OLD_POOLS; do
+            echo "  Deleting pool: $pool"
+            gcloud iam workload-identity-pools delete "$pool" \
+              --project="$PROJECT_ID" --location=global --quiet 2>/dev/null || true
+          done
 
           # Delete existing service account
           echo "Deleting SA bunker-wif-sa (if exists)..."
@@ -1224,6 +1234,7 @@ jobs:
             --debug \
             --use-adc \
             --use-project="${{ steps.config.outputs.project_id }}" \
+            --create-pool="${{ steps.config.outputs.pool_id }}" \
             ${{ matrix.soft_key_flag }} $YUBIKEY_FLAGS
 
       # ── Step 3: WIF Bunker reuse run (detects existing resources) ──
@@ -1237,7 +1248,7 @@ jobs:
           ${{ inputs.wif_bunker_cmd || '${PYTHON} -m wif_bunker' }} \
             --use-adc \
             --use-project="${{ steps.config.outputs.project_id }}" \
-            --use-pool=bunker-wif-pool \
+            --use-pool=${{ steps.config.outputs.pool_id }} \
             --use-service-account="bunker-wif-sa@${{ steps.config.outputs.project_id }}.iam.gserviceaccount.com" \
             ${{ matrix.soft_key_flag }} $YUBIKEY_FLAGS
 
@@ -1283,7 +1294,7 @@ jobs:
           ${{ inputs.wif_bunker_cmd || '${PYTHON} -m wif_bunker' }} \
             --use-adc \
             --use-project="${{ steps.config.outputs.project_id }}" \
-            --use-pool=bunker-wif-pool \
+            --use-pool=${{ steps.config.outputs.pool_id }} \
             --no-service-account \
             ${{ matrix.soft_key_flag }} $YUBIKEY_FLAGS
 
@@ -1340,10 +1351,11 @@ jobs:
         shell: bash
         run: |
           PROJECT_ID="${{ steps.config.outputs.project_id }}"
+          POOL_ID="${{ steps.config.outputs.pool_id }}"
           echo "Cleaning up WIF resources in $PROJECT_ID..."
 
-          # Delete WIF pool (cascades to providers)
-          gcloud iam workload-identity-pools delete bunker-wif-pool \
+          # Delete this run's WIF pool (cascades to providers)
+          gcloud iam workload-identity-pools delete "$POOL_ID" \
             --project="$PROJECT_ID" --location=global --quiet 2>/dev/null || true
 
           # Delete service account
