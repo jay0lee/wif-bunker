@@ -685,19 +685,8 @@ jobs:
         shell: bash
         run: |
           echo "=== ADC baseline with GHA CI credentials ==="
-          # Retry loop: newly bootstrapped SAs may take time for IAM to propagate.
-          for attempt in $(seq 1 6); do
-            if "${PYTHON}" -u scripts/minimal-adc.py 2>&1 | tee "$RUNNER_TEMP/adc_baseline.txt"; then
-              break
-            fi
-            if [ "$attempt" -lt 6 ]; then
-              echo "  ADC baseline attempt $attempt failed, retrying in 30s..."
-              sleep 30
-            else
-              echo "  ADC baseline failed after 6 attempts"
-              exit 1
-            fi
-          done
+          # minimal-adc.py handles retries internally with exponential backoff
+          "${PYTHON}" -u scripts/minimal-adc.py 2>&1 | tee "$RUNNER_TEMP/adc_baseline.txt"
 
           # Confirm we see the expected CI service account
           GHA_SA="$RUNNER_SA"

@@ -2,18 +2,79 @@
 
 Authenticates via ADC, makes a real API call to the target project,
 and introspects the access token to discover the federated principal.
+
+Retries transient errors (RefreshError, TransportError, ConnectionError)
+with exponential backoff.  Permanent errors (DefaultCredentialsError,
+OAuthError) fail immediately.
 """
 
 import sys
+import time
 
 import google.auth
 import google.auth.exceptions
 import google.auth.transport.requests
 import requests.exceptions
 
+# Retry config
+MAX_RETRIES = 6
+INITIAL_BACKOFF = 5  # seconds
+
+
+def _retry(func, *, description):
+    """Call *func* with exponential backoff on transient google-auth errors.
+
+    Retries on:
+      - RefreshError  (token refresh / IAM propagation)
+      - TransportError (network / mTLS)
+      - ConnectionError (TCP-level)
+
+    Fails immediately on:
+      - OAuthError (invalid pool/provider — permanent)
+      - DefaultCredentialsError (no creds configured — permanent)
+    """
+    backoff = INITIAL_BACKOFF
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            return func()
+        except google.auth.exceptions.OAuthError as exc:
+            # Permanent — bad audience / deleted pool
+            print(
+                f"❌ {description}: WIF token exchange failed — the pool or "
+                f"provider may not exist, may be disabled, or may have been "
+                f"deleted.\n   {exc}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        except google.auth.exceptions.RefreshError as exc:
+            if attempt == MAX_RETRIES:
+                print(
+                    f"❌ {description}: Credential refresh failed after {MAX_RETRIES} attempts: {exc}", file=sys.stderr
+                )
+                sys.exit(1)
+            print(f"  ⏳ {description}: Refresh failed (attempt {attempt}/{MAX_RETRIES}), retrying in {backoff}s...")
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 60)
+        except google.auth.exceptions.TransportError as exc:
+            if attempt == MAX_RETRIES:
+                print(f"❌ {description}: Transport error after {MAX_RETRIES} attempts: {exc}", file=sys.stderr)
+                sys.exit(1)
+            print(f"  ⏳ {description}: Transport error (attempt {attempt}/{MAX_RETRIES}), retrying in {backoff}s...")
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 60)
+        except requests.exceptions.ConnectionError as exc:
+            if attempt == MAX_RETRIES:
+                print(f"❌ {description}: Connection error after {MAX_RETRIES} attempts: {exc}", file=sys.stderr)
+                sys.exit(1)
+            print(f"  ⏳ {description}: Connection error (attempt {attempt}/{MAX_RETRIES}), retrying in {backoff}s...")
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 60)
+    # Unreachable, but keeps type checkers happy
+    sys.exit(1)
+
 
 def main() -> int:
-    # Load ADC
+    # Load ADC — not retryable (configuration error)
     try:
         creds, project = google.auth.default(
             scopes=[
@@ -44,36 +105,13 @@ def main() -> int:
     # ── Verify ADC works: call the target project ──
     if project:
         print("\n--- API Verification ---")
-        try:
-            resp = authed_session.get(
+
+        resp = _retry(
+            lambda: authed_session.get(
                 f"https://cloudresourcemanager.googleapis.com/v1/projects/{project}",
-            )
-        except google.auth.exceptions.OAuthError as exc:
-            print(
-                f"❌ WIF token exchange failed — the pool or provider may "
-                f"not exist, may be disabled, or may have been deleted.\n"
-                f"   {exc}",
-                file=sys.stderr,
-            )
-            return 1
-        except google.auth.exceptions.RefreshError as exc:
-            print(
-                f"❌ Credential refresh failed: {exc}",
-                file=sys.stderr,
-            )
-            return 1
-        except google.auth.exceptions.TransportError as exc:
-            print(
-                f"❌ Network/mTLS transport error: {exc}",
-                file=sys.stderr,
-            )
-            return 1
-        except requests.exceptions.ConnectionError as exc:
-            print(
-                f"❌ Connection error: {exc}",
-                file=sys.stderr,
-            )
-            return 1
+            ),
+            description="API verification",
+        )
 
         if resp.ok:
             proj_info = resp.json()
@@ -85,22 +123,11 @@ def main() -> int:
 
     # ── Introspect the access token for identity info ──
     print("\n--- Identity ---")
-    try:
-        creds.refresh(google.auth.transport.requests.Request())
-    except google.auth.exceptions.OAuthError as exc:
-        print(
-            f"❌ WIF token exchange failed during refresh — the pool or "
-            f"provider may not exist, may be disabled, or may have been "
-            f"deleted.\n   {exc}",
-            file=sys.stderr,
-        )
-        return 1
-    except google.auth.exceptions.RefreshError as exc:
-        print(f"❌ Credential refresh failed: {exc}", file=sys.stderr)
-        return 1
-    except google.auth.exceptions.TransportError as exc:
-        print(f"❌ Network error during token refresh: {exc}", file=sys.stderr)
-        return 1
+
+    _retry(
+        lambda: creds.refresh(google.auth.transport.requests.Request()),
+        description="Token refresh",
+    )
 
     token = creds.token
 
@@ -115,7 +142,6 @@ def main() -> int:
 
     if token_resp.ok:
         info = token_resp.json()
-        # WIF tokens have 'sub' (subject) and may have 'email'
         if info.get("email"):
             print(f"Email:   {info['email']}")
         if info.get("sub"):
