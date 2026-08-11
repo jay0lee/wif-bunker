@@ -1259,6 +1259,22 @@ jobs:
             --create-pool="${{ steps.config.outputs.pool_id }}" \
             ${{ matrix.soft_key_flag }} $YUBIKEY_FLAGS
 
+      # ── Grant pool principal browser role so ADC tests can call projects.get ──
+      - name: "Grant WIF pool principal browser role"
+        shell: bash
+        run: |
+          PROJECT_ID="${{ steps.config.outputs.project_id }}"
+          POOL_ID="${{ steps.config.outputs.pool_id }}"
+          PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format="value(projectNumber)")
+
+          PRINCIPAL="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_ID}/*"
+          echo "Granting browser role to: $PRINCIPAL"
+
+          gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+            --member="$PRINCIPAL" \
+            --role="roles/browser" \
+            --condition=None
+
       # ── Step 3: WIF Bunker reuse run (detects existing resources) ──
       - name: "WIF Bunker: Reuse existing"
         shell: bash

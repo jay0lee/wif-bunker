@@ -156,6 +156,7 @@ def main() -> int:
             _print(f"Lifecycle:      {proj_info.get('lifecycleState')}")
         else:
             _print(f"API call failed: {resp.status_code} {resp.text[:200]}")
+            return 1
 
     # ── Introspect the access token for identity info ──
     _print("\n--- Identity ---")
@@ -190,6 +191,7 @@ def main() -> int:
             _print(f"Expires: {exp}s")
     else:
         _print(f"Token introspection failed: {token_resp.status_code}")
+        return 1
 
     return 0
 
