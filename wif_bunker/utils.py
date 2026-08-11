@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import sys
 import time
@@ -61,6 +62,45 @@ SYM_FAIL = "\u274c" if _UNICODE else "[FAIL]"
 SYM_ARROW = "\u2192" if _UNICODE else "->"
 SYM_CHECK = "\u2713" if _UNICODE else "[ok]"
 SYM_CROSS = "\u2717" if _UNICODE else "[X]"
+
+
+# --- Credential Redaction ---
+_REDACT_ENABLED = True
+_REDACTED = "***REDACTED***"
+
+# Patterns that match sensitive credential values
+_TOKEN_PATTERNS = [
+    # JSON: "access_token": "ya29.xxx" or "access_token":"ya29.xxx"
+    re.compile(r'("access_token"\s*:\s*")([^"]+)(")', re.IGNORECASE),
+    # JSON: "id_token": "eyJ..."
+    re.compile(r'("id_token"\s*:\s*")([^"]+)(")', re.IGNORECASE),
+    # JSON: "refresh_token": "1//xxx"
+    re.compile(r'("refresh_token"\s*:\s*")([^"]+)(")', re.IGNORECASE),
+    # URL query param: access_token=ya29.xxx (terminated by & or end-of-string)
+    re.compile(r"(access_token=)([^&\s]+)", re.IGNORECASE),
+]
+
+
+def set_redaction(enabled: bool) -> None:
+    """Enable or disable credential redaction in log output."""
+    global _REDACT_ENABLED
+    _REDACT_ENABLED = enabled
+
+
+def redact_tokens(text: str) -> str:
+    """Redact bearer tokens and credentials from a string.
+
+    Replaces access_token, id_token, and refresh_token values in JSON
+    bodies and URL query parameters with ``***REDACTED***``.
+
+    Redaction is enabled by default and can be disabled with
+    ``set_redaction(False)`` (triggered by ``--no-redact`` CLI flag).
+    """
+    if not _REDACT_ENABLED:
+        return text
+    for pattern in _TOKEN_PATTERNS:
+        text = pattern.sub(rf"\g<1>{_REDACTED}\g<3>" if pattern.groups == 3 else rf"\g<1>{_REDACTED}", text)
+    return text
 
 
 def yubikey_not_found_hint() -> str:

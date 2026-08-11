@@ -43,6 +43,8 @@ from wif_bunker.utils import (
     _CleanFormatter,
     preflight_check_openssl_shared,
     preflight_check_write_access,
+    redact_tokens,
+    set_redaction,
     with_retries,
 )
 
@@ -56,6 +58,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument(
+        "--no-redact",
+        action="store_true",
+        help="Disable redaction of credentials in log output (for local debugging only)",
+    )
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument(
         "--cert-only",
@@ -326,6 +333,10 @@ def _main_impl() -> None:
         level=logging.DEBUG if args.debug else logging.INFO,
         handlers=[handler],
     )
+
+    # Credential redaction is ON by default; --no-redact disables it.
+    if args.no_redact:
+        set_redaction(False)
 
     preflight_check_openssl_shared()
 
@@ -707,7 +718,7 @@ def _main_impl() -> None:
                 timeout=30,
             )
             logger.info("    STS response: HTTP %d", sts_resp.status_code)
-            logger.info("    STS body: %s", sts_resp.text[:500])
+            logger.info("    STS body: %s", redact_tokens(sts_resp.text[:500]))
 
             if sts_resp.status_code == 200:
                 logger.info("    PASS: Direct JSON STS exchange succeeded!")
@@ -769,7 +780,8 @@ def _main_impl() -> None:
                 adc_creds.refresh(google.auth.transport.requests.Request())
                 token = adc_creds.token
                 token_resp = requests.get(
-                    f"https://oauth2.googleapis.com/tokeninfo?access_token={token}",
+                    "https://oauth2.googleapis.com/tokeninfo",
+                    params={"access_token": token},
                     timeout=10,
                 )
                 if token_resp.ok:
