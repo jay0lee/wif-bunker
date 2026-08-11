@@ -76,6 +76,13 @@ def _retry(func, *, description):
             )
             sys.exit(1)
         except google.auth.exceptions.RefreshError as exc:
+            # Fail fast on permanent errors (e.g. 403 permission denied)
+            if not getattr(exc, "retryable", True) or "PERMISSION_DENIED" in str(exc):
+                _print(
+                    f"❌ {description}: Credential refresh failed (permanent): {exc}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
             if attempt == MAX_RETRIES:
                 _print(
                     f"❌ {description}: Credential refresh failed after {MAX_RETRIES} attempts: {exc}", file=sys.stderr

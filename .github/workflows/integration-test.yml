@@ -133,8 +133,13 @@ jobs:
                 sts.googleapis.com \
                 iamcredentials.googleapis.com \
                 --project="$PROJECT_ID"
+            fi
 
-              # Create runner SA
+            # ── Ensure CI runner SA exists (idempotent) ──
+            if gcloud iam service-accounts describe "$SA_EMAIL" --project="$PROJECT_ID" &>/dev/null; then
+              echo "  ✓ Runner SA exists: $SA_EMAIL"
+            else
+              echo "  Creating runner SA: $SA_EMAIL"
               gcloud iam service-accounts create "$SA_NAME" \
                 --project="$PROJECT_ID" \
                 --display-name="CI Runner ${RUNNER_ID}"
@@ -150,45 +155,46 @@ jobs:
               done
               # Extra wait — describe succeeds before IAM fully propagates
               sleep 10
-
-              # Retry wrapper for IAM bindings (eventual consistency)
-              iam_bind() {
-                for attempt in 1 2 3 4 5; do
-                  if "$@" 2>/dev/null; then
-                    return 0
-                  fi
-                  echo "    IAM bind attempt $attempt failed, retrying in 10s..."
-                  sleep 10
-                done
-                echo "    IAM bind failed after 5 attempts: $*"
-                return 1
-              }
-
-              # SA is owner of its own project
-              iam_bind gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-                --member="serviceAccount:${SA_EMAIL}" \
-                --role="roles/owner"
-
-              # SA can create/manage test projects in its own tests/ folder
-              for ROLE in \
-                roles/resourcemanager.projectCreator \
-                roles/resourcemanager.projectDeleter \
-                roles/browser \
-                roles/serviceusage.serviceUsageAdmin; do
-                iam_bind gcloud resource-manager folders add-iam-policy-binding "$TESTS_FOLDER_ID" \
-                  --member="serviceAccount:${SA_EMAIL}" \
-                  --role="$ROLE" \
-                  --condition=None
-              done
-
-              # Allow GHA OIDC to impersonate this SA
-              iam_bind gcloud iam service-accounts add-iam-policy-binding "${SA_EMAIL}" \
-                --project="$PROJECT_ID" \
-                --role="roles/iam.workloadIdentityUser" \
-                --member="principalSet://iam.googleapis.com/${WIF_POOL}/attribute.repository/${GH_REPO}"
-
-              echo "  ✓ Created: $PROJECT_ID → $SA_EMAIL"
             fi
+
+            # ── Ensure IAM bindings (idempotent — add-iam-policy-binding is a no-op if already set) ──
+            # Retry wrapper for IAM bindings (eventual consistency)
+            iam_bind() {
+              for attempt in 1 2 3 4 5; do
+                if "$@" 2>/dev/null; then
+                  return 0
+                fi
+                echo "    IAM bind attempt $attempt failed, retrying in 10s..."
+                sleep 10
+              done
+              echo "    IAM bind failed after 5 attempts: $*"
+              return 1
+            }
+
+            # SA is owner of its own project
+            iam_bind gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+              --member="serviceAccount:${SA_EMAIL}" \
+              --role="roles/owner"
+
+            # SA can create/manage test projects in its own tests/ folder
+            for ROLE in \
+              roles/resourcemanager.projectCreator \
+              roles/resourcemanager.projectDeleter \
+              roles/browser \
+              roles/serviceusage.serviceUsageAdmin; do
+              iam_bind gcloud resource-manager folders add-iam-policy-binding "$TESTS_FOLDER_ID" \
+                --member="serviceAccount:${SA_EMAIL}" \
+                --role="$ROLE" \
+                --condition=None
+            done
+
+            # Allow GHA OIDC to impersonate this SA
+            iam_bind gcloud iam service-accounts add-iam-policy-binding "${SA_EMAIL}" \
+              --project="$PROJECT_ID" \
+              --role="roles/iam.workloadIdentityUser" \
+              --member="principalSet://iam.googleapis.com/${WIF_POOL}/attribute.repository/${GH_REPO}"
+
+            echo "  ✓ Ready: $PROJECT_ID → $SA_EMAIL"
 
             RUNNER_SA[$RUNNER_ID]="$SA_EMAIL"
             RUNNER_TESTS_FOLDER[$RUNNER_ID]="$TESTS_FOLDER_ID"
