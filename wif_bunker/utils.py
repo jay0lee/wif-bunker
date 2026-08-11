@@ -138,12 +138,19 @@ def generate_pin(length: int = 24) -> str:
 
 
 class _CleanFormatter(logging.Formatter):
-    """Strips the level prefix from INFO messages for a cleaner CLI experience."""
+    """Strips the level prefix from INFO messages and redacts credentials.
+
+    Redaction is applied to **all** log output, including messages from
+    third-party libraries (e.g. ``urllib3`` logging full URLs with
+    ``access_token=`` query parameters at DEBUG level).
+    """
 
     def format(self, record: logging.LogRecord) -> str:
         if record.levelno == logging.INFO:
-            return record.getMessage()
-        return super().format(record)
+            msg = record.getMessage()
+        else:
+            msg = super().format(record)
+        return redact_tokens(msg)
 
 
 # --- Pythonic Retry & File Helpers ---
