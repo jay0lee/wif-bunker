@@ -72,6 +72,7 @@ jobs:
 
           declare -A RUNNER_SA
           declare -A RUNNER_TESTS_FOLDER
+          declare -A RUNNER_TEST_PROJECT
 
           # ── Get existing child folders of sandbox ──
           EXISTING_FOLDERS=$(gcloud resource-manager folders list \
@@ -196,8 +197,33 @@ jobs:
 
             echo "  ✓ Ready: $PROJECT_ID → $SA_EMAIL"
 
+            # ── Ensure persistent test project exists in tests/ folder ──
+            TEST_PROJECT_ID="wif-test-${RUNNER_ID}"
+            if gcloud projects describe "$TEST_PROJECT_ID" --format="value(lifecycleState)" 2>/dev/null | grep -q ACTIVE; then
+              echo "  ✓ Test project exists: $TEST_PROJECT_ID"
+            else
+              echo "  Creating test project: $TEST_PROJECT_ID"
+              gcloud projects create "$TEST_PROJECT_ID" \
+                --name="WIF Test ${RUNNER_ID}" \
+                --folder="$TESTS_FOLDER_ID"
+
+              gcloud services enable \
+                iam.googleapis.com \
+                cloudresourcemanager.googleapis.com \
+                serviceusage.googleapis.com \
+                sts.googleapis.com \
+                iamcredentials.googleapis.com \
+                --project="$TEST_PROJECT_ID"
+            fi
+
+            # CI runner SA needs owner on test project to create pools/SAs
+            iam_bind gcloud projects add-iam-policy-binding "$TEST_PROJECT_ID" \
+              --member="serviceAccount:${SA_EMAIL}" \
+              --role="roles/owner"
+
             RUNNER_SA[$RUNNER_ID]="$SA_EMAIL"
             RUNNER_TESTS_FOLDER[$RUNNER_ID]="$TESTS_FOLDER_ID"
+            RUNNER_TEST_PROJECT[$RUNNER_ID]="$TEST_PROJECT_ID"
           done
 
           # ── Cleanup orphaned runner folders ──
@@ -237,7 +263,7 @@ jobs:
           FIRST=true
           for RUNNER_ID in $RUNNERS; do
             $FIRST || JSON+=","
-            JSON+="\"${RUNNER_ID}\":{\"sa\":\"${RUNNER_SA[$RUNNER_ID]}\",\"tests_folder\":\"${RUNNER_TESTS_FOLDER[$RUNNER_ID]}\"}"
+            JSON+="\"${RUNNER_ID}\":{\"sa\":\"${RUNNER_SA[$RUNNER_ID]}\",\"tests_folder\":\"${RUNNER_TESTS_FOLDER[$RUNNER_ID]}\",\"test_project\":\"${RUNNER_TEST_PROJECT[$RUNNER_ID]}\"}"
             FIRST=false
           done
           JSON+="}"
@@ -366,6 +392,7 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       RUNNER_SA: ${{ fromJSON(needs.bootstrap.outputs.runner_map)[matrix.runner_id].sa }}
       TESTS_FOLDER: ${{ fromJSON(needs.bootstrap.outputs.runner_map)[matrix.runner_id].tests_folder }}
+      TEST_PROJECT: ${{ fromJSON(needs.bootstrap.outputs.runner_map)[matrix.runner_id].test_project }}
       # Paths to pre-built OpenSSL + Python (from build-python-ssl.yml cache)
       OPENSSL_INSTALL_PATH: ${{ github.workspace }}/bin/ssl
       PYTHON_INSTALL_PATH: ${{ github.workspace }}/bin/python
@@ -677,11 +704,11 @@ jobs:
         id: config
         shell: bash
         run: |
-          PROJECT_ID="wif-ci-${{ matrix.runner_id }}"
+          PROJECT_ID="$TEST_PROJECT"
           POOL_ID="bunker-pool-${{ github.run_id }}-${{ github.run_attempt }}"
           echo "project_id=$PROJECT_ID" >> "$GITHUB_OUTPUT"
           echo "pool_id=$POOL_ID" >> "$GITHUB_OUTPUT"
-          echo "Project ID: $PROJECT_ID"
+          echo "Test Project ID: $PROJECT_ID"
           echo "Pool ID: $POOL_ID"
 
 
