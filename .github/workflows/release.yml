@@ -41,7 +41,7 @@ jobs:
       # Force Python to use UTF-8 for stdout/stderr on Windows (default is cp1252)
       PYTHONIOENCODING: utf-8
       # Windows code signing — cert SHA1 thumbprint (public, not secret)
-      WINDOWS_CODESIGN_CERT_HASH: 3B11D9340A45CF078FF7FD984F1C3E30DA82FD05
+      WINDOWS_CODESIGN_CERT_HASH: F0525AB6343A5E9A5F75CF81FC56CF67E316CB28
 
     defaults:
       run:
