@@ -13,8 +13,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # Path to pre-built OpenSSL (from build-python-ssl.yml cache)
-  OPENSSL_INSTALL_PATH: ${{ github.workspace }}/bin/ssl
 
 jobs:
   check:
@@ -33,35 +31,14 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: "Restore compiled OpenSSL + Python"
-        uses: actions/cache/restore@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
-        id: cache-python-ssl
-        with:
-          path: |
-            bin/ssl
-            bin/python
-          key: python-ssl-${{ matrix.os }}-v2-
-          restore-keys: |
-            python-ssl-${{ matrix.os }}-v2-
-          fail-on-cache-miss: true
-
-      - name: "Set library paths"
-        shell: bash
-        run: |
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            export LD_LIBRARY_PATH="${OPENSSL_INSTALL_PATH}/lib:${LD_LIBRARY_PATH}"
-            echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" >> $GITHUB_ENV
-          elif [ "$RUNNER_OS" = "macOS" ]; then
-            export DYLD_LIBRARY_PATH="${OPENSSL_INSTALL_PATH}/lib:${DYLD_LIBRARY_PATH}"
-            echo "DYLD_LIBRARY_PATH=${DYLD_LIBRARY_PATH}" >> $GITHUB_ENV
-          elif [ "$RUNNER_OS" = "Windows" ]; then
-            echo "${OPENSSL_INSTALL_PATH}/bin" >> $GITHUB_PATH
-          fi
+      - name: Set up latest Python and OpenSSL
+        id: setup-python-ssl
+        uses: jay0lee/python-openssl-latest@v1
 
       - name: "Verify OpenSSL"
         shell: bash
         run: |
-          "${OPENSSL_INSTALL_PATH}/bin/openssl" version -a
+          openssl version -a
 
       # ── Windows: MSVC for cargo build ──
       - name: "Windows: Configure MSVC"
@@ -88,28 +65,28 @@ jobs:
       - name: Linting
         working-directory: hardmtls-native
         env:
-          OPENSSL_DIR: ${{ github.workspace }}/bin/ssl
+          OPENSSL_DIR: ${{ steps.setup-python-ssl.outputs.openssl-path }}
           OPENSSL_STATIC: "1"
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Tests
         working-directory: hardmtls-native
         env:
-          OPENSSL_DIR: ${{ github.workspace }}/bin/ssl
+          OPENSSL_DIR: ${{ steps.setup-python-ssl.outputs.openssl-path }}
           OPENSSL_STATIC: "1"
         run: cargo test --all-features
 
       - name: Documentation
         working-directory: hardmtls-native
         env:
-          OPENSSL_DIR: ${{ github.workspace }}/bin/ssl
+          OPENSSL_DIR: ${{ steps.setup-python-ssl.outputs.openssl-path }}
           OPENSSL_STATIC: "1"
         run: cargo doc --no-deps
 
       - name: Build release
         working-directory: hardmtls-native
         env:
-          OPENSSL_DIR: ${{ github.workspace }}/bin/ssl
+          OPENSSL_DIR: ${{ steps.setup-python-ssl.outputs.openssl-path }}
           OPENSSL_STATIC: "1"
         run: cargo build --release
 

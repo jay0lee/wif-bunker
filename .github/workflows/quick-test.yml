@@ -114,9 +114,6 @@ jobs:
       }}
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      # Paths to pre-built OpenSSL + Python (from build-python-ssl.yml cache)
-      OPENSSL_INSTALL_PATH: ${{ github.workspace }}/bin/ssl
-      PYTHON_INSTALL_PATH: ${{ github.workspace }}/bin/python
       # Force Python to use UTF-8 for stdout/stderr on Windows (default is cp1252)
       PYTHONIOENCODING: utf-8
 
@@ -141,59 +138,9 @@ jobs:
           needs.config.outputs.runner != 'yubikey'
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
-      # ══════════════════════════════════════════════════════════════════════
-      # Restore pre-built OpenSSL + Python from cache
-      # Built daily by build-python-ssl.yml — restore-keys prefix match
-      # falls back to the most recent successful build.
-      # ══════════════════════════════════════════════════════════════════════
-
-      - name: "Restore compiled OpenSSL + Python"
-        uses: actions/cache/restore@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
-        id: cache-python-ssl
-        with:
-          path: |
-            bin/ssl
-            bin/python
-          key: python-ssl-${{ runner.os }}-${{ runner.arch }}-v2-
-          restore-keys: |
-            python-ssl-${{ runner.os }}-${{ runner.arch }}-v2-
-          fail-on-cache-miss: true
-
-      - name: "Set PYTHON env var and library paths"
-        shell: bash
-        run: |
-          # Set the exact path to our compiled Python binary.
-          # On Windows, CPython installs as python.exe (no python3 symlink).
-          # Using $PYTHON everywhere avoids picking up a system Python.
-          if [[ "${RUNNER_OS}" == "Windows" ]]; then
-            export PYTHON="${PYTHON_INSTALL_PATH}/python.exe"
-            echo "${PYTHON_INSTALL_PATH}" >> "$GITHUB_PATH"
-            echo "${PYTHON_INSTALL_PATH}/Scripts" >> "$GITHUB_PATH"
-          else
-            export PYTHON="${PYTHON_INSTALL_PATH}/bin/python3"
-            echo "${PYTHON_INSTALL_PATH}/bin" >> "$GITHUB_PATH"
-          fi
-
-          # Library search paths — set for ALL OSes so our compiled OpenSSL
-          # is always found before any system copy.
-          export LD_LIBRARY_PATH="${PYTHON_INSTALL_PATH}/lib:${OPENSSL_INSTALL_PATH}/lib:${LD_LIBRARY_PATH}"
-          echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" >> $GITHUB_ENV
-          if [[ "${RUNNER_OS}" == "macOS" ]]; then
-            export DYLD_LIBRARY_PATH="${PYTHON_INSTALL_PATH}/lib:${OPENSSL_INSTALL_PATH}/lib:${DYLD_LIBRARY_PATH}"
-            echo "DYLD_LIBRARY_PATH=${DYLD_LIBRARY_PATH}" >> $GITHUB_ENV
-          fi
-
-          echo "PYTHON=${PYTHON}" >> $GITHUB_ENV
-          echo "Compiled Python binary: ${PYTHON}"
-          ls -la "${PYTHON}" 2>/dev/null || echo "WARNING: ${PYTHON} does not exist!"
-          echo "LD_LIBRARY_PATH: ${LD_LIBRARY_PATH}"
-
-      - name: "Verify compiled Python + OpenSSL"
-        shell: bash
-        run: |
-          echo "PYTHON=${PYTHON}"
-          "${PYTHON}" --version
-          "${PYTHON}" -c "import ssl; print(f'Python ssl module OpenSSL: {ssl.OPENSSL_VERSION}')"
+      - name: Set up latest Python and OpenSSL
+        id: setup-python-ssl
+        uses: jay0lee/python-openssl-latest@v1
 
       # ── Install wif-bunker ──
       - name: "Install wif-bunker"
@@ -231,7 +178,7 @@ jobs:
         if: needs.config.outputs.install_wif_bunker == 'true'
         shell: bash
         env:
-          OPENSSL_DIR: ${{ github.workspace }}/bin/ssl
+          OPENSSL_DIR: ${{ steps.setup-python-ssl.outputs.openssl-path }}
         run: |
           cd hardmtls-native
           cargo build --release

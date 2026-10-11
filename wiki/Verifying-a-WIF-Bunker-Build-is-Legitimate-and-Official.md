@@ -197,7 +197,7 @@ Both of these methods are described above.
 Every WIF Bunker release is built by the [`release.yml`](https://github.com/jay0lee/wif-bunker/blob/main/.github/workflows/release.yml) workflow, which:
 
 - Runs on GitHub-hosted runners (no self-hosted build infrastructure)
-- Compiles Python and OpenSSL from source (via cached daily builds from [`build-python-ssl.yml`](https://github.com/jay0lee/wif-bunker/blob/main/.github/workflows/build-python-ssl.yml))
+- Uses hardened standalone Python and OpenSSL pre-compiled builds from [`jay0lee/python-openssl-latest`](https://github.com/jay0lee/python-openssl-latest)
 - Passes [integration tests](https://github.com/jay0lee/wif-bunker/blob/main/.github/workflows/integration-test.yml) against real GCP infrastructure before publishing
 - Generates a [Software Bill of Materials (SBOM)](https://www.cisa.gov/sbom) in SPDX format for each platform
 - Attests every artifact with GitHub's Sigstore-backed attestation

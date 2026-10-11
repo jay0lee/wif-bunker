@@ -364,7 +364,6 @@ jobs:
 #            expected_algos: "es256 es384 rsa2048 rsa3072 rsa4096"
 #            use_native_ssl_and_python: true
           # ── Self-hosted hardware ──
-          # os is set so the cache key python-ssl-${{ matrix.os }} matches;
           # runs_on takes precedence for runner selection.
           - name: Hardware TPM (NUC8)
             os: ubuntu-24.04
@@ -393,9 +392,6 @@ jobs:
       RUNNER_SA: ${{ fromJSON(needs.bootstrap.outputs.runner_map)[matrix.runner_id].sa }}
       TESTS_FOLDER: ${{ fromJSON(needs.bootstrap.outputs.runner_map)[matrix.runner_id].tests_folder }}
       TEST_PROJECT: ${{ fromJSON(needs.bootstrap.outputs.runner_map)[matrix.runner_id].test_project }}
-      # Paths to pre-built OpenSSL + Python (from build-python-ssl.yml cache)
-      OPENSSL_INSTALL_PATH: ${{ github.workspace }}/bin/ssl
-      PYTHON_INSTALL_PATH: ${{ github.workspace }}/bin/python
       # Force Python to use UTF-8 for stdout/stderr on Windows (default is cp1252)
       PYTHONIOENCODING: utf-8
 
@@ -477,109 +473,10 @@ jobs:
           fi
 
 
-      # ══════════════════════════════════════════════════════════════════════
-      # Restore pre-built OpenSSL + Python from cache
-      # Built daily by build-python-ssl.yml — restore-keys prefix match
-      # falls back to the most recent successful build.
-      # ══════════════════════════════════════════════════════════════════════
-
-      - name: "Restore compiled OpenSSL + Python"
+      - name: Set up latest Python and OpenSSL
         if: ${{ !matrix.use_native_ssl_and_python }}
-        uses: actions/cache/restore@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
-        id: cache-python-ssl
-        with:
-          path: |
-            bin/ssl
-            bin/python
-          key: python-ssl-${{ matrix.os }}-v2-
-          restore-keys: |
-            python-ssl-${{ matrix.os }}-v2-
-          fail-on-cache-miss: true
-
-      - name: "Debug: Inspect cached OpenSSL + Python"
-        if: ${{ !matrix.use_native_ssl_and_python }}
-        shell: bash
-        run: |
-          echo "══════════════════════════════════════════════════"
-          echo "Cache restore key used: ${{ steps.cache-python-ssl.outputs.cache-matched-key }}"
-          echo "Cache primary key:      python-ssl-${{ matrix.os }}-v2-"
-          echo "══════════════════════════════════════════════════"
-
-          echo ""
-          echo "=== bin/ssl directory ==="
-          ls -la bin/ssl/ 2>/dev/null || echo "bin/ssl/ NOT FOUND"
-          echo ""
-          echo "=== bin/ssl/bin ==="
-          ls -la bin/ssl/bin/ 2>/dev/null || echo "bin/ssl/bin/ NOT FOUND"
-          echo ""
-          echo "=== bin/ssl/lib (libraries) ==="
-          ls -la bin/ssl/lib/ 2>/dev/null || echo "bin/ssl/lib/ NOT FOUND"
-          echo ""
-          echo "=== bin/ssl/lib shared objects ==="
-          find bin/ssl/lib -name '*.so*' -o -name '*.dylib' -o -name '*.dll' 2>/dev/null || echo "No shared libraries found"
-          echo ""
-          echo "=== bin/ssl/lib static libraries ==="
-          find bin/ssl/lib -name '*.a' -o -name '*.lib' 2>/dev/null || echo "No static libraries found"
-          echo ""
-          echo "=== bin/ssl/include/openssl/opensslv.h (version) ==="
-          grep -E 'OPENSSL_VERSION_(TEXT|STR|MAJOR|MINOR|PATCH)' bin/ssl/include/openssl/opensslv.h 2>/dev/null | head -10 || echo "opensslv.h NOT FOUND"
-          echo ""
-          echo "=== OpenSSL binary version ==="
-          bin/ssl/bin/openssl version -a 2>/dev/null || echo "openssl binary not found or failed"
-
-          echo ""
-          echo "=== bin/python directory ==="
-          ls -la bin/python/ 2>/dev/null || echo "bin/python/ NOT FOUND"
-          echo ""
-          if [[ "${RUNNER_OS}" == "Windows" ]]; then
-            echo "=== Windows: python executables ==="
-            find bin/python -maxdepth 1 -name 'python*' -o -name 'python*.exe' 2>/dev/null || echo "No python executables found"
-            echo ""
-            echo "=== Windows: _ssl.pyd location ==="
-            find bin/python -name '_ssl*' 2>/dev/null || echo "_ssl not found"
-            echo ""
-            echo "=== Windows: OpenSSL DLLs in python dir ==="
-            find bin/python -name 'libssl*' -o -name 'libcrypto*' 2>/dev/null || echo "No OpenSSL DLLs found in python dir"
-          else
-            echo "=== Python binary ==="
-            ls -la bin/python/bin/python* 2>/dev/null || echo "No python binary found"
-            echo ""
-            echo "=== Python lib dir ==="
-            ls -la bin/python/lib/ 2>/dev/null || echo "bin/python/lib/ NOT FOUND"
-            echo ""
-            echo "=== _ssl module location ==="
-            find bin/python -name '_ssl*' 2>/dev/null || echo "_ssl not found"
-          fi
-
-      - name: "Set PYTHON env var and library paths (cached build)"
-        if: ${{ !matrix.use_native_ssl_and_python }}
-        shell: bash
-        run: |
-          # Set the exact path to our compiled Python binary.
-          # On Windows, CPython installs as python.exe (no python3 symlink).
-          # Using $PYTHON everywhere avoids picking up a system Python.
-          if [[ "${RUNNER_OS}" == "Windows" ]]; then
-            export PYTHON="${PYTHON_INSTALL_PATH}/python.exe"
-            echo "${PYTHON_INSTALL_PATH}" >> "$GITHUB_PATH"
-            echo "${PYTHON_INSTALL_PATH}/Scripts" >> "$GITHUB_PATH"
-          else
-            export PYTHON="${PYTHON_INSTALL_PATH}/bin/python3"
-            echo "${PYTHON_INSTALL_PATH}/bin" >> "$GITHUB_PATH"
-          fi
-
-          # Library search paths — set for ALL OSes so our compiled OpenSSL
-          # is always found before any system copy.
-          export LD_LIBRARY_PATH="${PYTHON_INSTALL_PATH}/lib:${OPENSSL_INSTALL_PATH}/lib:${LD_LIBRARY_PATH}"
-          echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" >> $GITHUB_ENV
-          if [[ "${RUNNER_OS}" == "macOS" ]]; then
-            export DYLD_LIBRARY_PATH="${PYTHON_INSTALL_PATH}/lib:${OPENSSL_INSTALL_PATH}/lib:${DYLD_LIBRARY_PATH}"
-            echo "DYLD_LIBRARY_PATH=${DYLD_LIBRARY_PATH}" >> $GITHUB_ENV
-          fi
-
-          echo "PYTHON=${PYTHON}" >> $GITHUB_ENV
-          echo "Compiled Python binary: ${PYTHON}"
-          ls -la "${PYTHON}" 2>/dev/null || echo "WARNING: ${PYTHON} does not exist!"
-          echo "LD_LIBRARY_PATH: ${LD_LIBRARY_PATH}"
+        id: setup-python-ssl
+        uses: jay0lee/python-openssl-latest@v1
 
       - name: "Set PYTHON env var and library paths (native)"
         if: ${{ matrix.use_native_ssl_and_python }}
