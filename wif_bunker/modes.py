@@ -171,6 +171,11 @@ def _run_cert_and_mtls_test(config: WorkloadConfig, output_dir: str, debug: bool
 
             run_hardmtls_diagnostics(cert_config_path, logger)
         sys.exit(1)
+    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as conn_err:
+        logger.warning(
+            "  ⚠️ WARNING: certauth.idrix.fr is unreachable (%s) — skipping external reflection check",
+            conn_err,
+        )
     except (google.auth.exceptions.TransportError, google.auth.exceptions.MutualTLSChannelError) as mtls_err:
         logger.error("  ❌ FAIL: mTLS transport error: %s", mtls_err)
         sys.exit(1)

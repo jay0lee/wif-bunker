@@ -654,6 +654,11 @@ def _main_impl() -> None:
 
                 run_hardmtls_diagnostics(cert_config_path, logger)
             sys.exit(1)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as conn_err:
+            logger.warning(
+                "    WARNING: certauth.idrix.fr is unreachable (%s) — skipping external reflection check",
+                conn_err,
+            )
         except Exception as mtls_err:
             logger.error("    FAIL: mTLS verification error: %s", mtls_err)
             sys.exit(1)

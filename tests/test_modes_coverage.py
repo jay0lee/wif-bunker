@@ -724,3 +724,46 @@ class TestRunCertAndMtlsTest:
                 wif_bunker.modes._run_cert_and_mtls_test(config, str(tmp_path))
 
         assert "ALL PASSED" in caplog.text
+
+
+def test_run_cert_and_mtls_test_certauth_timeout(tmp_path, caplog):
+    config = WorkloadConfig(project_number="123", pool_id="pool", provider_id="provider")
+
+    with patch("wif_bunker.modes.cert") as mock_cert:
+        mock_cert.generate_ephemeral_ca.return_value = (MagicMock(), "ca-pem")
+        mock_cert.write_cert_config.return_value = (
+            tmp_path / "cert_config.json",
+            tmp_path / "workload_cert.pem",
+            tmp_path / "trust_chain.pem",
+        )
+        mock_cert.verify_cert_retrieval.return_value = None
+
+        mock_session = MagicMock()
+        sts_resp = MagicMock()
+        sts_resp.status_code = 200
+
+        mock_requests = MagicMock()
+        mock_requests.Session.return_value = mock_session
+        requests_exceptions = __import__("requests").exceptions
+        mock_requests.exceptions = requests_exceptions
+        mock_session.get.side_effect = [
+            requests_exceptions.ConnectTimeout("Connection timed out"),
+            sts_resp,
+        ]
+
+        mock_offload = MagicMock()
+
+        with (
+            patch.dict("sys.modules", {"wif_bunker.cert": mock_cert, "requests": mock_requests}),
+            patch("google.auth.transport.requests._MutualTlsOffloadAdapter", mock_offload),
+        ):
+            from importlib import reload
+
+            import wif_bunker.modes
+
+            reload(wif_bunker.modes)
+            with caplog.at_level(logging.WARNING):
+                wif_bunker.modes._run_cert_and_mtls_test(config, str(tmp_path))
+
+        assert "certauth.idrix.fr is unreachable" in caplog.text
+        assert "ALL PASSED" in caplog.text
