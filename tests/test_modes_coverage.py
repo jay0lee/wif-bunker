@@ -768,7 +768,7 @@ class TestRunCertAndMtlsTest:
             import wif_bunker.modes
 
             reload(wif_bunker.modes)
-            with caplog.at_level(logging.WARNING):
+            with caplog.at_level(logging.INFO):
                 wif_bunker.modes._run_cert_and_mtls_test(config, str(tmp_path))
 
         assert "certauth.idrix.fr is unreachable" in caplog.text
