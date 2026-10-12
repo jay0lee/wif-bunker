@@ -725,13 +725,19 @@ class TestRunCertAndMtlsTest:
 
         assert "ALL PASSED" in caplog.text
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="reload triggers real OS check")
+    @patch("wif_bunker.modes.write_secure_file")
+    @patch("wif_bunker.keystore.generate_os_keystore_cert")
+    def test_certauth_timeout_fallback(self, mock_gen, mock_write, tmp_path, caplog):
+        """Covers certauth timeout / connection failure fallback to STS."""
+        config = WorkloadConfig()
+        bundle = _make_cert_bundle()
+        mock_gen.return_value = bundle
 
-def test_run_cert_and_mtls_test_certauth_timeout(tmp_path, caplog):
-    config = WorkloadConfig(project_number="123", pool_id="pool", provider_id="provider")
-
-    with patch("wif_bunker.modes.cert") as mock_cert:
-        mock_cert.generate_ephemeral_ca.return_value = (MagicMock(), "ca-pem")
-        mock_cert.write_cert_config.return_value = (
+        mock_cert = MagicMock()
+        mock_cert._find_hardmtls_library.return_value = "/fake/hardmtls.so"
+        mock_cert.build_certificate_config.return_value = (
+            {},
             tmp_path / "cert_config.json",
             tmp_path / "workload_cert.pem",
             tmp_path / "trust_chain.pem",
