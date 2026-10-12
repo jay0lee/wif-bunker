@@ -1728,10 +1728,9 @@ mod tests {
                     eprintln!("  ERR: lib={lib_s} reason={rsn_s} code={err:#x}");
                 }
                 panic!("EVP_SIGNATURE_fetch('ECDSA', provider=hardmtls) returned NULL!");
-            } else {
-                eprintln!("EVP_SIGNATURE_fetch('ECDSA', provider=hardmtls) = {sig:?} ✓");
-                openssl_sys::EVP_SIGNATURE_free(sig);
             }
+            eprintln!("EVP_SIGNATURE_fetch('ECDSA', provider=hardmtls) = {sig:?} ✓");
+            openssl_sys::EVP_SIGNATURE_free(sig);
         }
     }
 }

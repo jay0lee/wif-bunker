@@ -377,6 +377,9 @@ def _run_status() -> None:
             exc,
         )
         logger.error("Re-run with --debug for detailed hardmTLS and TLS diagnostics.")
+    except Exception as exc:
+        logger.error("ADC:       %s %s", SYM_CROSS, exc)
+        logger.error("Re-run with --debug for detailed hardmTLS and TLS diagnostics.")
 
 
 def _run_supported_algorithms(

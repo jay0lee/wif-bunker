@@ -246,7 +246,11 @@ def test_cleanup_existing_token_error_open(mock_pkcs11_lib):
 
 
 def test_ensure_token_via_tpm2_ptool():
-    with patch("shutil.which", return_value="/bin/tpm2_ptool"), patch("subprocess.run") as m_run:
+    with (
+        patch("shutil.which", return_value="/bin/tpm2_ptool"),
+        patch("os.path.isfile", return_value=True),
+        patch("subprocess.run") as m_run,
+    ):
         m_run.side_effect = [
             subprocess.CompletedProcess(args=[], returncode=0, stdout="bunker-wif", stderr=""),  # list-token-slots
             subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),  # rmtoken
@@ -257,12 +261,27 @@ def test_ensure_token_via_tpm2_ptool():
 
 
 def test_ensure_token_via_tpm2_ptool_addtoken_fail():
-    with patch("shutil.which", return_value="/bin/tpm2_ptool"), patch("subprocess.run") as m_run:
+    with (
+        patch("shutil.which", return_value="/bin/tpm2_ptool"),
+        patch("os.path.isfile", return_value=True),
+        patch("subprocess.run") as m_run,
+    ):
         m_run.side_effect = [
             subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),  # list-token-slots
             subprocess.CalledProcessError(returncode=1, cmd=[], stderr="error"),  # addtoken
         ]
         with pytest.raises(RuntimeError, match="Failed to create PKCS#11 token"):
+            _ensure_token_via_tpm2_ptool("pin", "/store", "/lib")
+
+
+def test_ensure_token_via_tpm2_ptool_store_not_initialized():
+    with (
+        patch("shutil.which", return_value="/bin/tpm2_ptool"),
+        patch("os.path.isfile", return_value=False),
+        patch("subprocess.run") as m_run,
+    ):
+        m_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        with pytest.raises(RuntimeError, match="TPM PKCS#11 store not initialized"):
             _ensure_token_via_tpm2_ptool("pin", "/store", "/lib")
 
 

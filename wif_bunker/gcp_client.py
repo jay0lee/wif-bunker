@@ -98,7 +98,7 @@ class GCPClient:
                         params={"access_token": self._credentials.token},
                     ).json()
                     identity = info.get("email", "unknown")
-                except requests.exceptions.RequestException:
+                except Exception:
                     logger.debug("Failed to get email from ADC token", exc_info=True)
                     identity = "unknown"
             logger.info("Authenticated via Application Default Credentials as: %s", identity)

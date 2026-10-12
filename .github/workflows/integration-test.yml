@@ -803,7 +803,7 @@ jobs:
 
       # ── Build hardmTLS native library (source testing only — built binary has it bundled) ──
       - name: "Install Rust toolchain"
-        if: ${{ !inputs.use_built_binary }}
+        if: ${{ !inputs.use_built_binary && !matrix.self_hosted }}
         uses: dtolnay/rust-toolchain@stable
 
       - name: "Windows: Configure MSVC for hardmTLS"
