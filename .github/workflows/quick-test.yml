@@ -148,8 +148,13 @@ jobs:
         shell: bash
         run: |
           "${PYTHON}" -m venv .venv
-          source .venv/bin/activate || . .venv/Scripts/activate 2>/dev/null
-          echo "$VIRTUAL_ENV/bin" >> "$GITHUB_PATH"
+          if [ -d ".venv/Scripts" ]; then
+            source .venv/Scripts/activate
+            echo "$PWD/.venv/Scripts" >> "$GITHUB_PATH"
+          else
+            source .venv/bin/activate
+            echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          fi
           pip install --upgrade pip
           pip install .
 

@@ -167,12 +167,17 @@ jobs:
           pwd
           ls -alRF
           mv packaging/wif-bunker.spec . 
-          pyinstaller wif-bunker.spec
+          "${PYTHON}" -m PyInstaller wif-bunker.spec
 
       - name: Smoke test
         run: |
-          dist/wif-bunker/wif-bunker --version
-          dist/wif-bunker/wif-bunker --help
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            dist/wif-bunker/wif-bunker.exe --version
+            dist/wif-bunker/wif-bunker.exe --help
+          else
+            dist/wif-bunker/wif-bunker --version
+            dist/wif-bunker/wif-bunker --help
+          fi
 
 
       # ══════════════════════════════════════════════════════════════════════
