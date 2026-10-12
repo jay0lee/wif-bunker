@@ -1,7 +1,7 @@
 import os
 import subprocess
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -328,6 +328,20 @@ def test_extract_public_key_pem_ec_raw():
     mock_pub.__getitem__.side_effect = lambda k: real_point if k == Attribute.EC_POINT else None
     pem = _extract_public_key_pem(mock_pub)
     assert "BEGIN PUBLIC KEY" in pem
+
+
+def test_extract_public_key_pem_ec_raw_byte2_is_04():
+    mock_pub = MagicMock()
+    mock_pub.key_type = KeyType.EC
+    fake_point = bytes([0x04, 0x12, 0x04]) + b"\x00" * 62
+    mock_pub.__getitem__.side_effect = lambda k: fake_point if k == Attribute.EC_POINT else None
+    with patch("wif_bunker.keystore.linux.ec.EllipticCurvePublicKey.from_encoded_point") as m_from_point:
+        m_mock_key = MagicMock()
+        m_mock_key.public_bytes.return_value = b"-----BEGIN PUBLIC KEY-----\nfake\n-----END PUBLIC KEY-----\n"
+        m_from_point.return_value = m_mock_key
+        pem = _extract_public_key_pem(mock_pub)
+        assert "BEGIN PUBLIC KEY" in pem
+        m_from_point.assert_called_once_with(ANY, fake_point)
 
 
 def test_extract_public_key_pem_ec_invalid():

@@ -491,7 +491,11 @@ def _extract_public_key_pem(pub_key) -> str:
         else:
             raw = bytes(ec_point)
 
-        if raw[0] == 0x04 and len(raw) > 2 and raw[2] == 0x04:
+        if len(raw) in (67, 99) and raw[0] == 0x04 and raw[1] == len(raw) - 2 and raw[2] == 0x04:
+            raw_point = raw[2:]
+        elif len(raw) in (65, 97) and raw[0] == 0x04:
+            raw_point = raw
+        elif raw[0] == 0x04 and len(raw) > 2 and raw[1] == len(raw) - 2 and raw[2] == 0x04:
             raw_point = raw[2:]
         else:
             raw_point = raw
