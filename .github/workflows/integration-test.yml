@@ -806,6 +806,11 @@ jobs:
         if: ${{ !inputs.use_built_binary && !matrix.self_hosted }}
         uses: dtolnay/rust-toolchain@stable
 
+      - name: "Self-hosted: Add Cargo to PATH"
+        if: ${{ !inputs.use_built_binary && matrix.self_hosted }}
+        shell: bash
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
       - name: "Windows: Configure MSVC for hardmTLS"
         if: ${{ !inputs.use_built_binary && runner.os == 'Windows' }}
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
