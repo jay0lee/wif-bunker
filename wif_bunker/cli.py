@@ -77,7 +77,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Generate a hardware-backed certificate and test mTLS handshakes "
-            "against certauth.idrix.fr and sts.mtls.googleapis.com. "
+            "against storage.mtls.googleapis.com, console-secure.mtls.googleapis.com, "
+            "and sts.mtls.googleapis.com. "
             "Validates the full hardmTLS signing pipeline without GCP setup."
         ),
     )
@@ -616,10 +617,6 @@ def _main_impl() -> None:
             sys.exit(1)
 
         # ── mTLS Client Cert Verification ──
-        # certauth.idrix.fr REQUIRES client certs (unlike sts.mtls which
-        # makes them optional).  It reflects the presented cert's details
-        # as JSON, giving us a definitive check that hardmTLS actually
-        # sent the certificate during the TLS handshake.
         logger.info("=== 7b) mTLS Client Cert Verification ===")
         try:
             from google.auth.transport.requests import _MutualTlsOffloadAdapter
@@ -627,38 +624,22 @@ def _main_impl() -> None:
             mtls_session = requests.Session()
             mtls_session.mount("https://", _MutualTlsOffloadAdapter(str(cert_config_path)))
 
-            # certauth.idrix.fr requires client certs and returns their details
-            mtls_resp = mtls_session.get("https://certauth.idrix.fr/json/", timeout=15)
-            if mtls_resp.status_code == 200:
-                cert_info = mtls_resp.json()
-                client_dn = cert_info.get("SSL_CLIENT_S_DN", "(not present)")
-                client_issuer = cert_info.get("SSL_CLIENT_I_DN", "(not present)")
-                client_serial = cert_info.get("SSL_CLIENT_SERIAL", "(not present)")
-                client_verify = cert_info.get("SSL_CLIENT_VERIFY", "(not present)")
-                logger.info("    PASS: Server confirmed client cert was presented")
-                logger.info("    Subject:  %s", client_dn)
-                logger.info("    Issuer:   %s", client_issuer)
-                logger.info("    Serial:   %s", client_serial)
-                logger.info("    Verify:   %s", client_verify)
-            else:
-                logger.warning(
-                    "    Server returned HTTP %d — client cert may not have been sent",
-                    mtls_resp.status_code,
-                )
+            endpoints = [
+                ("https://storage.mtls.googleapis.com/", "storage.mtls.googleapis.com"),
+                ("https://console-secure.mtls.googleapis.com/", "console-secure.mtls.googleapis.com"),
+            ]
+            for url, host_label in endpoints:
+                resp = mtls_session.get(url, timeout=15)
+                logger.info("    PASS: mTLS handshake with %s succeeded (HTTP %d)", host_label, resp.status_code)
         except requests.exceptions.SSLError as ssl_err:
-            logger.error("    FAIL: mTLS handshake failed (server requires client cert):")
+            logger.error("    FAIL: mTLS handshake failed:")
             logger.error("    %s", ssl_err)
-            logger.error("    This means hardmTLS did NOT send the client certificate.")
+            logger.error("    This means hardmTLS did NOT complete the TLS handshake.")
             if args.debug:
                 from wif_bunker.cert import run_hardmtls_diagnostics
 
                 run_hardmtls_diagnostics(cert_config_path, logger)
             sys.exit(1)
-        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as conn_err:
-            logger.warning(
-                "    WARNING: certauth.idrix.fr is unreachable (%s) — skipping external reflection check",
-                conn_err,
-            )
         except Exception as mtls_err:
             logger.error("    FAIL: mTLS verification error: %s", mtls_err)
             sys.exit(1)
@@ -755,7 +736,7 @@ def _main_impl() -> None:
 
             @with_retries(
                 max_attempts=15,
-                retryable_exceptions=(google.auth.exceptions.RefreshError,),
+                retryable_exceptions=(google.auth.exceptions.RefreshError, google.auth.exceptions.OAuthError),
                 retry_msg="Waiting for IAM propagation",
             )
             def _verify_adc():

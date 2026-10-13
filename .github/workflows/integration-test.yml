@@ -918,8 +918,8 @@ jobs:
       # This tests the full hardware-backed signing → mTLS pipeline WITHOUT
       # needing GCP project/WIF infrastructure, so it's immune to IAM
       # propagation delays.  It provisions a cert and tests mTLS handshakes
-      # against certauth.idrix.fr (requires client cert) and
-      # sts.mtls.googleapis.com (recommends client cert).
+      # against storage.mtls.googleapis.com, console-secure.mtls.googleapis.com,
+      # and sts.mtls.googleapis.com.
       - name: "Test --cert-and-mtls-test (mTLS smoke test)"
         shell: bash
         run: |

@@ -160,7 +160,7 @@ Generate a certificate and validate the full mTLS signing pipeline against exter
 wif-bunker --cert-and-mtls-test --output-dir /tmp/test
 ```
 
-This tests TLS handshakes against `certauth.idrix.fr` (requires client certs) and `sts.mtls.googleapis.com` (accepts client certs), verifying your hardware key can sign TLS connections end-to-end.
+This tests TLS handshakes against `storage.mtls.googleapis.com`, `console-secure.mtls.googleapis.com`, and `sts.mtls.googleapis.com`, verifying your hardware key can sign TLS connections end-to-end.
 
 ### Status check
 

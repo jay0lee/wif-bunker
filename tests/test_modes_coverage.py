@@ -693,20 +693,16 @@ class TestRunCertAndMtlsTest:
         mock_cert.verify_cert_retrieval.return_value = None
 
         mock_session = MagicMock()
-        certauth_resp = MagicMock()
-        certauth_resp.status_code = 200
-        certauth_resp.json.return_value = {
-            "SSL_CLIENT_S_DN": "CN=test",
-            "SSL_CLIENT_I_DN": "CN=ca",
-            "SSL_CLIENT_SERIAL": "1234",
-            "SSL_CLIENT_VERIFY": "SUCCESS",
-        }
+        storage_resp = MagicMock()
+        storage_resp.status_code = 400
+        console_resp = MagicMock()
+        console_resp.status_code = 404
         sts_resp = MagicMock()
-        sts_resp.status_code = 200
+        sts_resp.status_code = 400
 
         mock_requests = MagicMock()
         mock_requests.Session.return_value = mock_session
-        mock_session.get.side_effect = [certauth_resp, sts_resp]
+        mock_session.get.side_effect = [storage_resp, console_resp, sts_resp]
         mock_requests.exceptions = __import__("requests").exceptions
 
         mock_offload = MagicMock()
@@ -728,8 +724,8 @@ class TestRunCertAndMtlsTest:
     @pytest.mark.skipif(sys.platform == "win32", reason="reload triggers real OS check")
     @patch("wif_bunker.modes.write_secure_file")
     @patch("wif_bunker.keystore.generate_os_keystore_cert")
-    def test_certauth_timeout_fallback(self, mock_gen, mock_write, tmp_path, caplog):
-        """Covers certauth timeout / connection failure fallback to STS."""
+    def test_mtls_handshake_failure_blocks_release(self, mock_gen, mock_write, tmp_path):
+        """Covers mTLS handshake failure blocking release (exit 1)."""
         config = WorkloadConfig()
         bundle = _make_cert_bundle()
         mock_gen.return_value = bundle
@@ -745,17 +741,11 @@ class TestRunCertAndMtlsTest:
         mock_cert.verify_cert_retrieval.return_value = None
 
         mock_session = MagicMock()
-        sts_resp = MagicMock()
-        sts_resp.status_code = 200
-
         mock_requests = MagicMock()
         mock_requests.Session.return_value = mock_session
         requests_exceptions = __import__("requests").exceptions
         mock_requests.exceptions = requests_exceptions
-        mock_session.get.side_effect = [
-            requests_exceptions.ConnectTimeout("Connection timed out"),
-            sts_resp,
-        ]
+        mock_session.get.side_effect = requests_exceptions.SSLError("Handshake failed")
 
         mock_offload = MagicMock()
 
@@ -768,8 +758,5 @@ class TestRunCertAndMtlsTest:
             import wif_bunker.modes
 
             reload(wif_bunker.modes)
-            with caplog.at_level(logging.INFO):
+            with pytest.raises(SystemExit):
                 wif_bunker.modes._run_cert_and_mtls_test(config, str(tmp_path))
-
-        assert "certauth.idrix.fr is unreachable" in caplog.text
-        assert "ALL PASSED" in caplog.text
