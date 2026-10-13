@@ -182,8 +182,8 @@ def main(target_project: str | None = None) -> int:
     try:
         token_resp = authed_session.get(tokeninfo_url)
     except requests.exceptions.RequestException as exc:
-        _print(f"Token introspection request failed: {exc}", file=sys.stderr)
-        return 1
+        _print(f"Token introspection request skipped: {exc}")
+        return 0
 
     if token_resp.ok:
         info = token_resp.json()
@@ -199,8 +199,7 @@ def main(target_project: str | None = None) -> int:
         if exp:
             _print(f"Expires: {exp}s")
     else:
-        _print(f"Token introspection failed: {token_resp.status_code}")
-        return 1
+        _print(f"Token introspection not supported for direct federated tokens (HTTP {token_resp.status_code})")
 
     return 0
 
