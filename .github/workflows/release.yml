@@ -185,62 +185,17 @@ jobs:
       # Skipped when TOTP_SECRET is not set.
       # ══════════════════════════════════════════════════════════════════════
 
-      - name: "Windows: Install NPM deps for signing"
+      - name: Setup Certum Code Signing
         if: runner.os == 'Windows' && env.TOTP_SECRET != ''
+        id: certum
         env:
           TOTP_SECRET: ${{ secrets.TOTP_SECRET }}
-        run: npm install totp-generator
-
-      - name: "Windows: Install Certum SimplySign Desktop"
-        if: runner.os == 'Windows' && env.TOTP_SECRET != ''
-        shell: pwsh
-        env:
-          TOTP_SECRET: ${{ secrets.TOTP_SECRET }}
-        run: |
-          $url = "https://files.certum.eu/software/SimplySignDesktop/Windows/9.4.4.92/SimplySignDesktop-9.4.4.92-64-bit-en.msi"
-          $file = "SimplySignDesktop.msi"
-          Invoke-WebRequest $url -OutFile $file
-          $log = "install.log"
-          $procMain = Start-Process "msiexec" "/i `"$file`" /qn /l*! `"$log`"" -NoNewWindow -PassThru
-          $procLog = Start-Process "powershell" "Get-Content -Path `"$log`" -Wait" -NoNewWindow -PassThru
-          $procMain.WaitForExit()
-          $procLog.Kill()
-
-      - name: "Windows: Launch SimplySign Desktop"
-        if: runner.os == 'Windows' && env.TOTP_SECRET != ''
-        shell: pwsh
-        env:
-          TOTP_SECRET: ${{ secrets.TOTP_SECRET }}
-        run: |
-          Write-Host "Running SSD..."
-          & "C:\Program Files\Certum\SimplySign Desktop\SimplySignDesktop.exe"
-          Start-Sleep -Seconds 10
-          & "C:\Program Files\Certum\SimplySign Desktop\SimplySignDesktop.exe"
-
-      - name: "Windows: Login to Certum"
-        if: runner.os == 'Windows' && env.TOTP_SECRET != ''
-        shell: pwsh
-        env:
-          TOTP_SECRET: ${{ secrets.TOTP_SECRET }}
-        run: |
-          Write-Host "Running SimplySignDesktop login..."
-          node tools/ssd.mjs --log-level warn
-          Get-ChildItem -Path $env:GITHUB_WORKSPACE
-          Write-Host "Sleeping during login..."
-          Start-Sleep 10
-
-      - name: "Windows: Upload signing debug screenshots"
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: runner.os == 'Windows' && env.TOTP_SECRET != ''
-        env:
-          TOTP_SECRET: ${{ secrets.TOTP_SECRET }}
+        uses: jay0lee/certum-cloud-code-sign@v1
         with:
-          archive: true
-          name: signing-screenshots-${{ matrix.os }}
-          if-no-files-found: ignore
-          path: |
-            ${{ github.workspace }}/*.png
-            ${{ github.workspace }}/*.log
+          username: ${{ secrets.CERTUM_USERNAME || 'jay0lee@gmail.com' }}
+          totp_secret: ${{ secrets.TOTP_SECRET }}
+          cert_sha1: ${{ env.WINDOWS_CODESIGN_CERT_HASH }}
+          debug: 'true'
 
       - name: "Windows: Sign wif-bunker.exe"
         if: runner.os == 'Windows' && env.TOTP_SECRET != ''
@@ -249,14 +204,14 @@ jobs:
           TOTP_SECRET: ${{ secrets.TOTP_SECRET }}
         run: |
           $exe = "dist\wif-bunker\wif-bunker.exe"
-          Write-Host "Signing $exe..."
-          # Always use x64 signtool — ARM64 version can't see Certum certs
-          # since SimplySignDesktop is x64-only.
-          Start-Process -Wait -NoNewWindow -ErrorAction Continue `
-            -FilePath 'C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe' `
-            -ArgumentList "sign", "/sha1", "$env:WINDOWS_CODESIGN_CERT_HASH", "/tr", "http://time.certum.pl", "/td", "SHA256", "/fd", "SHA256", "/v", "$exe"
+          $thumbprint = if ($env:CERTUM_CERT_THUMBPRINT) { $env:CERTUM_CERT_THUMBPRINT } else { $env:WINDOWS_CODESIGN_CERT_HASH }
+          $signtool = if ($env:CERTUM_SIGNTOOL_PATH) { $env:CERTUM_SIGNTOOL_PATH } else { "signtool" }
+          Write-Host "Signing $exe with thumbprint $thumbprint using $signtool..."
+          & $signtool sign /sha1 "$thumbprint" /tr http://time.certum.pl /td SHA256 /fd SHA256 /v "$exe"
+          if ($LASTEXITCODE -ne 0) { throw "signtool sign failed with exit code $LASTEXITCODE" }
           Write-Host "Verifying signature..."
-          & 'C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe' verify /pa /v "$exe"
+          & $signtool verify /pa /v "$exe"
+          if ($LASTEXITCODE -ne 0) { throw "signtool verify failed with exit code $LASTEXITCODE" }
 
       # ══════════════════════════════════════════════════════════════════════
       # Package
@@ -302,15 +257,19 @@ jobs:
           echo "=== ISS file ==="
           ls -la 'packaging\windows\wif-bunker.iss' || ls -la packaging/windows/wif-bunker.iss
           echo "=== WINDOWS_CODESIGN_CERT_HASH ==="
-          echo "$WINDOWS_CODESIGN_CERT_HASH"
+          echo "${CERTUM_CERT_THUMBPRINT:-$WINDOWS_CODESIGN_CERT_HASH}"
           echo "=== VERSION ==="
           echo "$VERSION"
           echo "=== iscc location ==="
           which iscc || echo "iscc not on PATH, using full path"
+          echo "=== signtool location ==="
+          echo "${CERTUM_SIGNTOOL_PATH:-signtool}"
           echo "=== Command that will run ==="
-          signtool="C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe"
+          signtool="${CERTUM_SIGNTOOL_PATH:-signtool}"
+          cert_hash="${CERTUM_CERT_THUMBPRINT:-$WINDOWS_CODESIGN_CERT_HASH}"
           printf 'Arg: %q\n' \
-            /S"wifbunkersigntool=$signtool sign /sha1 $WINDOWS_CODESIGN_CERT_HASH /tr http://time.certum.pl /td SHA256 /fd SHA256 /v \$f" \
+            /DSignToolName=wifbunkersigntool \
+            /S"wifbunkersigntool=$signtool sign /sha1 $cert_hash /tr http://time.certum.pl /td SHA256 /fd SHA256 /v \$f" \
             /DVersion="$VERSION" \
             'packaging\windows\wif-bunker.iss'
 
@@ -322,11 +281,32 @@ jobs:
           MSYS_NO_PATHCONV: "1"
           MSYS2_ARG_CONV_EXCL: "*"
         run: |
-          signtool="C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe"
+          signtool="${CERTUM_SIGNTOOL_PATH:-signtool}"
+          cert_hash="${CERTUM_CERT_THUMBPRINT:-$WINDOWS_CODESIGN_CERT_HASH}"
           iscc \
-            /S"wifbunkersigntool=$signtool sign /sha1 $WINDOWS_CODESIGN_CERT_HASH /tr http://time.certum.pl /td SHA256 /fd SHA256 /v \$f" \
+            /DSignToolName=wifbunkersigntool \
+            /S"wifbunkersigntool=$signtool sign /sha1 $cert_hash /tr http://time.certum.pl /td SHA256 /fd SHA256 /v \$f" \
             /DVersion="$VERSION" \
             'packaging\windows\wif-bunker.iss'
+
+      - name: "Windows: Verify InnoSetup installer signature"
+        if: runner.os == 'Windows' && env.TOTP_SECRET != ''
+        shell: pwsh
+        env:
+          TOTP_SECRET: ${{ secrets.TOTP_SECRET }}
+        run: |
+          $signtool = if ($env:CERTUM_SIGNTOOL_PATH) { $env:CERTUM_SIGNTOOL_PATH } else { "signtool" }
+          $thumbprint = if ($env:CERTUM_CERT_THUMBPRINT) { $env:CERTUM_CERT_THUMBPRINT } else { $env:WINDOWS_CODESIGN_CERT_HASH }
+          $installer = Get-Item packaging\windows\Output\wif-bunker-*-setup.exe
+          Write-Host "Verifying signature on installer: $($installer.FullName)..."
+          & $signtool verify /pa /v "$($installer.FullName)" 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Installer was not signed during compilation. Signing now..."
+            & $signtool sign /sha1 "$thumbprint" /tr http://time.certum.pl /td SHA256 /fd SHA256 /v "$($installer.FullName)"
+            if ($LASTEXITCODE -ne 0) { throw "signtool sign failed on installer with exit code $LASTEXITCODE" }
+            & $signtool verify /pa /v "$($installer.FullName)"
+            if ($LASTEXITCODE -ne 0) { throw "signtool verify failed on installer with exit code $LASTEXITCODE" }
+          }
 
       - name: Upload artifact (Linux/macOS)
         if: runner.os != 'Windows'
@@ -378,6 +358,16 @@ jobs:
         with:
           name: sbom-${{ matrix.os }}
           path: sbom-${{ matrix.os }}.spdx.json
+
+      # ══════════════════════════════════════════════════════════════════════
+      # Teardown Certum SimplySign Desktop session (Windows)
+      # ══════════════════════════════════════════════════════════════════════
+
+      - name: Teardown SimplySign Desktop Session
+        if: always() && runner.os == 'Windows' && env.TOTP_SECRET != ''
+        env:
+          TOTP_SECRET: ${{ secrets.TOTP_SECRET }}
+        uses: jay0lee/certum-cloud-code-sign/teardown@v1
 
   # ── Job 2: Integration test with built binary ──
   integration-test:

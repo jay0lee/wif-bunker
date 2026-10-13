@@ -20,6 +20,10 @@ ArchitecturesInstallIn64BitMode=x64
 PrivilegesRequired=lowest
 ChangesEnvironment=yes
 DirExistsWarning=no
+#ifdef SignToolName
+SignTool={#SignToolName}
+SignedUninstaller=yes
+#endif
 
 [Files]
 Source: "..\..\dist\wif-bunker\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
