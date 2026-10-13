@@ -351,10 +351,16 @@ class GCPClient:
                 status = exc.response.status_code if exc.response is not None else None
                 retryable = status in self._RETRYABLE_STATUS_CODES
                 if not retryable and retry_on_propagation:
-                    retryable = status in self._PROPAGATION_STATUS_CODES
+                    resp_text = getattr(exc.response, "text", "") or ""
+                    is_sa_propagation = (
+                        status == 400
+                        and isinstance(resp_text, str)
+                        and "does not exist" in resp_text.lower()
+                    )
+                    retryable = status in self._PROPAGATION_STATUS_CODES or is_sa_propagation
                 if retryable and time.monotonic() < deadline:
                     sleep_time = min(2**attempt, MAX_BACKOFF_SECONDS) + random.uniform(0, 1)
-                    label = "propagation" if status in self._PROPAGATION_STATUS_CODES else "transient"
+                    label = "propagation" if (status in self._PROPAGATION_STATUS_CODES or status == 400) else "transient"
                     logger.info(
                         "    Waiting for %s (HTTP %s), retrying in %.1fs... [%s %s]",
                         label,

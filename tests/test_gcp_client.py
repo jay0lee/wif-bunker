@@ -354,6 +354,28 @@ def test_retry_does_not_retry_400():
     client.session.close()
 
 
+def test_retry_retries_400_when_sa_not_found_and_propagation_enabled():
+    """400 with 'does not exist' is retried when retry_on_propagation=True."""
+    client = _make_client_with_token()
+    resp_400 = _mock_response(400)
+    resp_400.text = "Service account sa@proj.iam.gserviceaccount.com does not exist."
+    resp_ok = _mock_response(json_data={"bindings": []})
+
+    with (
+        patch.object(client.session, "request", side_effect=[resp_400, resp_ok]),
+        patch("wif_bunker.gcp_client.time.sleep"),
+        patch("wif_bunker.gcp_client.random.uniform", return_value=0.1),
+    ):
+        result = client._api_call_with_retry(
+            "POST",
+            "https://example.com/v1/projects/p:setIamPolicy",
+            retry_on_propagation=True,
+        )
+
+    assert result == {"bindings": []}
+    client.session.close()
+
+
 # ---------------------------------------------------------------------------
 # ensure_project
 # ---------------------------------------------------------------------------

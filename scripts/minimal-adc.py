@@ -51,15 +51,16 @@ def _print(*args, **kwargs):
 
 
 def _retry(func, *, description):
-    """Call *func* with exponential backoff on transient google-auth errors.
+    """Call *func* with exponential backoff on transient google-auth and HTTP errors.
 
     Retries on:
       - RefreshError  (token refresh / IAM propagation)
+      - OAuthError    (STS token broker eventual consistency)
+      - HTTPError     (API permission propagation / transient 403/404/5xx)
       - TransportError (network / mTLS)
       - ConnectionError (TCP-level)
 
     Fails immediately on:
-      - OAuthError (invalid pool/provider — permanent)
       - DefaultCredentialsError (no creds configured — permanent)
     """
     backoff = INITIAL_BACKOFF
@@ -67,28 +68,32 @@ def _retry(func, *, description):
         try:
             return func()
         except google.auth.exceptions.OAuthError as exc:
-            # Permanent — bad audience / deleted pool
-            _print(
-                f"❌ {description}: WIF token exchange failed — the pool or "
-                f"provider may not exist, may be disabled, or may have been "
-                f"deleted.\n   {exc}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        except google.auth.exceptions.RefreshError as exc:
-            # Fail fast on permanent errors (e.g. 403 permission denied)
-            if not getattr(exc, "retryable", True) or "PERMISSION_DENIED" in str(exc):
+            if attempt == MAX_RETRIES:
                 _print(
-                    f"❌ {description}: Credential refresh failed (permanent): {exc}",
+                    f"❌ {description}: WIF token exchange failed after {MAX_RETRIES} attempts — the pool or "
+                    f"provider may not exist, may be disabled, or may have been "
+                    f"deleted.\n   {exc}",
                     file=sys.stderr,
                 )
                 sys.exit(1)
+            _print(f"  ⏳ {description}: Token exchange failed (attempt {attempt}/{MAX_RETRIES}), retrying in {backoff}s...")
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 60)
+        except google.auth.exceptions.RefreshError as exc:
             if attempt == MAX_RETRIES:
                 _print(
                     f"❌ {description}: Credential refresh failed after {MAX_RETRIES} attempts: {exc}", file=sys.stderr
                 )
                 sys.exit(1)
             _print(f"  ⏳ {description}: Refresh failed (attempt {attempt}/{MAX_RETRIES}), retrying in {backoff}s...")
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 60)
+        except requests.exceptions.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else "unknown"
+            if attempt == MAX_RETRIES:
+                _print(f"❌ {description}: HTTP error ({status}) after {MAX_RETRIES} attempts: {exc}", file=sys.stderr)
+                sys.exit(1)
+            _print(f"  ⏳ {description}: HTTP error ({status}) (attempt {attempt}/{MAX_RETRIES}), retrying in {backoff}s...")
             time.sleep(backoff)
             backoff = min(backoff * 2, 60)
         except google.auth.exceptions.TransportError as exc:
@@ -109,10 +114,10 @@ def _retry(func, *, description):
     sys.exit(1)
 
 
-def main() -> int:
+def main(target_project: str | None = None) -> int:
     # Load ADC — not retryable (configuration error)
     try:
-        creds, project = google.auth.default(
+        creds, adc_project = google.auth.default(
             scopes=[
                 "https://www.googleapis.com/auth/cloud-platform",
                 "email",
@@ -127,6 +132,7 @@ def main() -> int:
         )
         return 1
 
+    project = target_project or adc_project
     authed_session = google.auth.transport.requests.AuthorizedSession(creds)
 
     # Print what we know about the credentials
@@ -142,12 +148,15 @@ def main() -> int:
     if project:
         _print("\n--- API Verification ---")
 
-        resp = _retry(
-            lambda: authed_session.get(
+        def _verify_project():
+            resp = authed_session.get(
                 f"https://cloudresourcemanager.googleapis.com/v1/projects/{project}",
-            ),
-            description="API verification",
-        )
+            )
+            if resp.status_code in (403, 404, 429, 500, 502, 503):
+                resp.raise_for_status()
+            return resp
+
+        resp = _retry(_verify_project, description="API verification")
 
         if resp.ok:
             proj_info = resp.json()
@@ -203,6 +212,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Disable token redaction in output",
     )
+    parser.add_argument(
+        "--project",
+        default=None,
+        help="Target GCP project for API verification (overrides ADC default)",
+    )
     args = parser.parse_args()
     _REDACT = not args.no_redact
-    sys.exit(main())
+    sys.exit(main(target_project=args.project))

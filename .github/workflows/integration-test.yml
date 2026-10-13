@@ -1203,10 +1203,12 @@ jobs:
           export GOOGLE_APPLICATION_CREDENTIALS="$PWD/adc.json"
           export GOOGLE_API_USE_CLIENT_CERTIFICATE=true
           export GOOGLE_API_CERTIFICATE_CONFIG="$PWD/certificate_config.json"
+          export CLOUDSDK_PROJECT="${{ steps.config.outputs.project_id }}"
+          export GOOGLE_CLOUD_PROJECT="${{ steps.config.outputs.project_id }}"
           # Clear GHA's OIDC credential file to prove we're using bunker creds
           unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE 2>/dev/null || true
 
-          "${PYTHON}" scripts/minimal-adc.py | tee "$RUNNER_TEMP/adc_output.txt"
+          "${PYTHON}" scripts/minimal-adc.py --project="${{ steps.config.outputs.project_id }}" | tee "$RUNNER_TEMP/adc_output.txt"
 
           # Validate we're NOT accidentally using the GHA CI service account
           echo ""
@@ -1247,9 +1249,11 @@ jobs:
           export GOOGLE_APPLICATION_CREDENTIALS="$PWD/adc.json"
           export GOOGLE_API_USE_CLIENT_CERTIFICATE=true
           export GOOGLE_API_CERTIFICATE_CONFIG="$PWD/certificate_config.json"
+          export CLOUDSDK_PROJECT="${{ steps.config.outputs.project_id }}"
+          export GOOGLE_CLOUD_PROJECT="${{ steps.config.outputs.project_id }}"
           unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE 2>/dev/null || true
 
-          "${PYTHON}" scripts/minimal-adc.py | tee "$RUNNER_TEMP/adc_output_nosa.txt"
+          "${PYTHON}" scripts/minimal-adc.py --project="${{ steps.config.outputs.project_id }}" | tee "$RUNNER_TEMP/adc_output_nosa.txt"
 
           # Validate we're NOT accidentally using the GHA CI service account
           echo ""
