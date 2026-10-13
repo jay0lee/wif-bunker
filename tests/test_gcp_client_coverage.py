@@ -854,6 +854,55 @@ class TestApplyIamBindings:
         assert member.startswith("serviceAccount:")
         client.session.close()
 
+    def test_prunes_deleted_service_account_members(self):
+        """Stale deleted member entries for the service account are pruned from policies."""
+        client = _make_client_with_token()
+        config = self._make_mock_config()
+
+        call_log = []
+        sa_email = "sa@test-proj.iam.gserviceaccount.com"
+
+        def mock_api_call_with_retry(method, url, json_payload=None, *, retry_on_propagation=False, timeout=900):
+            call_log.append((method, url, json_payload))
+            if "getIamPolicy" in url:
+                return {
+                    "bindings": [
+                        {
+                            "role": "roles/browser",
+                            "members": [
+                                f"deleted:serviceAccount:{sa_email}?uid=12345",
+                                "user:admin@example.com",
+                            ],
+                        },
+                        {
+                            "role": "roles/viewer",
+                            "members": [f"deleted:serviceAccount:{sa_email}?uid=12345"],
+                        },
+                    ]
+                }
+            return {}
+
+        with patch.object(client, "_api_call_with_retry", side_effect=mock_api_call_with_retry):
+            client.apply_iam_bindings(
+                config=config,
+                project_number="123456",
+                workload_cn="bunker-workload-test",
+                pool_id="bunker-wif-pool",
+                sa_email=sa_email,
+                use_sa=True,
+            )
+
+        # In both setIamPolicy calls, the deleted member must be removed
+        for call_idx in (1, 3):
+            set_call = call_log[call_idx]
+            policy = set_call[2]["policy"]
+            for binding in policy["bindings"]:
+                for member in binding["members"]:
+                    assert not (member.startswith("deleted:") and sa_email in member)
+
+        client.session.close()
+
+
 
 # ---------------------------------------------------------------------------
 # _wait_for_lro — error in completed operation (lines 384-387)

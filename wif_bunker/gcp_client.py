@@ -692,6 +692,12 @@ class GCPClient:
             )
             if sa_policy is None:
                 sa_policy = {}
+            for b in sa_policy.get("bindings", []):
+                b["members"] = [
+                    m for m in b.get("members", [])
+                    if not (m.startswith("deleted:") and sa_email in m)
+                ]
+            sa_policy["bindings"] = [b for b in sa_policy.get("bindings", []) if b.get("members")]
             sa_policy.setdefault("bindings", []).append(
                 {"role": "roles/iam.workloadIdentityUser", "members": [wif_principal]},
             )
@@ -707,6 +713,12 @@ class GCPClient:
             proj_policy = {}
         if use_sa and sa_email:
             proj_member = f"serviceAccount:{sa_email}"
+            for b in proj_policy.get("bindings", []):
+                b["members"] = [
+                    m for m in b.get("members", [])
+                    if not (m.startswith("deleted:") and sa_email in m)
+                ]
+            proj_policy["bindings"] = [b for b in proj_policy.get("bindings", []) if b.get("members")]
         else:
             proj_member = wif_principal
         proj_policy.setdefault("bindings", []).append(
