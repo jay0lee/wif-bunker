@@ -332,6 +332,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Optional output_file path for caching signed OIDC JWTs in executable ADC mode.",
     )
     out_grp.add_argument(
+        "--jwt-lifetime",
+        type=int,
+        default=None,
+        help=(
+            "Optional OIDC JWT validity in seconds written into executable ADC command "
+            f"(default: {DEFAULT_EXECUTABLE_JWT_LIFETIME_SECONDS})."
+        ),
+    )
+    out_grp.add_argument(
         "--skip-verify",
         action="store_true",
         help="Skip the post-setup live STS + agent ADC verification step.",
@@ -625,6 +634,7 @@ def _cmd_setup(args: argparse.Namespace, parser: argparse.ArgumentParser) -> Non
             bunker_config_path=bunker_path,
             command_path=_resolve_self_command(),
             output_file=args.executable_cache_file,
+            jwt_lifetime_seconds=args.jwt_lifetime,
         )
         write_secure_file(adc_path, json.dumps(exec_adc, indent=2) + "\n")
         logger.info("    Executable ADC config written: %s", adc_path)

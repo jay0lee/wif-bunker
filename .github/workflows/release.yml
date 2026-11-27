@@ -2,6 +2,12 @@ name: Release
 
 on:
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build and run integration tests on frozen binaries without tagging or publishing a GitHub Release'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -138,9 +144,7 @@ jobs:
 
       - name: Run PyInstaller
         run: |
-          pwd
-          ls -alRF
-          mv packaging/wif-bunker.spec . 
+          mv packaging/wif-bunker.spec .
           "${PYTHON}" -m PyInstaller wif-bunker.spec
 
       - name: Smoke test
@@ -148,9 +152,11 @@ jobs:
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
             dist/wif-bunker/wif-bunker.exe --version
             dist/wif-bunker/wif-bunker.exe --help
+            dist/wif-bunker/wif-bunker.exe versions
           else
             dist/wif-bunker/wif-bunker --version
             dist/wif-bunker/wif-bunker --help
+            dist/wif-bunker/wif-bunker versions
           fi
 
 
@@ -353,9 +359,10 @@ jobs:
     secrets:
       WIF_PROVIDER: ${{ secrets.WIF_PROVIDER }}
 
-  # ── Job 3: Tag + Release (only if tests pass) ──
+  # ── Job 3: Tag + Release (only if tests pass and not a dry run) ──
   release:
     name: Publish Release
+    if: ${{ !inputs.dry_run }}
     needs: [version, build, integration-test]
     runs-on: ubuntu-latest
 
@@ -415,6 +422,9 @@ jobs:
             SHA256SUMS.txt
           generate_release_notes: true
           body: |
+            > [!WARNING]
+            > **Beta / Pre-GA Software** — WIF Bunker v2 is under active development and not yet GA/stable. The legacy v1 X.509 mTLS engine (`hardmTLS`) has been moved to [jay0lee/hardmtls](https://github.com/jay0lee/hardmtls).
+
             ## Verify
 
             **Checksums:**

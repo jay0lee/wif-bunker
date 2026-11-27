@@ -16,7 +16,7 @@ LRO_TIMEOUT_SECONDS = 300
 
 # Default lifetimes
 DEFAULT_OIDC_JWT_LIFETIME_SECONDS = 60  # Short-lived in-RAM assertion for agent mode
-DEFAULT_EXECUTABLE_JWT_LIFETIME_SECONDS = 300  # 5 min assertion for executable mode
+DEFAULT_EXECUTABLE_JWT_LIFETIME_SECONDS = 3600  # 1-hour assertion for executable mode (1 HW sign/hr)
 DEFAULT_AGENT_REFRESH_MARGIN_SECONDS = 300  # Refresh 5 min before 1-hour expiry
 
 # Algorithms supported by GCP Workload Identity Federation OIDC static JWKS

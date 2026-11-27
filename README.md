@@ -126,7 +126,7 @@ credentials, project = google.auth.default()
 
 ### Alternative: Daemon-less Executable ADC Mode
 
-If you prefer no long-running agent process, pass `--write-executable-adc` during `setup`:
+If you prefer no long-running agent process (or work in locked-down Windows AV/EDR environments where local HTTP ports are restricted), pass `--write-executable-adc` during `setup`:
 
 ```bash
 wif-bunker setup \
@@ -143,7 +143,7 @@ export GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES=1
 export GOOGLE_APPLICATION_CREDENTIALS=/path/to/adc.json
 ```
 
-Stock Google ADC libraries will automatically invoke `wif-bunker sign-jwt` whenever the cached OIDC JWT expires.
+Stock Google ADC libraries will automatically invoke `wif-bunker sign-jwt` whenever the cached OIDC JWT expires (defaults to **1 hour**, customizable via `--jwt-lifetime`, so even daemon-less mode only signs with your hardware key once per hour).
 
 ## CLI Reference
 

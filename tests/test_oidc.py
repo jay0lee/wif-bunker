@@ -232,6 +232,7 @@ class TestAdcConfigBuilders:
             bunker_config_path=bunker_path,
             command_path="/usr/local/bin/wif-bunker",
             output_file=cache_path,
+            jwt_lifetime_seconds=1800,
         )
         assert cfg["type"] == "external_account"
         assert cfg["token_url"] == "https://sts.googleapis.com/v1/token"
@@ -239,6 +240,7 @@ class TestAdcConfigBuilders:
         assert "quota_project_id" not in cfg
         exe = cfg["credential_source"]["executable"]
         assert "sign-jwt" in exe["command"]
+        assert "--lifetime 1800" in exe["command"]
         assert exe["output_file"] == str(cache_path.resolve())
 
     def test_build_executable_adc_config_python_module_command(self, sample_bunker_config, tmp_path):

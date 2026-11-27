@@ -300,6 +300,7 @@ def build_executable_adc_config(
     bunker_config_path: Path | str,
     command_path: str,
     output_file: Path | str | None = None,
+    jwt_lifetime_seconds: int | None = None,
     timeout_millis: int = 30000,
 ) -> dict[str, Any]:
     """Build a standard ``external_account`` ADC JSON using ``credential_source.executable``.
@@ -317,6 +318,8 @@ def build_executable_adc_config(
         cmd_prefix = f'"{command_path}"'
 
     cmd = f'{cmd_prefix} sign-jwt --config "{bunker_cmd_path}"'
+    if jwt_lifetime_seconds is not None:
+        cmd += f" --lifetime {int(jwt_lifetime_seconds)}"
     if output_file is not None:
         cmd += f' --output-file "{Path(output_file).as_posix()}"'
 

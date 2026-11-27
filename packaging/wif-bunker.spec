@@ -3,11 +3,11 @@
 
 import os
 import sys
-from PyInstaller.utils.hooks import copy_metadata
+from PyInstaller.utils.hooks import collect_all, collect_submodules, copy_metadata
 
 block_cipher = None
 
-# ── Hidden imports ──
+# ── Hidden imports & collected binary/data assets ──
 # Signer backends and platform attestation modules are imported lazily.
 hiddenimports = [
     'dpop_signer_yubikey',
@@ -16,15 +16,30 @@ hiddenimports = [
     'google.auth.dpop',
     'wif_bunker.attestation.yubikey',
 ]
+binaries = []
+datas = []
+
+for pkg_mod in ('yubikit', 'ykman', 'pkcs11', 'fido2', 'OpenSSL'):
+    try:
+        hiddenimports += collect_submodules(pkg_mod)
+    except Exception:
+        pass
+
 if sys.platform == 'win32':
     hiddenimports += ['dpop_signer_windows_certstore', 'wif_bunker.attestation.windows']
 elif sys.platform == 'darwin':
     hiddenimports += ['dpop_signer_macos_secureenclave', 'wif_bunker.attestation.macos']
 elif sys.platform.startswith('linux'):
-    hiddenimports += ['dpop_signer_linux_tpm', 'tpm2_pytss', 'wif_bunker.attestation.linux']
+    hiddenimports += ['dpop_signer_linux_tpm', 'wif_bunker.attestation.linux']
+    try:
+        d_tpm, b_tpm, h_tpm = collect_all('tpm2_pytss')
+        datas += d_tpm
+        binaries += b_tpm
+        hiddenimports += h_tpm
+    except Exception:
+        hiddenimports.append('tpm2_pytss')
 
 # ── Package metadata ──
-datas = []
 for pkg in ('google-auth', 'requests', 'cryptography', 'certifi', 'urllib3', 'charset-normalizer'):
     try:
         datas += copy_metadata(pkg, recursive=True)
@@ -52,7 +67,7 @@ excludes = [
 a = Analysis(
     ['wif_bunker/cli.py'],
     pathex=[],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],

@@ -166,7 +166,7 @@ StatusMessage     : Signature verified.
 |---|---|
 | Subject | Jay Lee |
 | Issuer | Certum Code Signing 2021 CA |
-| SHA-1 Thumbprint | `3B11D9340A45CF078FF7FD984F1C3E30DA82FD05` |
+| SHA-1 Thumbprint | `F0525AB6343A5E9A5F75CF81FC56CF67E316CB28` |
 | Timestamp Authority | `http://time.certum.pl` |
 
 ### What This Means
