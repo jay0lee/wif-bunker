@@ -108,6 +108,8 @@ jobs:
         run: |
           if [[ "${RUNNER_OS}" == "Linux" ]]; then
             export CFLAGS="-std=c11 ${CFLAGS:-}"
+          elif [[ "${RUNNER_OS}" == "Windows" ]]; then
+            git config --global core.longpaths true
           fi
           "${PYTHON}" -m pip install --upgrade pip
           "${PYTHON}" -m pip install pyinstaller

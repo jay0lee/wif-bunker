@@ -129,13 +129,14 @@ jobs:
       - if: ${{ !matrix.self_hosted }}
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
-      # ── Linux GH-hosted: install swtpm + TSS2 libs ──
+      # ── Linux GH-hosted: install swtpm + abrmd resource manager + TSS2 libs ──
       - name: "Linux: Install Software TPM & TSS2 packages"
         if: matrix.signer_kind == 'linux-swtpm'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            swtpm swtpm-tools tpm2-tools libtss2-dev libpcsclite-dev swig pkg-config
+            swtpm swtpm-tools tpm2-tools tpm2-abrmd libtss2-tcti-tabrmd0 dbus \
+            libtss2-dev libpcsclite-dev swig pkg-config
 
       - name: Set up latest Python and OpenSSL
         id: setup-python-ssl
@@ -146,6 +147,8 @@ jobs:
           "${PYTHON}" -m venv venv
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
             PYTHON="$GITHUB_WORKSPACE/venv/Scripts/python.exe"
+            # google-cloud-python monorepo contains paths > 260 chars
+            git config --global core.longpaths true
           else
             PYTHON="$GITHUB_WORKSPACE/venv/bin/python3"
           fi
@@ -224,7 +227,19 @@ jobs:
             --flags not-need-init,startup-clear &
           sleep 2
 
-          export TPM2TOOLS_TCTI="swtpm:host=127.0.0.1,port=2321"
+          # Run tpm2-abrmd as userspace resource manager (analogous to /dev/tpmrm0 on
+          # real hardware) so transient object contexts swap transparently without 0x902.
+          DBUS_SESSION_BUS_ADDRESS=$(dbus-daemon --session --fork --print-address --address="unix:tmpdir=$RUNNER_TEMP")
+          echo "DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS}" >> "$GITHUB_ENV"
+          export DBUS_SESSION_BUS_ADDRESS
+
+          tpm2-abrmd \
+            --tcti="swtpm:host=127.0.0.1,port=2321" \
+            --session \
+            --allow-root &
+          sleep 1
+
+          export TPM2TOOLS_TCTI="tabrmd:bus_type=session"
           echo "TPM2TOOLS_TCTI=${TPM2TOOLS_TCTI}" >> "$GITHUB_ENV"
 
           tpm2_createprimary -C o -g sha256 -G ecc -c "$RUNNER_TEMP/primary.ctx"

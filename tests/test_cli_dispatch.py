@@ -175,3 +175,13 @@ class TestPreflightWriteAccess:
         preflight_check_write_access(tmp_path)
         probe = tmp_path / ".wif-bunker-write-test"
         assert not probe.exists()
+
+
+class TestResolveSelfCommand:
+    def test_python_module_invocation_uses_sys_executable_dash_m(self):
+        from wif_bunker.cli import _resolve_self_command
+
+        with patch("sys.argv", ["/repo/wif_bunker/__main__.py"]):
+            cmd = _resolve_self_command()
+        assert cmd.endswith('" -m wif_bunker')
+        assert "__main__.py" not in cmd

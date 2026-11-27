@@ -291,9 +291,17 @@ def build_executable_adc_config(
     No background daemon is needed; Google ADC libraries natively cache the
     signed OIDC JWT in *output_file* until ``expiration_time``.
     """
-    cmd = f'"{command_path}" sign-jwt --config "{bunker_config_path}"'
+    bunker_cmd_path = Path(bunker_config_path).as_posix()
+    if command_path.startswith('"') or " -m " in command_path:
+        cmd_prefix = command_path
+    elif "/" in command_path or "\\" in command_path:
+        cmd_prefix = f'"{Path(command_path).as_posix()}"'
+    else:
+        cmd_prefix = f'"{command_path}"'
+
+    cmd = f'{cmd_prefix} sign-jwt --config "{bunker_cmd_path}"'
     if output_file is not None:
-        cmd += f' --output-file "{output_file}"'
+        cmd += f' --output-file "{Path(output_file).as_posix()}"'
 
     executable_cfg: dict[str, Any] = {
         "command": cmd,

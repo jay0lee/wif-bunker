@@ -165,6 +165,8 @@ jobs:
           fi
           if [[ "${RUNNER_OS}" == "Linux" ]]; then
             export CFLAGS="-std=c11 ${CFLAGS:-}"
+          elif [[ "${RUNNER_OS}" == "Windows" ]]; then
+            git config --global core.longpaths true
           fi
           pip install --upgrade pip
           pip install .

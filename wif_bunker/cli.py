@@ -387,12 +387,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 
 def _resolve_self_command() -> str:
-    """Return the executable command string for invoking ``wif-bunker``."""
+    """Return an executable command prefix for invoking ``wif-bunker``.
+
+    Uses POSIX forward slashes so Google's Pluggable Auth parser
+    (``shlex.split(..., posix=True)``) preserves paths cleanly on Windows too.
+    """
     if getattr(sys, "frozen", False):
-        return str(Path(sys.executable).resolve())
+        return f'"{Path(sys.executable).resolve().as_posix()}"'
     argv0 = Path(sys.argv[0])
+    if argv0.name == "__main__.py" or argv0.suffix == ".py":
+        return f'"{Path(sys.executable).resolve().as_posix()}" -m wif_bunker'
     if argv0.exists():
-        return str(argv0.resolve())
+        return f'"{argv0.resolve().as_posix()}"'
     return "wif-bunker"
 
 

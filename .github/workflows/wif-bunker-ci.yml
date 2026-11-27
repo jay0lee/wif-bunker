@@ -119,6 +119,9 @@ jobs:
           # choke on GCC 15's C23 headers (bool vs _Bool).
           if [[ "${RUNNER_OS}" == "Linux" ]]; then
             export CFLAGS="-std=c11 ${CFLAGS:-}"
+          elif [[ "${RUNNER_OS}" == "Windows" ]]; then
+            # google-cloud-python monorepo contains paths > 260 chars
+            git config --global core.longpaths true
           fi
 
           pip install pytest pytest-cov

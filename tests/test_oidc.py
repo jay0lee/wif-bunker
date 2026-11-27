@@ -195,6 +195,19 @@ class TestAdcConfigBuilders:
         assert "sign-jwt" in exe["command"]
         assert exe["output_file"] == str(cache_path.resolve())
 
+    def test_build_executable_adc_config_python_module_command(self, sample_bunker_config, tmp_path):
+        import shlex
+
+        bunker_path = tmp_path / "bunker.json"
+        cfg = build_executable_adc_config(
+            sample_bunker_config,
+            bunker_config_path=bunker_path,
+            command_path='"/opt/python/bin/python3" -m wif_bunker',
+        )
+        tokens = shlex.split(cfg["credential_source"]["executable"]["command"])
+        assert tokens[:4] == ["/opt/python/bin/python3", "-m", "wif_bunker", "sign-jwt"]
+        assert tokens[4:] == ["--config", bunker_path.as_posix()]
+
     def test_format_executable_response(self):
         resp = format_executable_response("hdr.pay.sig", 1900000000)
         assert resp == {
