@@ -293,6 +293,31 @@ class TestAgentHelpersAndLifecycle:
         assert adc_path.exists()
         assert not secret_path.exists()
 
+    def test_run_agent_foreground_restores_preexisting_executable_adc(self, sample_bunker_config, tmp_path):
+        signer = load_signer(sample_bunker_config.signer)
+        adc_path = tmp_path / "adc.json"
+        secret_path = tmp_path / ".secret"
+        original_exec_adc = '{"type": "external_account", "credential_source": {"executable": {"command": "x"}}}\n'
+        adc_path.write_text(original_exec_adc, encoding="utf-8")
+
+        saw_agent_adc = {}
+
+        def fake_serve(self_srv):
+            saw_agent_adc["during"] = adc_path.read_text(encoding="utf-8")
+            raise KeyboardInterrupt
+
+        with patch("wif_bunker.agent.AgentHTTPServer.serve_forever", fake_serve):
+            run_agent_foreground(
+                sample_bunker_config,
+                signer,
+                port=0,
+                adc_path=adc_path,
+                secret_path=secret_path,
+            )
+        assert "127.0.0.1:" in saw_agent_adc["during"]
+        assert adc_path.read_text(encoding="utf-8") == original_exec_adc
+        assert not secret_path.exists()
+
     def test_run_agent_foreground_direct_wif_and_sigterm(self, sample_bunker_config, tmp_path):
         sample_bunker_config.service_account_email = None
         signer = load_signer(sample_bunker_config.signer)

@@ -89,7 +89,7 @@ wif-bunker setup \
   --use-project my-wif-project
 ```
 
-This creates the GCP WIF pool, uploads your key's public JWK as a Static-JWKS OIDC provider (no external IdP is ever contacted by Google), configures IAM bindings (Service Account impersonation by default, or `--no-service-account` for direct WIF), writes `bunker.json` (`0600`), and verifies the full exchange end-to-end.
+This creates the GCP WIF pool, uploads your key's public JWK as a Static-JWKS OIDC provider (no external IdP is ever contacted by Google), configures IAM bindings (Service Account impersonation by default, or `--no-service-account` for direct WIF), writes `bunker.json` and a ready-to-use executable `adc.json` (`0600`), and verifies the full exchange end-to-end.
 
 To rotate keys in place without creating or soft-deleting providers, reuse the same pool, provider, and subject:
 
@@ -103,17 +103,12 @@ wif-bunker setup \
   --subject my-host
 ```
 
-### 3. Run in Agent Mode (Recommended — 1 Hardware Sign / Hour)
+### 3. Use Immediately (Daemon-less Executable ADC Mode — Default)
+
+`wif-bunker setup` writes `adc.json` automatically with a 1-hour JWT cache (`.wif-bunker-jwt-cache.json`), so you can authenticate right away with no background daemon and only **1 hardware sign per hour**:
 
 ```bash
-wif-bunker agent --config bunker.json
-```
-
-The agent binds `127.0.0.1:<ephemeral-port>` (or a fixed `--port` for systemd/launchd/Windows Service), creates a `0600` per-session shared secret, writes `adc.json`, and caches minted Google access tokens **in RAM only**.
-
-Then point any stock ADC application at `adc.json`:
-
-```bash
+export GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES=1
 export GOOGLE_APPLICATION_CREDENTIALS=/path/to/adc.json
 ```
 
@@ -121,29 +116,20 @@ export GOOGLE_APPLICATION_CREDENTIALS=/path/to/adc.json
 import google.auth
 
 credentials, project = google.auth.default()
-# Uses stock google-auth — zero custom patches, zero mTLS!
+# Uses stock google-auth — zero custom patches, zero mTLS, no local HTTP port!
 ```
 
-### Alternative: Daemon-less Executable ADC Mode
+Customize the JWT lifetime with `--jwt-lifetime` or the cache path with `--executable-cache-file` (or pass `--no-adc` if you only want `bunker.json`).
 
-If you prefer no long-running agent process (or work in locked-down Windows AV/EDR environments where local HTTP ports are restricted), pass `--write-executable-adc` during `setup`:
+### Optional: High-Concurrency Caching Agent Mode
+
+For heavy multi-process workloads (e.g. parallel GAM DwD loops) where you want to cache the final Google access token in RAM across processes and skip STS/IAM round-trips:
 
 ```bash
-wif-bunker setup \
-  --signer yubikey --yubikey-slot 9c \
-  --use-project my-wif-project \
-  --write-executable-adc \
-  --executable-cache-file ~/.cache/wif-bunker-jwt.json
+wif-bunker agent --config bunker.json
 ```
 
-Then enable Google's Pluggable Auth executable credential source in your client environment:
-
-```bash
-export GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES=1
-export GOOGLE_APPLICATION_CREDENTIALS=/path/to/adc.json
-```
-
-Stock Google ADC libraries will automatically invoke `wif-bunker sign-jwt` whenever the cached OIDC JWT expires (defaults to **1 hour**, customizable via `--jwt-lifetime`, so even daemon-less mode only signs with your hardware key once per hour).
+The agent binds `127.0.0.1:<ephemeral-port>` (or a fixed `--port` for systemd/launchd/Windows Service), creates a `0600` per-session shared secret, temporarily updates `adc.json` to point at `127.0.0.1` (and automatically restores your executable `adc.json` when stopped), and caches minted Google access tokens **in RAM only**. Standard ADC clients only need `GOOGLE_APPLICATION_CREDENTIALS=/path/to/adc.json` (no `GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES` required).
 
 ## CLI Reference
 

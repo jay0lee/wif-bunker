@@ -293,6 +293,20 @@ def start_agent(
     return server, resolved_adc, resolved_secret
 
 
+def _snapshot_executable_adc(adc_path: Path) -> str | None:
+    """Return raw text of *adc_path* if it is a pre-existing executable ADC config."""
+    if not adc_path.exists():
+        return None
+    try:
+        raw = adc_path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        if isinstance(data, dict) and "executable" in data.get("credential_source", {}):
+            return raw
+    except (OSError, json.JSONDecodeError):
+        pass
+    return None
+
+
 def run_agent_foreground(
     bunker_cfg: BunkerConfig,
     signer: Any,
@@ -304,11 +318,14 @@ def run_agent_foreground(
     eager_warm: bool = False,
 ) -> None:
     """Start the WIF Bunker agent in the foreground until interrupted."""
+    resolved_adc_target = Path(adc_path).resolve()
+    saved_executable_adc = _snapshot_executable_adc(resolved_adc_target)
+
     server, resolved_adc, resolved_secret = start_agent(
         bunker_cfg,
         signer,
         port=port,
-        adc_path=adc_path,
+        adc_path=resolved_adc_target,
         secret_path=secret_path,
         refresh_margin_seconds=refresh_margin_seconds,
         eager_warm=eager_warm,
@@ -355,3 +372,9 @@ def run_agent_foreground(
                 resolved_secret.unlink()
         except OSError:
             pass
+        if saved_executable_adc is not None:
+            try:
+                write_secure_file(resolved_adc, saved_executable_adc)
+                logger.info("Restored executable ADC config: %s", resolved_adc)
+            except (OSError, RuntimeError):
+                pass

@@ -2,6 +2,7 @@
 bunker.json
 adc.json
 .adc-verify.json
+.wif-bunker-jwt-cache.json
 .wif-bunker-secret-*
 
 # Python

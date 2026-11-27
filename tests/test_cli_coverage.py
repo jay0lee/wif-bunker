@@ -81,6 +81,7 @@ class TestSetupFullWorkflow:
         mock_client.apply_iam_bindings.return_value = None
 
         bunker_path = tmp_path / "bunker.json"
+        adc_path = tmp_path / "adc.json"
         with patch(
             "sys.argv",
             [
@@ -100,6 +101,8 @@ class TestSetupFullWorkflow:
                 "bunker-ci-workload",
                 "--config",
                 str(bunker_path),
+                "--adc-file",
+                str(adc_path),
                 "--skip-verify",
             ],
         ):
@@ -111,6 +114,12 @@ class TestSetupFullWorkflow:
         assert kwargs["config"].provider_id == "bunker-ci-oidc"
         assert kwargs["config"].issuer_uri == "https://wif-bunker.internal/bunker-ci-oidc"
         assert kwargs["config"].subject == "bunker-ci-workload"
+        # Executable adc.json is written by default with a sibling cache file
+        assert adc_path.exists()
+        adc_data = json.loads(adc_path.read_text(encoding="utf-8"))
+        assert adc_data["credential_source"]["executable"]["output_file"] == str(
+            (tmp_path / ".wif-bunker-jwt-cache.json").resolve()
+        )
 
     @patch("wif_bunker.cli.GCPClient")
     def test_setup_create_project_with_sa_and_live_verify(
@@ -155,6 +164,8 @@ class TestSetupFullWorkflow:
                     "my-sa",
                     "--config",
                     str(bunker_path),
+                    "--adc-file",
+                    str(tmp_path / "adc.json"),
                 ],
             ),
         ):
@@ -162,6 +173,7 @@ class TestSetupFullWorkflow:
 
         mock_client.enable_apis.assert_called_once()
         assert bunker_path.exists()
+        assert (tmp_path / "adc.json").exists()
         # Temporary verification ADC file should be cleaned up
         assert not (tmp_path / ".adc-verify.json").exists()
 
@@ -341,12 +353,17 @@ class TestSignerArgBuildingAndMiscCli:
                     "--issuer-uri",
                     "https://custom.issuer.internal/test",
                     "--no-service-account",
+                    "--no-adc",
                     "--config",
                     str(bunker_path),
+                    "--adc-file",
+                    str(tmp_path / "should-not-exist-adc.json"),
                 ],
             ),
         ):
             _main_impl()
+
+        assert not (tmp_path / "should-not-exist-adc.json").exists()
 
         mock_redact.assert_called_once_with(False)
         assert mock_client.setup_wif_infrastructure.call_args.kwargs["config"].issuer_uri == (

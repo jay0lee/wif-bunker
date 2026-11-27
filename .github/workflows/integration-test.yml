@@ -461,6 +461,7 @@ jobs:
             --use-pool="$POOL_ID" \
             --use-provider="$PROVIDER_ID" \
             --no-service-account \
+            --no-adc \
             --subject="$WORKLOAD_SUBJECT" \
             --config "$RUNNER_TEMP/bunker-nosa.json" \
             $SIGNER_FLAGS

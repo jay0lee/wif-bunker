@@ -321,15 +321,29 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
     out_grp = p_setup.add_argument_group("Output options")
     out_grp.add_argument("--config", default="bunker.json", help="Path to write bunker.json (default: bunker.json).")
+    out_grp.add_argument("--adc-file", default="adc.json", help="Path to write adc.json (default: adc.json).")
+    out_grp.add_argument(
+        "--no-adc",
+        dest="write_executable_adc",
+        action="store_false",
+        default=True,
+        help=(
+            "Do not write an executable-mode adc.json "
+            "(only write bunker.json; run 'wif-bunker agent' to create adc.json)."
+        ),
+    )
     out_grp.add_argument(
         "--write-executable-adc",
+        dest="write_executable_adc",
         action="store_true",
-        help="Also write a daemon-less adc.json using credential_source.executable (wif-bunker sign-jwt).",
+        help=argparse.SUPPRESS,  # Now the default; kept for backwards compatibility
     )
-    out_grp.add_argument("--adc-file", default="adc.json", help="Path for adc.json (default: adc.json).")
     out_grp.add_argument(
         "--executable-cache-file",
-        help="Optional output_file path for caching signed OIDC JWTs in executable ADC mode.",
+        help=(
+            "Path for caching signed OIDC JWTs in executable ADC mode "
+            "(default: .wif-bunker-jwt-cache.json alongside adc.json)."
+        ),
     )
     out_grp.add_argument(
         "--jwt-lifetime",
@@ -629,11 +643,16 @@ def _cmd_setup(args: argparse.Namespace, parser: argparse.ArgumentParser) -> Non
 
     adc_path = Path(args.adc_file).resolve()
     if args.write_executable_adc:
+        cache_file = (
+            Path(args.executable_cache_file).resolve()
+            if args.executable_cache_file
+            else adc_path.parent / ".wif-bunker-jwt-cache.json"
+        )
         exec_adc = build_executable_adc_config(
             bunker_cfg,
             bunker_config_path=bunker_path,
             command_path=_resolve_self_command(),
-            output_file=args.executable_cache_file,
+            output_file=cache_file,
             jwt_lifetime_seconds=args.jwt_lifetime,
         )
         write_secure_file(adc_path, json.dumps(exec_adc, indent=2) + "\n")
@@ -646,13 +665,18 @@ def _cmd_setup(args: argparse.Namespace, parser: argparse.ArgumentParser) -> Non
     logger.info("")
     logger.info("=" * 70)
     logger.info("WIF Bunker OIDC Setup Complete!")
-    logger.info("")
-    logger.info("Start the caching token agent (recommended — 1 HW sign/hour):")
-    logger.info("  wif-bunker agent --config %s", bunker_path)
-    logger.info("")
-    logger.info("Or use daemon-less executable ADC mode:")
-    logger.info("  export GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES=1")
-    logger.info("  export GOOGLE_APPLICATION_CREDENTIALS=%s", adc_path)
+    if args.write_executable_adc:
+        logger.info("")
+        logger.info("Ready to use immediately (daemon-less executable ADC — 1 HW sign/hour):")
+        logger.info("  export GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES=1")
+        logger.info("  export GOOGLE_APPLICATION_CREDENTIALS=%s", adc_path)
+        logger.info("")
+        logger.info("Or start the localhost caching agent (optional, for high-concurrency workloads):")
+        logger.info("  wif-bunker agent --config %s --adc-file %s", bunker_path, adc_path)
+    else:
+        logger.info("")
+        logger.info("Start the caching token agent to generate %s (1 HW sign/hour):", adc_path)
+        logger.info("  wif-bunker agent --config %s --adc-file %s", bunker_path, adc_path)
     logger.info("=" * 70)
 
 
