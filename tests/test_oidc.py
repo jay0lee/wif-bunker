@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, padding, utils
 
 from wif_bunker.oidc import (
+    _parse_rfc3339_epoch,
     build_agent_adc_config,
     build_executable_adc_config,
     build_jwks_from_signer,
@@ -19,6 +20,7 @@ from wif_bunker.oidc import (
     generate_sa_access_token,
     mint_google_access_token,
     mint_oidc_jwt,
+    verify_project_access,
 )
 from wif_bunker.signers import load_signer
 
@@ -102,6 +104,22 @@ class TestJwksAndJwtSigning:
         fake_signer.public_jwk = {"kty": "EC", "crv": "P-384"}
         with pytest.raises(ValueError, match="ES256, RS256"):
             build_jwks_from_signer(fake_signer)
+        with pytest.raises(ValueError, match="Unsupported OIDC JWT algorithm"):
+            mint_oidc_jwt(
+                fake_signer,
+                issuer_uri="https://wif-bunker.internal/p",
+                audience="//iam.googleapis.com/p",
+                subject="sub",
+            )
+
+    def test_missing_kid_raises(self):
+        fake_signer = MagicMock()
+        fake_signer.algorithm = "ES256"
+        fake_signer.public_jwk = {"kty": "EC", "crv": "P-256"}
+        fake_signer.key_id = None
+        fake_signer.thumbprint = None
+        with pytest.raises(ValueError, match="did not provide a key_id"):
+            build_jwks_from_signer(fake_signer)
 
 
 class TestTokenExchanges:
@@ -141,6 +159,32 @@ class TestTokenExchanges:
         assert token == "ya29.sa.token"
         assert expiry == 1893456000
         assert "sa@proj.iam.gserviceaccount.com:generateAccessToken" in mock_session.post.call_args.args[0]
+
+    def test_generate_sa_access_token_without_expire_time_and_naive_rfc3339(self):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"accessToken": "ya29.fallback"}
+        mock_session = MagicMock()
+        mock_session.post.return_value = mock_resp
+
+        token, expiry = generate_sa_access_token(
+            "sts.tok",
+            sa_email="sa@proj.iam.gserviceaccount.com",
+            lifetime_seconds=1800,
+            session=mock_session,
+        )
+        assert token == "ya29.fallback"
+        assert expiry > 0
+        assert _parse_rfc3339_epoch("2030-01-01T00:00:00") == 1893456000
+
+    def test_verify_project_access(self):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"name": "My Proj"}
+        mock_session = MagicMock()
+        mock_session.get.return_value = mock_resp
+
+        data = verify_project_access("ya29.tok", "my-proj", session=mock_session)
+        assert data == {"name": "My Proj"}
+        assert "my-proj" in mock_session.get.call_args.args[0]
 
     def test_mint_google_access_token_with_sa(self, sample_bunker_config):
         signer = load_signer(sample_bunker_config.signer)

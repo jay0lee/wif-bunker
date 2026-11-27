@@ -8,8 +8,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from wif_bunker.utils import MAX_BACKOFF_SECONDS, write_secure_file
+
 # --- Tuning Constants ---
-MAX_BACKOFF_SECONDS = 60
 API_RETRY_TIMEOUT_SECONDS = 900  # 15 minutes max total retry time
 LRO_TIMEOUT_SECONDS = 300
 
@@ -32,8 +33,18 @@ SIGNER_TYPES = (
     "software",
 )
 
-# Config files written by wif-bunker
-_CONFIG_FILES = ("bunker.json", "adc.json")
+__all__ = [
+    "API_RETRY_TIMEOUT_SECONDS",
+    "DEFAULT_AGENT_REFRESH_MARGIN_SECONDS",
+    "DEFAULT_EXECUTABLE_JWT_LIFETIME_SECONDS",
+    "DEFAULT_OIDC_JWT_LIFETIME_SECONDS",
+    "LRO_TIMEOUT_SECONDS",
+    "MAX_BACKOFF_SECONDS",
+    "SIGNER_TYPES",
+    "SUPPORTED_OIDC_ALGORITHMS",
+    "BunkerConfig",
+    "WorkloadConfig",
+]
 
 
 @dataclass
@@ -107,8 +118,6 @@ class BunkerConfig:
 
     def save(self, path: Path | str) -> Path:
         """Write configuration to *path* with strict 0600 permissions."""
-        from wif_bunker.utils import write_secure_file  # pylint: disable=import-outside-toplevel
-
         out_path = Path(path)
         write_secure_file(out_path, json.dumps(self.to_dict(), indent=2) + "\n")
         return out_path

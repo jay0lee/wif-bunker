@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import struct
 import subprocess
 
 from cryptography import x509 as cx509
@@ -57,6 +58,7 @@ def _run_powershell(command: str, *, preamble: bool = True) -> subprocess.Comple
         ["powershell", "-NoProfile", "-NonInteractive", "-Command", full_cmd],
         capture_output=True,
         text=True,
+        check=False,
     )
 
 
@@ -559,8 +561,6 @@ def _ncrypt_create_claim(config: WorkloadConfig, key_info: dict | None = None) -
             )
 
         # Build a combined attestation blob with all available properties
-        import struct
-
         parts: list[bytes] = []
         for prop_name, prop_bytes in attestation_data.items():
             name_encoded = prop_name.encode("utf-8")
@@ -679,8 +679,6 @@ def _tpm2_nv_read_public(tbs_ctx, tbs, ctypes, nv_index: int) -> int | None:
 
     Returns the data size in bytes, or None if the index doesn't exist.
     """
-    import struct
-
     # Build command: tag(2) + size(4) + commandCode(4) + nvIndex(4) = 14 bytes
     cmd = struct.pack(
         ">HII I",
@@ -721,8 +719,6 @@ def _tpm2_nv_read(tbs_ctx, tbs, ctypes, nv_index: int, size: int) -> bytes | Non
     Uses empty-password auth (TPM_RS_PW with no HMAC).
     May need to read in chunks for large data.
     """
-    import struct
-
     result = b""
     max_chunk = 1024  # TPM implementations typically allow 1024 bytes per read
     offset = 0
@@ -801,8 +797,6 @@ def _check_platform_certificate() -> dict | None:
 
     # TBS_CONTEXT_PARAMS2: version(4) + flags(4) = 8 bytes
     # version=2, includeTpm20=1 (bit 2 of flags)
-    import struct
-
     params = (ctypes.c_ubyte * 8)(*struct.pack("<II", 2, 0x4))  # includeTpm20 = bit 2
     status = tbs.Tbsi_Context_Create(params, ctypes.byref(tbs_ctx))
     if status != 0:

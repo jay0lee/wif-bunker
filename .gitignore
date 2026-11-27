@@ -1,21 +1,8 @@
 # Runtime generated files
-certificate_config.json
+bunker.json
 adc.json
-cert.cfg
-*.csr
-gam-workload-public.pem
-gam-workload-selfsigned.pem
-ctk_export_*/
-ctk_work_*/
-workload_cert.pem
-workload_cert.der
-trust_chain.pem
-
-# Local build artifacts
-gopath/
-go/
-libecp_patched.*
-minimal-adc.py
+.adc-verify.json
+.wif-bunker-secret-*
 
 # Python
 __pycache__/
@@ -30,8 +17,3 @@ build/
 # OS
 .DS_Store
 Thumbs.db
-__pycache__/
-
-# Generated cert artifacts
-bunker-workload-*.pem
-mtls-test-output.txt

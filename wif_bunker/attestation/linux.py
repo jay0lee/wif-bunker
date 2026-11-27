@@ -25,6 +25,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import OpenSSL.crypto
+
 from wif_bunker.attestation.base import (
     AttestationArtifact,
     AttestationCheck,
@@ -74,15 +76,8 @@ def _extract_ek_certificate_esapi(ectx) -> tuple[AttestationCheck, str | None]:
             der_data = bytes(ectx.nv_read(nv_handle, nv_size, auth_handle=ESYS_TR.RH_OWNER))
 
             # Convert DER to PEM using pyOpenSSL (handles non-standard ASN.1)
-            from OpenSSL.crypto import (  # pylint: disable=import-outside-toplevel
-                FILETYPE_ASN1,
-                FILETYPE_PEM,
-                dump_certificate,
-                load_certificate,
-            )
-
-            ossl_cert = load_certificate(FILETYPE_ASN1, der_data)
-            pem_data = dump_certificate(FILETYPE_PEM, ossl_cert)
+            ossl_cert = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_ASN1, der_data)
+            pem_data = OpenSSL.crypto.dump_certificate(OpenSSL.crypto.FILETYPE_PEM, ossl_cert)
             ek_pem = pem_data.decode("utf-8")
             issuer = ", ".join(f"{k.decode()}={v.decode()}" for k, v in ossl_cert.get_issuer().get_components())
 
@@ -123,6 +118,7 @@ def _extract_ek_certificate_cli_fallback(work_dir: Path, ectx) -> tuple[Attestat
         ["tpm2_createek", "-c", str(ek_ctx), "-G", "rsa2048", "-u", str(ek_pub)],
         capture_output=True,
         text=True,
+        check=False,
     )
     if result.returncode != 0:
         logger.debug("tpm2_createek failed (rc=%d): %s", result.returncode, result.stderr.strip()[:200])
@@ -133,6 +129,7 @@ def _extract_ek_certificate_cli_fallback(work_dir: Path, ectx) -> tuple[Attestat
         capture_output=True,
         text=True,
         cwd=work_dir,
+        check=False,
     )
     if result.returncode != 0:
         logger.debug(
@@ -142,21 +139,14 @@ def _extract_ek_certificate_cli_fallback(work_dir: Path, ectx) -> tuple[Attestat
         )
         return None, None
 
-    from OpenSSL.crypto import (  # pylint: disable=import-outside-toplevel
-        FILETYPE_ASN1,
-        FILETYPE_PEM,
-        dump_certificate,
-        load_certificate,
-    )
-
     raw = ek_cert_path.read_bytes().lstrip()
     try:
         if raw.startswith(b"-----BEGIN"):
-            ossl_cert = load_certificate(FILETYPE_PEM, raw)
+            ossl_cert = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, raw)
         else:
-            ossl_cert = load_certificate(FILETYPE_ASN1, raw)
+            ossl_cert = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_ASN1, raw)
 
-        pem_data = dump_certificate(FILETYPE_PEM, ossl_cert)
+        pem_data = OpenSSL.crypto.dump_certificate(OpenSSL.crypto.FILETYPE_PEM, ossl_cert)
         ek_pem = pem_data.decode("utf-8")
         issuer = ", ".join(f"{k.decode()}={v.decode()}" for k, v in ossl_cert.get_issuer().get_components())
         detail = f"EK certificate retrieved from manufacturer provisioning service. Issuer: {issuer}"

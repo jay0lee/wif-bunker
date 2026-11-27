@@ -1,49 +1,11 @@
 import stat
-import string
 import sys
+from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
-from wif_bunker.utils import generate_pin, preflight_check_write_access, write_secure_file
-
-
-class TestGeneratePin:
-    """Tests for the shared PIN generation function."""
-
-    def test_default_length(self):
-        pin = generate_pin()
-        assert len(pin) == 24
-
-    def test_custom_length(self):
-        for length in (4, 8, 16, 32, 64):
-            pin = generate_pin(length=length)
-            assert len(pin) == length
-
-    def test_alphanumeric_only(self):
-        allowed = set(string.ascii_letters + string.digits)
-        for _ in range(50):
-            pin = generate_pin()
-            assert set(pin).issubset(allowed), f"PIN contains non-alphanumeric: {pin}"
-
-    def test_uniqueness(self):
-        """100 generated PINs should all be unique (collision at 62^24 is impossible)."""
-        pins = {generate_pin() for _ in range(100)}
-        assert len(pins) == 100
-
-    def test_yubikey_length(self):
-        """YubiKey PIV spec limits PINs to 8 chars."""
-        pin = generate_pin(length=8)
-        assert len(pin) == 8
-        assert pin.isalnum()
-
-    def test_length_zero(self):
-        pin = generate_pin(length=0)
-        assert pin == ""
-
-    def test_length_one(self):
-        pin = generate_pin(length=1)
-        assert len(pin) == 1
-        assert pin.isalnum()
+from wif_bunker.utils import preflight_check_write_access, write_secure_file
 
 
 @pytest.fixture
@@ -74,6 +36,12 @@ class TestWriteSecureFile:
         with pytest.raises(RuntimeError, match="Cannot write to"):
             write_secure_file(filepath, "hello world")
 
+    def test_permission_denied_mocked_cross_platform(self, tmp_path):
+        filepath = tmp_path / "blocked.txt"
+        with patch("os.open", side_effect=PermissionError("denied")):
+            with pytest.raises(RuntimeError, match="Cannot write to"):
+                write_secure_file(filepath, "hello")
+
     def test_overwrites_existing_file(self, tmp_path):
         filepath = tmp_path / "test.txt"
         write_secure_file(filepath, "first")
@@ -95,3 +63,9 @@ class TestPreflightWriteAccess:
         preflight_check_write_access(tmp_path)
         probe = tmp_path / ".wif-bunker-write-test"
         assert not probe.exists()
+
+    def test_permission_denied_mocked_cross_platform(self, tmp_path):
+        with patch.object(Path, "write_text", side_effect=PermissionError("denied")):
+            with pytest.raises(SystemExit) as exc_info:
+                preflight_check_write_access(tmp_path)
+        assert exc_info.value.code == 1

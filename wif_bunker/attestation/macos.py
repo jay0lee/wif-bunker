@@ -49,6 +49,7 @@ def _attest_macos(config: WorkloadConfig) -> AttestationReport:
             ["security", "find-identity", "-v", "-p", "ssl-client"],
             capture_output=True,
             text=True,
+            check=False,
         )
         workload_cn = config.workload_cn
         identity_found = workload_cn in result.stdout
@@ -78,6 +79,7 @@ def _attest_macos(config: WorkloadConfig) -> AttestationReport:
             ["security", "list-smartcards"],
             capture_output=True,
             text=True,
+            check=False,
         )
         ctk_present = "com.apple.setoken" in result.stdout.lower() or result.returncode == 0
         checks.append(

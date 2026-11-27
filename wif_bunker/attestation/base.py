@@ -12,10 +12,14 @@
 from __future__ import annotations
 
 import logging
+import re
+import subprocess
 import sys
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import OpenSSL.crypto
 from cryptography import x509
 
 logger = logging.getLogger(__name__)
@@ -86,19 +90,6 @@ class AttestationReport:
         }
 
 
-def _load_certs(directory: Path) -> list[x509.Certificate]:
-    """Load all PEM certificates from a directory, skipping unparseable files."""
-    certs = []
-    for pem_file in sorted(directory.glob("*.pem")):
-        try:
-            certs.append(x509.load_pem_x509_certificate(pem_file.read_bytes()))
-        except Exception:
-            # Some manufacturer CA certs have non-canonical DER encoding.
-            # Skip rather than crash the entire chain verification.
-            pass
-    return certs
-
-
 def _verify_ek_chain_openssl(
     ek_pem: str, roots_dir: Path, intermediates_dir: Path, manually_managed_dir: Path | None = None
 ) -> AttestationCheck:
@@ -118,25 +109,11 @@ def _verify_ek_chain_openssl(
     certificate is not bundled locally, it fetches intermediates from the
     URLs embedded in the cert's AIA extension (up to 3 levels deep).
     """
-    import re
-    import subprocess
-    import urllib.request
-
-    import OpenSSL.crypto
-    from OpenSSL.crypto import (
-        FILETYPE_ASN1,
-        FILETYPE_PEM,
-        X509Store,
-        X509StoreContext,
-        X509StoreContextError,
-        load_certificate,
-    )
-
     logger.debug("Verifying EK chain via OpenSSL X509StoreContext")
 
     try:
-        ek_cert = load_certificate(FILETYPE_PEM, ek_pem.encode("utf-8"))
-    except Exception as e:
+        ek_cert = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, ek_pem.encode("utf-8"))
+    except Exception as e:  # pylint: disable=broad-except
         return AttestationCheck(
             name="EK certificate chain verified",
             passed=False,
@@ -144,7 +121,7 @@ def _verify_ek_chain_openssl(
         )
 
     # Build an X509Store with all root CAs.
-    store = X509Store()
+    store = OpenSSL.crypto.X509Store()
     roots_loaded = 0
     dirs_to_check = [roots_dir]
     if manually_managed_dir:
@@ -154,10 +131,10 @@ def _verify_ek_chain_openssl(
         if d.exists():
             for pem_file in sorted(d.glob("*.pem")):
                 try:
-                    ca_cert = load_certificate(FILETYPE_PEM, pem_file.read_bytes())
+                    ca_cert = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, pem_file.read_bytes())
                     store.add_cert(ca_cert)
                     roots_loaded += 1
-                except Exception:
+                except Exception:  # pylint: disable=broad-except
                     pass
 
     if roots_loaded == 0:
@@ -177,8 +154,10 @@ def _verify_ek_chain_openssl(
         if d.exists():
             for pem_file in sorted(d.glob("*.pem")):
                 try:
-                    intermediates.append(load_certificate(FILETYPE_PEM, pem_file.read_bytes()))
-                except Exception:
+                    intermediates.append(
+                        OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, pem_file.read_bytes())
+                    )
+                except Exception:  # pylint: disable=broad-except
                     pass
 
     logger.info(
@@ -191,18 +170,19 @@ def _verify_ek_chain_openssl(
     # AIA Chasing logic
     def _verify_with_aia_chasing(current_cert, depth=0):
         try:
-            ctx = X509StoreContext(store, current_cert, chain=intermediates)
+            ctx = OpenSSL.crypto.X509StoreContext(store, current_cert, chain=intermediates)
             ctx.verify_certificate()
             return True, ""
-        except X509StoreContextError as e:
+        except OpenSSL.crypto.X509StoreContextError as e:
             if "unable to get local issuer certificate" in str(e) and depth < 3:
                 # Try AIA chasing — extract the issuer cert URL from the AIA extension.
-                cert_pem = OpenSSL.crypto.dump_certificate(FILETYPE_PEM, current_cert).decode("utf-8")
+                cert_pem = OpenSSL.crypto.dump_certificate(OpenSSL.crypto.FILETYPE_PEM, current_cert).decode("utf-8")
                 result = subprocess.run(
                     ["openssl", "x509", "-noout", "-text"],
                     input=cert_pem,
                     capture_output=True,
                     text=True,
+                    check=False,
                 )
                 m = re.search(r"CA Issuers - URI:(https?://[^\s]+)", result.stdout)
                 if not m:
@@ -224,15 +204,15 @@ def _verify_ek_chain_openssl(
                         cert_data = response.read()
 
                     try:
-                        fetched_cert = load_certificate(FILETYPE_PEM, cert_data)
-                    except Exception:
-                        fetched_cert = load_certificate(FILETYPE_ASN1, cert_data)
+                        fetched_cert = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, cert_data)
+                    except Exception:  # pylint: disable=broad-except
+                        fetched_cert = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_ASN1, cert_data)
 
                     intermediates.append(fetched_cert)
 
                     # Retry verification with the newly fetched intermediate in the chain.
                     return _verify_with_aia_chasing(current_cert, depth + 1)
-                except Exception as fetch_err:
+                except Exception as fetch_err:  # pylint: disable=broad-except
                     return False, (f"{e} — AIA fetch from {url} failed: {fetch_err}")
             return False, str(e)
 
@@ -410,9 +390,7 @@ def parse_ek_details(ek_pem: str) -> dict:
         # Strict parser failed (e.g. Intel non-standard ASN.1).
         # Fall back to pyOpenSSL for basic fields.
         try:
-            from OpenSSL.crypto import FILETYPE_PEM, load_certificate  # pylint: disable=import-outside-toplevel
-
-            ossl_cert = load_certificate(FILETYPE_PEM, ek_pem.encode())
+            ossl_cert = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, ek_pem.encode())
             details["issuer"] = ", ".join(
                 f"{k.decode()}={v.decode()}" for k, v in ossl_cert.get_issuer().get_components()
             )

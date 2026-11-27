@@ -17,7 +17,7 @@ The `docs/` directory contains wiki articles that document the technical details
 
 ## What the Docs Do NOT Contain
 
-- WIF Bunker or hardmTLS-specific implementation details (code structure, function names, module layout)
+- WIF Bunker-specific implementation details (code structure, function names, module layout)
 - These implementation details change frequently and belong in the code itself
 
 ## Updating the Docs

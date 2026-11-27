@@ -5,13 +5,20 @@ from __future__ import annotations
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import google.auth
+import pytest
 import requests
 from google.auth.transport.requests import Request
 
-from wif_bunker.agent import TokenCache, start_agent
+from wif_bunker.agent import (
+    TokenCache,
+    _default_secret_path,
+    _parse_token_request_body,
+    run_agent_foreground,
+    start_agent,
+)
 from wif_bunker.signers import load_signer
 
 
@@ -172,3 +179,145 @@ class TestAgentHttpServerAndStockGoogleAuth:
             server.shutdown()
             server.server_close()
             server.token_cache.close()
+
+    def test_http_error_paths_400_502_500(self, sample_bunker_config, tmp_path):
+        signer = load_signer(sample_bunker_config.signer)
+        server, _adc, secret_file = start_agent(
+            sample_bunker_config,
+            signer,
+            port=0,
+            adc_path=tmp_path / "adc.json",
+            secret_path=tmp_path / ".secret",
+        )
+        port = server.port
+        secret_val = secret_file.read_text(encoding="utf-8").strip()
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        try:
+            # Empty body -> 400
+            r_empty = requests.post(f"http://127.0.0.1:{port}/v1/token", data=b"", timeout=5)
+            assert r_empty.status_code == 400
+
+            # Malformed JSON -> 400
+            r_bad_json = requests.post(
+                f"http://127.0.0.1:{port}/v1/token",
+                data=b"{not-json",
+                headers={"Content-Type": "application/json"},
+                timeout=5,
+            )
+            assert r_bad_json.status_code == 400
+
+            # Upstream HTTPError -> 502
+            mock_resp = MagicMock()
+            mock_resp.status_code = 403
+            mock_resp.text = "denied"
+            http_err = requests.exceptions.HTTPError("denied", response=mock_resp)
+            with patch("wif_bunker.agent.mint_google_access_token", side_effect=http_err):
+                r_502 = requests.post(
+                    f"http://127.0.0.1:{port}/v1/token",
+                    json={"subject_token": secret_val},
+                    timeout=5,
+                )
+            assert r_502.status_code == 502
+            assert r_502.json()["error"] == "upstream_error"
+
+            # Unexpected internal error -> 500
+            with patch("wif_bunker.agent.mint_google_access_token", side_effect=RuntimeError("tpm locked")):
+                r_500 = requests.post(
+                    f"http://127.0.0.1:{port}/v1/token",
+                    json={"subject_token": secret_val},
+                    timeout=5,
+                )
+            assert r_500.status_code == 500
+            assert r_500.json()["error"] == "server_error"
+        finally:
+            server.shutdown()
+            server.server_close()
+            server.token_cache.close()
+
+
+class TestAgentHelpersAndLifecycle:
+    def test_empty_scopes_falls_back_to_default(self, sample_bunker_config):
+        signer = load_signer(sample_bunker_config.signer)
+        cache = TokenCache(sample_bunker_config, signer)
+        now = int(time.time())
+        with patch("wif_bunker.agent.mint_google_access_token", return_value=("tok-def", now + 3600)) as mock_mint:
+            tok, _ = cache.get_token(["", ""])
+        assert tok == "tok-def"
+        assert mock_mint.call_args.kwargs["scopes"] == ["https://www.googleapis.com/auth/cloud-platform"]
+        cache.close()
+
+    def test_parse_token_request_body_non_dict_json_raises(self):
+        with pytest.raises(ValueError, match="Expected JSON object"):
+            _parse_token_request_body("application/json", b'["not", "a", "dict"]')
+
+    def test_default_secret_path_uses_xdg_runtime_dir(self, tmp_path, monkeypatch):
+        runtime_dir = tmp_path / "run"
+        runtime_dir.mkdir()
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime_dir))
+        secret_path = _default_secret_path(tmp_path / "adc.json")
+        assert secret_path.parent == runtime_dir
+
+    def test_start_agent_eager_warm(self, sample_bunker_config, tmp_path):
+        signer = load_signer(sample_bunker_config.signer)
+        now = int(time.time())
+        with patch("wif_bunker.agent.mint_google_access_token", return_value=("tok-warm", now + 3600)) as mock_mint:
+            server, _adc, _secret = start_agent(
+                sample_bunker_config,
+                signer,
+                port=0,
+                adc_path=tmp_path / "adc.json",
+                secret_path=tmp_path / ".secret",
+                eager_warm=True,
+            )
+            try:
+                assert mock_mint.call_count == 1
+                assert server.token_cache.hardware_signs == 1
+            finally:
+                server.server_close()
+                server.token_cache.close()
+
+    def test_run_agent_foreground_keyboard_interrupt_and_cleanup(self, sample_bunker_config, tmp_path):
+        signer = load_signer(sample_bunker_config.signer)
+        adc_path = tmp_path / "adc.json"
+        secret_path = tmp_path / ".secret"
+
+        with patch("wif_bunker.agent.AgentHTTPServer.serve_forever", side_effect=KeyboardInterrupt):
+            run_agent_foreground(
+                sample_bunker_config,
+                signer,
+                port=0,
+                adc_path=adc_path,
+                secret_path=secret_path,
+            )
+        assert adc_path.exists()
+        assert not secret_path.exists()
+
+    def test_run_agent_foreground_direct_wif_and_sigterm(self, sample_bunker_config, tmp_path):
+        sample_bunker_config.service_account_email = None
+        signer = load_signer(sample_bunker_config.signer)
+        adc_path = tmp_path / "adc.json"
+        secret_path = tmp_path / ".secret"
+        captured_handler = {}
+
+        def fake_signal(sig, handler):
+            captured_handler["fn"] = handler
+            return MagicMock()
+
+        def fake_serve(self_srv):
+            # Trigger the registered SIGTERM handler to verify graceful shutdown path
+            captured_handler["fn"](15, None)
+            time.sleep(0.05)
+
+        with (
+            patch("wif_bunker.agent.signal.signal", side_effect=fake_signal),
+            patch("wif_bunker.agent.AgentHTTPServer.serve_forever", fake_serve),
+        ):
+            run_agent_foreground(
+                sample_bunker_config,
+                signer,
+                port=0,
+                adc_path=adc_path,
+                secret_path=secret_path,
+            )
+        assert not secret_path.exists()

@@ -57,7 +57,7 @@ def _retry(func, *, description):
       - RefreshError  (token refresh / IAM propagation)
       - OAuthError    (STS token broker eventual consistency)
       - HTTPError     (API permission propagation / transient 403/404/5xx)
-      - TransportError (network / mTLS)
+      - TransportError (network / TLS)
       - ConnectionError (TCP-level)
 
     Fails immediately on:
@@ -76,7 +76,9 @@ def _retry(func, *, description):
                     file=sys.stderr,
                 )
                 sys.exit(1)
-            _print(f"  ⏳ {description}: Token exchange failed (attempt {attempt}/{MAX_RETRIES}), retrying in {backoff}s...")
+            _print(
+                f"  ⏳ {description}: Token exchange failed (attempt {attempt}/{MAX_RETRIES}), retrying in {backoff}s..."
+            )
             time.sleep(backoff)
             backoff = min(backoff * 2, 60)
         except google.auth.exceptions.RefreshError as exc:
@@ -93,7 +95,9 @@ def _retry(func, *, description):
             if attempt == MAX_RETRIES:
                 _print(f"❌ {description}: HTTP error ({status}) after {MAX_RETRIES} attempts: {exc}", file=sys.stderr)
                 sys.exit(1)
-            _print(f"  ⏳ {description}: HTTP error ({status}) (attempt {attempt}/{MAX_RETRIES}), retrying in {backoff}s...")
+            _print(
+                f"  ⏳ {description}: HTTP error ({status}) (attempt {attempt}/{MAX_RETRIES}), retrying in {backoff}s..."
+            )
             time.sleep(backoff)
             backoff = min(backoff * 2, 60)
         except google.auth.exceptions.TransportError as exc:

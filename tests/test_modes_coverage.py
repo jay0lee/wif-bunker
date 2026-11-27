@@ -85,7 +85,7 @@ class TestRunStatusSuccess:
 
         with (
             patch("wif_bunker.modes.mint_google_access_token", return_value=("ya29.tok", 9999999999)),
-            patch("wif_bunker.modes.requests.get", return_value=mock_resp),
+            patch("wif_bunker.oidc.requests.get", return_value=mock_resp),
             caplog.at_level(logging.INFO),
         ):
             _run_status(config_path=str(bunker_file), adc_path=str(adc_file))
@@ -121,3 +121,34 @@ class TestRunAllVersions:
         assert "GOOGLE_APPLICATION_CREDENTIALS" in out
         assert "bunker.json" in out
         assert "adc.json" in out
+
+    def test_frozen_linux_no_env_vars_and_broken_module(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.chdir(tmp_path)
+        for key in (
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES",
+            "GOOGLE_CLOUD_PROJECT",
+            "XDG_RUNTIME_DIR",
+            "TPM2TOOLS_TCTI",
+            "PKCS11_MODULE",
+        ):
+            monkeypatch.delenv(key, raising=False)
+
+        monkeypatch.setattr("sys.frozen", True, raising=False)
+        monkeypatch.setattr("sys.platform", "linux")
+
+        orig_import = __import__
+
+        def flaky_import(name, *args, **kwargs):
+            if name == "dpop_signer_yubikey":
+                raise RuntimeError("broken driver")
+            return orig_import(name, *args, **kwargs)
+
+        with patch("wif_bunker.modes.importlib.import_module", side_effect=flaky_import):
+            _run_all_versions()
+
+        out = capsys.readouterr().out
+        assert "PyInstaller bundle" in out
+        assert "tpm2-pytss:" in out
+        assert "(error: broken driver)" in out
+        assert "(none of the relevant variables are set)" in out

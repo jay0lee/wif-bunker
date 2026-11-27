@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import logging
 import os
+import platform
+import ssl
+import struct
 import sys
 from pathlib import Path
 from typing import Any
 
 import requests
 
+from wif_bunker import __version__
 from wif_bunker.attestation import generate_attestation, print_attestation_summary, write_attestation_report
 from wif_bunker.config import BunkerConfig, WorkloadConfig
-from wif_bunker.oidc import mint_google_access_token
+from wif_bunker.oidc import mint_google_access_token, verify_project_access
 from wif_bunker.signers import load_signer
 from wif_bunker.utils import SYM_CHECK, SYM_CROSS, SYM_WARN
 
@@ -174,13 +179,8 @@ def _run_status(config_path: str | None = None, adc_path: str | None = None) -> 
         )
         logger.info("OIDC STS:  %s Token minted successfully (expires epoch=%d)", SYM_CHECK, expiry)
 
-        resp = requests.get(
-            f"https://cloudresourcemanager.googleapis.com/v1/projects/{bunker_cfg.project_id}",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        logger.info("GCP API:   %s Project call succeeded (%s)", SYM_CHECK, resp.json().get("name", ""))
+        proj_data = verify_project_access(token, bunker_cfg.project_id, timeout=15)
+        logger.info("GCP API:   %s Project call succeeded (%s)", SYM_CHECK, proj_data.get("name", ""))
     except requests.exceptions.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "?"
         body = exc.response.text[:300] if exc.response is not None else str(exc)
@@ -191,12 +191,6 @@ def _run_status(config_path: str | None = None, adc_path: str | None = None) -> 
 
 def _run_all_versions() -> None:
     """Print comprehensive version, signer availability, environment, and system info."""
-    import importlib
-    import platform
-    import ssl
-    import struct
-
-    from wif_bunker import __version__
 
     def _safe_version(module_name: str) -> str:
         try:

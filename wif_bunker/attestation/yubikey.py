@@ -27,6 +27,7 @@ from wif_bunker.attestation.base import (
     AttestationCheck,
     AttestationReport,
 )
+from wif_bunker.utils import yubikey_not_found_hint
 
 if TYPE_CHECKING:
     from wif_bunker.config import WorkloadConfig
@@ -264,8 +265,6 @@ def attest_yubikey(config: WorkloadConfig) -> AttestationReport:
 
     # Check 1: YubiKey detected
     if not devices:
-        from wif_bunker.utils import yubikey_not_found_hint  # pylint: disable=import-outside-toplevel
-
         hint = yubikey_not_found_hint()
         checks.append(
             AttestationCheck(

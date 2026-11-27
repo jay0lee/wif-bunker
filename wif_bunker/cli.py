@@ -33,6 +33,7 @@ from wif_bunker.oidc import (
     format_executable_response,
     mint_google_access_token,
     mint_oidc_jwt,
+    verify_project_access,
 )
 from wif_bunker.signers import load_signer
 from wif_bunker.utils import (
@@ -56,7 +57,10 @@ def _add_signer_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument(
         "--signer",
         choices=list(SIGNER_TYPES),
-        help="Signer backend to use (linux-tpm, windows-certstore, macos-secureenclave, yubikey, pkcs11, fido2-previewsign, software).",
+        help=(
+            "Signer backend to use (linux-tpm, windows-certstore, macos-secureenclave, "
+            "yubikey, pkcs11, fido2-previewsign, software)."
+        ),
     )
     group.add_argument("--key-id", help="Optional custom JWK 'kid' override.")
 
@@ -123,79 +127,109 @@ def _add_signer_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _infer_signer_type(args: argparse.Namespace) -> str | None:
+    """Infer signer backend type when an unambiguous backend flag was passed."""
+    flag_map = (
+        (bool(args.tpm_handle), "linux-tpm"),
+        (bool(args.windows_subject or args.windows_thumbprint), "windows-certstore"),
+        (bool(args.macos_label or args.macos_tag), "macos-secureenclave"),
+        (bool(args.pkcs11_uri or args.pkcs11_module), "pkcs11"),
+        (bool(args.fido2_credential), "fido2-previewsign"),
+        (bool(args.software_key_file), "software"),
+    )
+    for matched, stype in flag_map:
+        if matched:
+            return stype
+    return None
+
+
+def _populate_linux_tpm_args(args: argparse.Namespace, _parser: argparse.ArgumentParser, cfg: dict[str, Any]) -> None:
+    cfg["handle"] = args.tpm_handle or "0x81000001"
+    if args.tpm_tcti:
+        cfg["tcti"] = args.tpm_tcti
+    if args.tpm_auth:
+        cfg["auth"] = args.tpm_auth
+
+
+def _populate_windows_args(args: argparse.Namespace, parser: argparse.ArgumentParser, cfg: dict[str, Any]) -> None:
+    if not args.windows_subject and not args.windows_thumbprint:
+        parser.error("--signer windows-certstore requires --windows-subject or --windows-thumbprint.")
+    if args.windows_subject:
+        cfg["subject"] = args.windows_subject
+    if args.windows_thumbprint:
+        cfg["thumbprint"] = args.windows_thumbprint
+    cfg["store_location"] = args.windows_store
+
+
+def _populate_macos_args(args: argparse.Namespace, parser: argparse.ArgumentParser, cfg: dict[str, Any]) -> None:
+    if not args.macos_label and not args.macos_tag:
+        parser.error("--signer macos-secureenclave requires --macos-label or --macos-tag.")
+    if args.macos_label:
+        cfg["label"] = args.macos_label
+    if args.macos_tag:
+        cfg["tag"] = args.macos_tag
+
+
+def _populate_yubikey_args(args: argparse.Namespace, _parser: argparse.ArgumentParser, cfg: dict[str, Any]) -> None:
+    cfg["slot"] = args.yubikey_slot
+    if args.yubikey_serial is not None:
+        cfg["serial"] = args.yubikey_serial
+    if args.yubikey_pin is not None:
+        cfg["pin"] = args.yubikey_pin
+
+
+def _populate_pkcs11_args(args: argparse.Namespace, parser: argparse.ArgumentParser, cfg: dict[str, Any]) -> None:
+    if not args.pkcs11_uri and not args.pkcs11_module:
+        parser.error("--signer pkcs11 requires --pkcs11-uri (or --pkcs11-module).")
+    if args.pkcs11_uri:
+        cfg["uri"] = args.pkcs11_uri
+    if args.pkcs11_module:
+        cfg["module_path"] = args.pkcs11_module
+    if args.pkcs11_pin is not None:
+        cfg["pin"] = args.pkcs11_pin
+
+
+def _populate_fido2_args(args: argparse.Namespace, parser: argparse.ArgumentParser, cfg: dict[str, Any]) -> None:
+    if not args.fido2_credential:
+        parser.error("--signer fido2-previewsign requires --fido2-credential.")
+    cfg["credential_file"] = str(Path(args.fido2_credential).resolve())
+    if args.fido2_pin is not None:
+        cfg["pin"] = args.fido2_pin
+
+
+def _populate_software_args(args: argparse.Namespace, parser: argparse.ArgumentParser, cfg: dict[str, Any]) -> None:
+    if not args.software_key_file:
+        parser.error("--signer software requires --software-key-file.")
+    cfg["key_file"] = str(Path(args.software_key_file).resolve())
+
+
+_SIGNER_ARG_POPULATORS = {
+    "linux-tpm": _populate_linux_tpm_args,
+    "windows-certstore": _populate_windows_args,
+    "macos-secureenclave": _populate_macos_args,
+    "yubikey": _populate_yubikey_args,
+    "pkcs11": _populate_pkcs11_args,
+    "fido2-previewsign": _populate_fido2_args,
+    "software": _populate_software_args,
+}
+
+
 def _signer_config_from_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> dict[str, Any]:
     """Build a serializable ``signer`` config dictionary from CLI flags."""
-    stype = args.signer
+    stype = args.signer or _infer_signer_type(args)
     if not stype:
-        # Infer signer type if an unambiguous backend-specific flag was passed
-        if args.tpm_handle:
-            stype = "linux-tpm"
-        elif args.windows_subject or args.windows_thumbprint:
-            stype = "windows-certstore"
-        elif args.macos_label or args.macos_tag:
-            stype = "macos-secureenclave"
-        elif args.pkcs11_uri or args.pkcs11_module:
-            stype = "pkcs11"
-        elif args.fido2_credential:
-            stype = "fido2-previewsign"
-        elif args.software_key_file:
-            stype = "software"
-        else:
-            parser.error(
-                "Please specify --signer (e.g. linux-tpm, windows-certstore, "
-                "macos-secureenclave, yubikey, pkcs11, fido2-previewsign, software)."
-            )
+        parser.error(
+            "Please specify --signer (e.g. linux-tpm, windows-certstore, "
+            "macos-secureenclave, yubikey, pkcs11, fido2-previewsign, software)."
+        )
 
     cfg: dict[str, Any] = {"type": stype}
     if args.key_id:
         cfg["key_id"] = args.key_id
 
-    if stype == "linux-tpm":
-        cfg["handle"] = args.tpm_handle or "0x81000001"
-        if args.tpm_tcti:
-            cfg["tcti"] = args.tpm_tcti
-        if args.tpm_auth:
-            cfg["auth"] = args.tpm_auth
-    elif stype == "windows-certstore":
-        if not args.windows_subject and not args.windows_thumbprint:
-            parser.error("--signer windows-certstore requires --windows-subject or --windows-thumbprint.")
-        if args.windows_subject:
-            cfg["subject"] = args.windows_subject
-        if args.windows_thumbprint:
-            cfg["thumbprint"] = args.windows_thumbprint
-        cfg["store_location"] = args.windows_store
-    elif stype == "macos-secureenclave":
-        if not args.macos_label and not args.macos_tag:
-            parser.error("--signer macos-secureenclave requires --macos-label or --macos-tag.")
-        if args.macos_label:
-            cfg["label"] = args.macos_label
-        if args.macos_tag:
-            cfg["tag"] = args.macos_tag
-    elif stype == "yubikey":
-        cfg["slot"] = args.yubikey_slot
-        if args.yubikey_serial is not None:
-            cfg["serial"] = args.yubikey_serial
-        if args.yubikey_pin is not None:
-            cfg["pin"] = args.yubikey_pin
-    elif stype == "pkcs11":
-        if not args.pkcs11_uri and not args.pkcs11_module:
-            parser.error("--signer pkcs11 requires --pkcs11-uri (or --pkcs11-module).")
-        if args.pkcs11_uri:
-            cfg["uri"] = args.pkcs11_uri
-        if args.pkcs11_module:
-            cfg["module_path"] = args.pkcs11_module
-        if args.pkcs11_pin is not None:
-            cfg["pin"] = args.pkcs11_pin
-    elif stype == "fido2-previewsign":
-        if not args.fido2_credential:
-            parser.error("--signer fido2-previewsign requires --fido2-credential.")
-        cfg["credential_file"] = str(Path(args.fido2_credential).resolve())
-        if args.fido2_pin is not None:
-            cfg["pin"] = args.fido2_pin
-    elif stype == "software":
-        if not args.software_key_file:
-            parser.error("--signer software requires --software-key-file.")
-        cfg["key_file"] = str(Path(args.software_key_file).resolve())
+    populator = _SIGNER_ARG_POPULATORS.get(stype)
+    if populator is not None:
+        populator(args, parser, cfg)
 
     return cfg
 
@@ -260,7 +294,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     prov_grp.add_argument(
         "--use-provider",
         metavar="PROVIDER_ID",
-        help="Reuse and update an existing OIDC provider in place (PATCHes JWKS without soft-deleting; creates if missing).",
+        help=(
+            "Reuse and update an existing OIDC provider in place "
+            "(PATCHes JWKS without soft-deleting; creates if missing)."
+        ),
     )
     prov_grp.add_argument(
         "--create-provider",
@@ -322,7 +359,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--refresh-margin",
         type=int,
         default=DEFAULT_AGENT_REFRESH_MARGIN_SECONDS,
-        help=f"Refresh cached tokens when fewer than N seconds remain (default: {DEFAULT_AGENT_REFRESH_MARGIN_SECONDS}).",
+        help=(
+            f"Refresh cached tokens when fewer than N seconds remain (default: {DEFAULT_AGENT_REFRESH_MARGIN_SECONDS})."
+        ),
     )
     p_agent.add_argument(
         "--warm",
@@ -402,6 +441,67 @@ def _resolve_self_command() -> str:
     if argv0.exists():
         return f'"{argv0.as_posix()}"'
     return "wif-bunker"
+
+
+def _verify_setup_end_to_end(bunker_cfg: BunkerConfig, signer: Any, bunker_path: Path) -> None:
+    """Run live OIDC STS exchange + localhost agent ADC verification after setup."""
+    logger.info("=== 6) Verifying End-to-End OIDC WIF Authentication ===")
+
+    @with_retries(
+        max_attempts=15,
+        expected_errors=(400, 403, 404),
+        retryable_exceptions=(google.auth.exceptions.RefreshError, google.auth.exceptions.OAuthError),
+        retry_msg="Waiting for WIF/IAM propagation",
+    )
+    def _verify_exchange() -> dict[str, Any]:
+        token, _exp = mint_google_access_token(
+            bunker_cfg,
+            signer,
+            scopes=["https://www.googleapis.com/auth/cloud-platform"],
+        )
+        return verify_project_access(token, bunker_cfg.project_id, timeout=15)
+
+    proj_result = _verify_exchange()
+    logger.info("%s Direct OIDC STS exchange + GCP API call succeeded!", SYM_OK)
+    logger.info("   Target Project:   %s", proj_result.get("name"))
+    if bunker_cfg.service_account_email:
+        logger.info("   Service Account:  %s", bunker_cfg.service_account_email)
+
+    # Also prove standard google-auth ADC works against our localhost agent
+    verify_adc_path = bunker_path.parent / ".adc-verify.json"
+    server, tmp_adc, tmp_secret = start_agent(
+        bunker_cfg,
+        signer,
+        port=0,
+        adc_path=verify_adc_path,
+    )
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    prev_gac = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    try:
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(tmp_adc)
+        adc_creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        authed = AuthorizedSession(adc_creds)
+        api_res = authed.get(
+            f"https://cloudresourcemanager.googleapis.com/v1/projects/{bunker_cfg.project_id}",
+            timeout=30,
+        )
+        api_res.raise_for_status()
+        logger.info("%s Stock google-auth ADC via localhost agent succeeded!", SYM_OK)
+    finally:
+        if prev_gac is None:
+            os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+        else:
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = prev_gac
+        server.shutdown()
+        server.server_close()
+        server.token_cache.close()
+        for cleanup in (tmp_secret, tmp_adc):
+            try:
+                if cleanup.exists():
+                    cleanup.unlink()
+            except OSError:
+                pass
 
 
 def _cmd_setup(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
@@ -531,69 +631,7 @@ def _cmd_setup(args: argparse.Namespace, parser: argparse.ArgumentParser) -> Non
 
     # Step 6: Live End-to-End Verification (OIDC JWT → STS → SA → Agent ADC)
     if not args.skip_verify:
-        logger.info("=== 6) Verifying End-to-End OIDC WIF Authentication ===")
-
-        @with_retries(
-            max_attempts=15,
-            expected_errors=(400, 403, 404),
-            retryable_exceptions=(google.auth.exceptions.RefreshError, google.auth.exceptions.OAuthError),
-            retry_msg="Waiting for WIF/IAM propagation",
-        )
-        def _verify_exchange() -> dict[str, Any]:
-            token, _exp = mint_google_access_token(
-                bunker_cfg,
-                signer,
-                scopes=["https://www.googleapis.com/auth/cloud-platform"],
-            )
-            resp = requests.get(
-                f"https://cloudresourcemanager.googleapis.com/v1/projects/{bunker_cfg.project_id}",
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=15,
-            )
-            resp.raise_for_status()
-            return resp.json()
-
-        proj_result = _verify_exchange()
-        logger.info("%s Direct OIDC STS exchange + GCP API call succeeded!", SYM_OK)
-        logger.info("   Target Project:   %s", proj_result.get("name"))
-        if bunker_cfg.service_account_email:
-            logger.info("   Service Account:  %s", bunker_cfg.service_account_email)
-
-        # Also prove standard google-auth ADC works against our localhost agent
-        verify_adc_path = bunker_path.parent / ".adc-verify.json"
-        server, tmp_adc, tmp_secret = start_agent(
-            bunker_cfg,
-            signer,
-            port=0,
-            adc_path=verify_adc_path,
-        )
-        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-        server_thread.start()
-        prev_gac = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-        try:
-            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(tmp_adc)
-            adc_creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-            authed = AuthorizedSession(adc_creds)
-            api_res = authed.get(
-                f"https://cloudresourcemanager.googleapis.com/v1/projects/{bunker_cfg.project_id}",
-                timeout=30,
-            )
-            api_res.raise_for_status()
-            logger.info("%s Stock google-auth ADC via localhost agent succeeded!", SYM_OK)
-        finally:
-            if prev_gac is None:
-                os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
-            else:
-                os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = prev_gac
-            server.shutdown()
-            server.server_close()
-            server.token_cache.close()
-            for cleanup in (tmp_secret, tmp_adc):
-                try:
-                    if cleanup.exists():
-                        cleanup.unlink()
-                except OSError:
-                    pass
+        _verify_setup_end_to_end(bunker_cfg, signer, bunker_path)
 
     logger.info("")
     logger.info("=" * 70)

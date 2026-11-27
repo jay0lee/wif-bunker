@@ -224,3 +224,106 @@ class TestRealYubiKeyCerts:
         result = _verify_yubico_chain(attest_cert, f9_cert)
         assert result.passed, f"Chain verification failed for S/N {device['serial']}: {result.detail}"
         assert "Yubico Root CA" in result.detail
+
+
+class TestYubiKeyAttestationEdgeCases:
+    @patch("ykman.device.list_all_devices", create=True)
+    def test_multiple_yubikeys_requires_serial_and_selects_or_misses(self, mock_list, config):
+        from wif_bunker.attestation.yubikey import attest_yubikey
+
+        dev1, info1 = MagicMock(), MagicMock(serial=111, version=(5, 4, 3))
+        dev2, info2 = MagicMock(), MagicMock(serial=222, version=(5, 4, 3))
+        mock_list.return_value = [(dev1, info1), (dev2, info2)]
+
+        # No serial -> asks to specify
+        rep = attest_yubikey(config)
+        assert "Multiple YubiKeys found" in rep.checks[0].detail
+
+        # Unknown serial -> not found
+        config.yubikey_serial = 999
+        rep_missing = attest_yubikey(config)
+        assert "serial 999 not found" in rep_missing.checks[0].detail
+
+    @patch("ykman.device.list_all_devices", create=True)
+    def test_list_devices_exception_and_connection_failure(self, mock_list, config):
+        from wif_bunker.attestation.yubikey import attest_yubikey
+
+        mock_list.side_effect = RuntimeError("pcscd down")
+        rep = attest_yubikey(config)
+        assert "No YubiKey detected" in rep.checks[0].detail
+
+        dev, info = MagicMock(), MagicMock(serial=123, version=(4, 5, 0))
+        dev.open_connection.side_effect = RuntimeError("busy")
+        mock_list.side_effect = None
+        mock_list.return_value = [(dev, info)]
+        rep2 = attest_yubikey(config)
+        assert any("< 5.0.0" in c.detail for c in rep2.checks)
+        assert "Failed to communicate" in rep2.summary
+
+    @patch("ykman.device.list_all_devices", create=True)
+    @patch("yubikit.core.smartcard.SmartCardConnection", create=True)
+    @patch("yubikit.piv.PivSession", create=True)
+    def test_f9_read_failure_and_short_extensions(self, mock_piv_class, mock_conn, mock_list, config):
+        from wif_bunker.attestation.yubikey import _parse_attested_properties, _verify_yubico_chain, attest_yubikey
+
+        dev, info = MagicMock(), MagicMock(serial=123, version=(5, 4, 3))
+        mock_list.return_value = [(dev, info)]
+        piv_inst = mock_piv_class.return_value
+        cert = generate_test_cert(
+            "attest",
+            extensions=[
+                ("1.3.6.1.4.1.41482.3.7", bytes([0x01, 0x02])),  # raw non-DER serial
+                ("1.3.6.1.4.1.41482.3.8", bytes([0x02])),  # 1-byte policy
+            ],
+        )
+        piv_inst.attest_key.return_value = cert
+        piv_inst.get_certificate.side_effect = RuntimeError("no f9")
+
+        rep = attest_yubikey(config)
+        assert any("Failed to read F9" in c.detail for c in rep.checks)
+
+        props = _parse_attested_properties(cert)
+        assert "Serial: 258" in props
+        assert "PIN policy: Once" in props
+
+        # Self-signed bogus cert fails signature verification against another self-signed cert
+        other = generate_test_cert("other")
+        bad_sig = _verify_yubico_chain(cert, other)
+        assert bad_sig.passed is False
+        assert "not signed by F9" in bad_sig.detail
+
+        # Self-signed F9 + self-signed attest signed by F9 -> issuer not found in Yubico roots
+        not_found = _verify_yubico_chain(cert, cert)
+        assert not_found.passed is False
+        assert "Could not find Yubico CA" in not_found.detail
+
+    @patch("ykman.device.list_all_devices", create=True)
+    @patch("yubikit.core.smartcard.SmartCardConnection", create=True)
+    @patch("yubikit.piv.PivSession", create=True)
+    @patch("wif_bunker.attestation.yubikey._verify_yubico_chain")
+    def test_serial_selection(self, mock_verify, mock_piv_class, mock_conn, mock_list, config):
+        from wif_bunker.attestation.base import AttestationCheck
+        from wif_bunker.attestation.yubikey import attest_yubikey
+
+        dev1, info1 = MagicMock(), MagicMock(serial=111, version=(5, 4, 3))
+        dev2, info2 = MagicMock(), MagicMock(serial=222, version=(5, 4, 3))
+        mock_list.return_value = [(dev1, info1), (dev2, info2)]
+        config.yubikey_serial = 222
+        piv_inst = mock_piv_class.return_value
+        cert = generate_test_cert("attest")
+        piv_inst.attest_key.return_value = cert
+        piv_inst.get_certificate.return_value = cert
+        mock_verify.return_value = AttestationCheck("Attestation chain verified", True, "ok")
+
+        rep = attest_yubikey(config)
+        assert rep.tpm_info["serial"] == 222
+
+    def test_frozen_missing_yubico_roots(self, tmp_path, monkeypatch):
+        from wif_bunker.attestation.yubikey import _verify_yubico_chain
+
+        cert = generate_test_cert("attest")
+        monkeypatch.setattr("sys.frozen", True, raising=False)
+        monkeypatch.setattr("sys._MEIPASS", str(tmp_path), raising=False)
+        res = _verify_yubico_chain(cert, cert)
+        assert res.passed is False
+        assert "No Yubico root CA certificates bundled" in res.detail

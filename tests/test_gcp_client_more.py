@@ -1,7 +1,10 @@
 from unittest.mock import MagicMock, patch
 
+import google.auth.exceptions
+import pytest
 import requests
 
+from wif_bunker.config import WorkloadConfig
 from wif_bunker.gcp_client import GCPClient
 
 
@@ -144,3 +147,67 @@ def test_apply_iam_bindings():
 
         # Test reuse case
         client.apply_iam_bindings(config, "123", "cn1", "pool1", None, False)
+
+
+class TestGCPClientAdcErrorsAndProviderEdgeCases:
+    @pytest.mark.parametrize(
+        ("exc", "match"),
+        [
+            (google.auth.exceptions.DefaultCredentialsError("missing"), "No Google credentials found"),
+            (google.auth.exceptions.OAuthError("bad pool"), "WIF token exchange failed"),
+            (google.auth.exceptions.RefreshError("revoked"), "Failed to refresh Google credentials"),
+            (google.auth.exceptions.TransportError("offline"), "Network error during authentication"),
+        ],
+    )
+    def test_use_adc_auth_errors_wrapped_as_runtime_error(self, exc, match):
+        if isinstance(exc, google.auth.exceptions.DefaultCredentialsError):
+            with patch("wif_bunker.gcp_client.google.auth.default", side_effect=exc):
+                with pytest.raises(RuntimeError, match=match):
+                    GCPClient(use_adc=True)
+        else:
+            mock_creds = MagicMock()
+            mock_creds.refresh.side_effect = exc
+            with patch("wif_bunker.gcp_client.google.auth.default", return_value=(mock_creds, None)):
+                with pytest.raises(RuntimeError, match=match):
+                    GCPClient(use_adc=True)
+
+    def test_reuse_provider_non_404_error_reraises(self):
+        client = GCPClient.__new__(GCPClient)
+        resp_500 = MagicMock(status_code=500)
+        http_500 = requests.exceptions.HTTPError("boom", response=resp_500)
+        client._api_call_with_retry = MagicMock(side_effect=http_500)
+        cfg = WorkloadConfig()
+        cfg.project_id = "proj"
+        cfg.pool_id = "pool"
+        cfg.provider_id = "prov"
+        with pytest.raises(requests.exceptions.HTTPError):
+            client.setup_wif_infrastructure(
+                cfg, "123", {"keys": []}, reuse_pool=True, use_sa=False, reuse_provider=True
+            )
+
+    def test_create_provider_non_409_error_reraises(self):
+        client = GCPClient.__new__(GCPClient)
+        resp_403 = MagicMock(status_code=403)
+        http_403 = requests.exceptions.HTTPError("forbidden", response=resp_403)
+        client._api_call_with_retry = MagicMock(side_effect=http_403)
+        cfg = WorkloadConfig()
+        cfg.project_id = "proj"
+        cfg.pool_id = "pool"
+        cfg.provider_id = "prov"
+        with pytest.raises(requests.exceptions.HTTPError):
+            client.setup_wif_infrastructure(
+                cfg, "123", {"keys": []}, reuse_pool=True, use_sa=False, reuse_provider=False
+            )
+
+    def test_create_pool_409_soft_deleted_raises(self):
+        client = GCPClient.__new__(GCPClient)
+        resp_409 = MagicMock(status_code=409)
+        http_409 = requests.exceptions.HTTPError("exists", response=resp_409)
+        client._api_call_with_retry = MagicMock(side_effect=http_409)
+        client._api_call = MagicMock(return_value={"state": "DELETED"})
+        cfg = WorkloadConfig()
+        cfg.project_id = "proj"
+        cfg.pool_id = "pool"
+        cfg.provider_id = "prov"
+        with pytest.raises(RuntimeError, match="soft-deleted"):
+            client.setup_wif_infrastructure(cfg, "123", {"keys": []}, reuse_pool=False, use_sa=False)

@@ -5,11 +5,15 @@ from __future__ import annotations
 import base64
 import concurrent.futures
 import hashlib
+import http.server
 import json
 import logging
 import random
+import secrets
 import threading
 import time
+import urllib.parse
+import webbrowser
 from typing import Any, ClassVar
 
 import google.auth
@@ -116,11 +120,6 @@ class GCPClient:
         5. Exchanges the code for an access token with access_type=online
            (no refresh token stored).
         """
-        import http.server
-        import secrets
-        import urllib.parse
-        import webbrowser
-
         # Load OAuth client config.
         if client_secrets_file:
             with open(client_secrets_file, encoding="utf-8") as cfg_file:
@@ -335,7 +334,7 @@ class GCPClient:
           - ConnectionError / ConnectionResetError (transient network)
 
         Never retries:
-          - google.auth TransportError (mTLS / STS handshake — permanent)
+          - google.auth TransportError (TLS / STS handshake — permanent)
           - Other 4xx client errors (permanent)
 
         Backoff: ``min(2 ** attempt, MAX_BACKOFF) + random(0, 1)``
@@ -375,7 +374,7 @@ class GCPClient:
                 # Permanent error or timeout exhausted — let it propagate.
                 raise
             except (requests.exceptions.ConnectionError, OSError) as exc:
-                # Transient network errors — retry. Note: TransportError (mTLS)
+                # Transient network errors — retry. Note: google.auth TransportError
                 # is NOT caught here; it will propagate immediately.
                 if time.monotonic() < deadline:
                     sleep_time = min(2**attempt, MAX_BACKOFF_SECONDS) + random.uniform(0, 1)

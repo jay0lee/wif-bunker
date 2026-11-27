@@ -11,7 +11,6 @@ from cryptography.x509.oid import NameOID
 
 from wif_bunker.attestation.base import (
     AttestationCheck,
-    _load_certs,
     _verify_ek_chain_openssl,
     verify_ek_chain,
 )
@@ -81,35 +80,6 @@ def _generate_self_signed_cert() -> str:
         .sign(key, hashes.SHA256())
     )
     return cert.public_bytes(serialization.Encoding.PEM).decode()
-
-
-class TestLoadCerts:
-    """Tests for _load_certs helper."""
-
-    def test_loads_pem_files_from_directory(self, tmp_path):
-        """Loads all .pem files from a directory."""
-        ca_pem, _ = _generate_ca_and_signed_cert()
-        (tmp_path / "root1.pem").write_text(ca_pem)
-        (tmp_path / "root2.pem").write_text(_generate_self_signed_cert())
-
-        certs = _load_certs(tmp_path)
-        assert len(certs) == 2
-        assert all(isinstance(c, x509.Certificate) for c in certs)
-
-    def test_ignores_non_pem_files(self, tmp_path):
-        """Non-.pem files are not loaded."""
-        ca_pem, _ = _generate_ca_and_signed_cert()
-        (tmp_path / "root.pem").write_text(ca_pem)
-        (tmp_path / "readme.txt").write_text("not a cert")
-        (tmp_path / "cert.der").write_bytes(b"\x00\x01")
-
-        certs = _load_certs(tmp_path)
-        assert len(certs) == 1
-
-    def test_empty_directory(self, tmp_path):
-        """Empty directory returns empty list."""
-        certs = _load_certs(tmp_path)
-        assert certs == []
 
 
 class TestVerifyEkChain:

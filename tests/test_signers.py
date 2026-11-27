@@ -12,7 +12,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519
 
 from wif_bunker.oidc import build_jwks_from_signer
-from wif_bunker.signers import load_signer
+from wif_bunker.signers import _docs_hint, _parse_int_handle, load_signer
 
 
 class TestSoftwareSigner:
@@ -159,3 +159,69 @@ class TestHardwareSignerDispatch:
         monkeypatch.setitem(sys.modules, "dpop_signer_linux_tpm", None)
         with pytest.raises(RuntimeError, match="not installed"):
             load_signer({"type": "linux-tpm", "handle": "0x81000001"})
+
+    def test_parse_int_handle_accepts_int_and_docs_hint_unknown(self):
+        assert _parse_int_handle(0x81000001) == 0x81000001
+        assert _docs_hint("nonexistent-backend") == ""
+
+    def test_generic_signer_init_error_wrapped_in_runtime_error(self, monkeypatch):
+        fake_mod = ModuleType("dpop_signer_linux_tpm")
+        fake_mod.LinuxTPMDPoPSigner = MagicMock(side_effect=OSError("tpm busy"))
+        monkeypatch.setitem(sys.modules, "dpop_signer_linux_tpm", fake_mod)
+        with pytest.raises(RuntimeError, match="Failed to initialize 'linux-tpm' signer: tpm busy"):
+            load_signer({"type": "linux-tpm", "handle": 0x81000001})
+
+    def test_windows_certstore_missing_subject_and_thumbprint_raises(self, monkeypatch):
+        fake_mod = ModuleType("dpop_signer_windows_certstore")
+        fake_mod.WindowsCertStoreDPoPSigner = MagicMock()
+        monkeypatch.setitem(sys.modules, "dpop_signer_windows_certstore", fake_mod)
+        with pytest.raises(ValueError, match="requires either 'subject' or 'thumbprint'"):
+            load_signer({"type": "windows-certstore"})
+
+    def test_macos_secureenclave_tag_key_id_and_missing_raises(self, monkeypatch):
+        fake_mod = ModuleType("dpop_signer_macos_secureenclave")
+        mock_cls = MagicMock()
+        fake_mod.SecureEnclaveDPoPSigner = mock_cls
+        monkeypatch.setitem(sys.modules, "dpop_signer_macos_secureenclave", fake_mod)
+
+        with pytest.raises(ValueError, match="requires either 'label' or 'tag'"):
+            load_signer({"type": "macos-secureenclave"})
+
+        load_signer({"type": "macos-secureenclave", "tag": "com.example.key", "key_id": "se-1"})
+        mock_cls.assert_called_once_with(tag="com.example.key", key_id="se-1")
+
+    def test_yubikey_with_key_id(self, monkeypatch):
+        fake_mod = ModuleType("dpop_signer_yubikey")
+        mock_cls = MagicMock()
+        fake_mod.YubiKeyDPoPSigner = mock_cls
+        monkeypatch.setitem(sys.modules, "dpop_signer_yubikey", fake_mod)
+
+        load_signer({"type": "yubikey", "slot": "9a", "key_id": "yk-1"})
+        mock_cls.assert_called_once_with(slot="9a", key_id="yk-1")
+
+    def test_pkcs11_explicit_params_and_missing_raises(self, monkeypatch):
+        fake_mod = ModuleType("dpop_signer_pkcs11")
+        mock_cls = MagicMock()
+        fake_mod.PKCS11DPoPSigner = mock_cls
+        monkeypatch.setitem(sys.modules, "dpop_signer_pkcs11", fake_mod)
+
+        with pytest.raises(ValueError, match="requires 'uri' or explicit"):
+            load_signer({"type": "pkcs11"})
+
+        load_signer({"type": "pkcs11", "module_path": "/usr/lib/pkcs11.so", "token_label": "tok"})
+        mock_cls.assert_called_once_with(module_path="/usr/lib/pkcs11.so", token_label="tok")
+
+    def test_fido2_error_and_inline_metadata_paths(self, monkeypatch, tmp_path):
+        fake_mod = ModuleType("dpop_signer_fido2_previewsign")
+        mock_cls = MagicMock()
+        fake_mod.Fido2PreviewSignDPoPSigner = mock_cls
+        monkeypatch.setitem(sys.modules, "dpop_signer_fido2_previewsign", fake_mod)
+
+        with pytest.raises(ValueError, match="credential file not found"):
+            load_signer({"type": "fido2-previewsign", "credential_file": str(tmp_path / "missing.json")})
+
+        with pytest.raises(ValueError, match="requires 'credential_file' or credential metadata"):
+            load_signer({"type": "fido2-previewsign"})
+
+        load_signer({"type": "fido2-previewsign", "credential_id": "inline-id", "rp_id": "example.com"})
+        mock_cls.from_dict.assert_called_once_with({"credential_id": "inline-id", "rp_id": "example.com"})

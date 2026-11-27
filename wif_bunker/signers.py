@@ -16,8 +16,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+from cryptography.hazmat.primitives import serialization
+from google.auth.dpop import SoftwareDPoPSigner
 
 logger = logging.getLogger(__name__)
 
@@ -69,22 +73,12 @@ def load_signer(signer_cfg: dict[str, Any]) -> Any:
         raise ValueError("Signer configuration must be a dict containing a 'type' field.")
 
     stype = str(signer_cfg["type"]).strip().lower()
+    loader = _SIGNER_LOADERS.get(stype)
+    if loader is None:
+        raise ValueError(f"Unknown signer type '{stype}'. Supported types: {', '.join(sorted(SIGNER_DOC_URLS))}.")
 
     try:
-        if stype == "linux-tpm":
-            return _load_linux_tpm(signer_cfg)
-        if stype == "windows-certstore":
-            return _load_windows_certstore(signer_cfg)
-        if stype == "macos-secureenclave":
-            return _load_macos_secureenclave(signer_cfg)
-        if stype == "yubikey":
-            return _load_yubikey(signer_cfg)
-        if stype == "pkcs11":
-            return _load_pkcs11(signer_cfg)
-        if stype == "fido2-previewsign":
-            return _load_fido2_previewsign(signer_cfg)
-        if stype == "software":
-            return _load_software(signer_cfg)
+        return loader(signer_cfg)
     except (ValueError, RuntimeError):
         raise
     except ImportError as exc:
@@ -94,8 +88,6 @@ def load_signer(signer_cfg: dict[str, Any]) -> Any:
         ) from exc
     except Exception as exc:
         raise RuntimeError(f"Failed to initialize '{stype}' signer: {exc}{_docs_hint(stype)}") from exc
-
-    raise ValueError(f"Unknown signer type '{stype}'. Supported types: {', '.join(sorted(SIGNER_DOC_URLS))}.")
 
 
 def _load_linux_tpm(cfg: dict[str, Any]) -> Any:
@@ -198,9 +190,6 @@ def _load_fido2_previewsign(cfg: dict[str, Any]) -> Any:
 
 def _load_software(cfg: dict[str, Any]) -> Any:
     """Load a pre-existing PEM private key via ``SoftwareDPoPSigner`` (for CI/testing)."""
-    from cryptography.hazmat.primitives import serialization  # pylint: disable=import-outside-toplevel
-    from google.auth.dpop import SoftwareDPoPSigner  # pylint: disable=import-outside-toplevel
-
     key_file = cfg.get("key_file")
     if not key_file:
         raise ValueError("software signer requires 'key_file' pointing to a PEM private key.")
@@ -211,3 +200,14 @@ def _load_software(cfg: dict[str, Any]) -> Any:
     pwd_bytes = password.encode("utf-8") if isinstance(password, str) else password
     private_key = serialization.load_pem_private_key(key_path.read_bytes(), password=pwd_bytes)
     return SoftwareDPoPSigner(private_key, key_id=cfg.get("key_id"))
+
+
+_SIGNER_LOADERS: dict[str, Callable[[dict[str, Any]], Any]] = {
+    "linux-tpm": _load_linux_tpm,
+    "windows-certstore": _load_windows_certstore,
+    "macos-secureenclave": _load_macos_secureenclave,
+    "yubikey": _load_yubikey,
+    "pkcs11": _load_pkcs11,
+    "fido2-previewsign": _load_fido2_previewsign,
+    "software": _load_software,
+}

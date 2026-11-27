@@ -253,6 +253,24 @@ def mint_google_access_token(
     return sts_token, sts_exp
 
 
+def verify_project_access(
+    token: str,
+    project_id: str,
+    *,
+    session: requests.Session | None = None,
+    timeout: int = 15,
+) -> dict[str, Any]:
+    """Verify *token* can read *project_id* via Cloud Resource Manager."""
+    client = session or requests
+    resp = client.get(
+        f"https://cloudresourcemanager.googleapis.com/v1/projects/{project_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 def build_agent_adc_config(
     bunker_cfg: BunkerConfig,
     *,

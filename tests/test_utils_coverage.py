@@ -1,11 +1,9 @@
 """Tests to cover uncovered lines in wif_bunker/utils.py.
 
 Covers:
-- _supports_unicode: Windows ctypes error branches (lines 27, 31-42, 45-46)
-- _CleanFormatter: non-INFO levels (lines 79-81)
-- with_retries: custom_error_text match, final attempt error logging (lines 133-140)
-- _require_command: package + install_hint in error message (lines 178, 180)
-- preflight_check_openssl_shared: all platform branches, OSError (lines 268-269, 273, 277-283, 292-308, 311-322)
+- _supports_unicode: Windows ctypes error branches
+- _CleanFormatter: non-INFO levels
+- with_retries: custom_error_text match, final attempt error logging
 """
 
 from __future__ import annotations
@@ -20,9 +18,11 @@ import requests
 
 from wif_bunker.utils import (
     _CleanFormatter,
-    _require_command,
     _supports_unicode,
+    redact_tokens,
+    set_redaction,
     with_retries,
+    yubikey_not_found_hint,
 )
 
 # ---------------------------------------------------------------------------
@@ -41,7 +41,7 @@ class TestSupportsUnicodeEdgeCases:
         with (
             patch.dict(os.environ, {}, clear=True),
             patch("sys.platform", "win32"),
-            patch.dict("sys.modules", {"ctypes": mock_ctypes}),
+            patch("wif_bunker.utils.ctypes", mock_ctypes),
             patch("sys.stdout") as mock_stdout,
         ):
             mock_stdout.encoding = "utf-8"
@@ -55,7 +55,7 @@ class TestSupportsUnicodeEdgeCases:
         with (
             patch.dict(os.environ, {}, clear=True),
             patch("sys.platform", "win32"),
-            patch.dict("sys.modules", {"ctypes": mock_ctypes}),
+            patch("wif_bunker.utils.ctypes", mock_ctypes),
             patch("sys.stdout") as mock_stdout,
         ):
             mock_stdout.encoding = "cp1252"
@@ -70,7 +70,7 @@ class TestSupportsUnicodeEdgeCases:
         with (
             patch.dict(os.environ, {}, clear=True),
             patch("sys.platform", "win32"),
-            patch.dict("sys.modules", {"ctypes": mock_ctypes}),
+            patch("wif_bunker.utils.ctypes", mock_ctypes),
             patch("sys.stdout", mock_stdout),
         ):
             assert _supports_unicode() is False
@@ -202,34 +202,26 @@ class TestWithRetriesCustomErrorText:
             my_func()
 
 
-# ---------------------------------------------------------------------------
-# _require_command edge cases
-# ---------------------------------------------------------------------------
+class TestRedactionAndHints:
+    def test_set_redaction_toggle(self):
+        sample = '{"access_token": "ya29.secret-value"}'
+        try:
+            set_redaction(False)
+            assert redact_tokens(sample) == sample
+            set_redaction(True)
+            assert "***REDACTED***" in redact_tokens(sample)
+        finally:
+            set_redaction(True)
 
-
-class TestRequireCommandEdgeCases:
-    """Tests for _require_command with package and install_hint."""
-
-    def test_missing_with_package_only(self):
-        """Covers line 178: package text in error."""
-        with (
-            patch("shutil.which", return_value=None),
-            pytest.raises(RuntimeError, match="Package: mypkg"),
-        ):
-            _require_command("fakecmd", package="mypkg")
-
-    def test_missing_with_install_hint_only(self):
-        """Covers line 180: install_hint text in error."""
-        with (
-            patch("shutil.which", return_value=None),
-            pytest.raises(RuntimeError, match="Install: brew install fakecmd"),
-        ):
-            _require_command("fakecmd", install_hint="brew install fakecmd")
-
-    def test_missing_with_both(self):
-        """Covers lines 178, 180: both package and install_hint."""
-        with patch("shutil.which", return_value=None), pytest.raises(RuntimeError) as exc_info:
-            _require_command("fakecmd", package="mypkg", install_hint="brew install mypkg")
-        msg = str(exc_info.value)
-        assert "Package: mypkg" in msg
-        assert "Install: brew install mypkg" in msg
+    @pytest.mark.parametrize(
+        ("plat", "expected"),
+        [
+            ("linux", "pcscd"),
+            ("darwin", "Privacy & Security"),
+            ("win32", "Smart Card"),
+            ("freebsd", "Ensure the YubiKey is plugged in."),
+        ],
+    )
+    def test_yubikey_not_found_hint_per_platform(self, plat, expected):
+        with patch("sys.platform", plat):
+            assert expected in yubikey_not_found_hint()

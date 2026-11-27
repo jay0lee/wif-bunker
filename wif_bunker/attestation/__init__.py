@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
+import textwrap
 from pathlib import Path
 
-from wif_bunker.attestation.base import AttestationReport
+from wif_bunker.attestation.base import AttestationReport, _decode_manufacturer_id
 from wif_bunker.config import WorkloadConfig
 from wif_bunker.utils import SYM_CHECK, SYM_CROSS, SYM_WARN
 
@@ -135,8 +137,6 @@ def print_attestation_summary(report: AttestationReport) -> None:
 
 def _wrap_text(text: str, indent: int = 4, width: int = 66) -> list[str]:
     """Wrap text to fit within a terminal width, with indentation."""
-    import textwrap  # pylint: disable=import-outside-toplevel
-
     return textwrap.wrap(text, width=width, initial_indent=" " * indent, subsequent_indent=" " * indent)
 
 
@@ -144,18 +144,6 @@ def _log_wrapped(text: str, indent: int = 4, width: int = 66) -> None:
     """Log text wrapped to fit within a terminal width."""
     for line in _wrap_text(text, indent=indent, width=width):
         logger.info("%s", line)
-
-
-def _box(label: str, lines: list[str], width: int = 55) -> list[str]:
-    """Build an ASCII box with a label and content lines."""
-    result = []
-    inner = width - 4  # account for "│  " and "  │"
-    result.append(f"  ┌─ {label} {'─' * max(0, inner - len(label) - 1)}┐")
-    for line in lines:
-        padded = line[:inner].ljust(inner)
-        result.append(f"  │  {padded}│")
-    result.append(f"  └{'─' * (width - 2)}┘")
-    return result
 
 
 def _print_attestation_chain(report: AttestationReport) -> None:
@@ -182,14 +170,7 @@ def _print_attestation_chain(report: AttestationReport) -> None:
         tpm_mfr = tpm.get("manufacturer", "")
         if not tpm_mfr:
             mfr_id = tpm.get("ManufacturerId", 0)
-            try:
-                from wif_bunker.attestation.base import (
-                    _decode_manufacturer_id,  # pylint: disable=import-outside-toplevel
-                )
-
-                tpm_mfr = _decode_manufacturer_id(mfr_id) if mfr_id else ""
-            except ImportError:
-                tpm_mfr = ""
+            tpm_mfr = _decode_manufacturer_id(mfr_id) if mfr_id else ""
         fw = tpm.get("firmware", "") or tpm.get("ManufacturerVersion", "")
         yk_desc = tpm_mfr or "TPM 2.0"
         if fw:
@@ -205,8 +186,6 @@ def _print_attestation_chain(report: AttestationReport) -> None:
     ek_issuer_full = ek.get("issuer", "")
     ek_issuer_short = ek_issuer_full
     if "OU=" in ek_issuer_full:
-        import re  # pylint: disable=import-outside-toplevel
-
         m = re.search(r"OU=([^,]+)", ek_issuer_full)
         if m:
             ek_issuer_short = m.group(1)
@@ -220,8 +199,6 @@ def _print_attestation_chain(report: AttestationReport) -> None:
         logger.info("       └─ signed by: %s", ek_issuer_short)
         # If we can infer the root from the issuer
         if "root" not in ek_issuer_short.lower():
-            import re  # pylint: disable=import-outside-toplevel
-
             root_ou = ""
             if "O=" in ek_issuer_full:
                 m = re.search(r"O=([^,]+)", ek_issuer_full)

@@ -1,11 +1,11 @@
-"""Cross-cutting utilities: logging, retry decorator, secure file I/O, subprocess helpers."""
+"""Cross-cutting utilities: logging, retry decorator, secure file I/O, and redaction."""
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import os
 import re
-import shutil
 import sys
 import time
 from collections.abc import Callable
@@ -15,9 +15,10 @@ from typing import Any
 
 import requests
 
-from wif_bunker.config import MAX_BACKOFF_SECONDS
-
 logger = logging.getLogger(__name__)
+
+# Default retry backoff cap (re-exported by wif_bunker.config to keep utils a leaf module)
+MAX_BACKOFF_SECONDS = 60
 
 
 # --- Unicode Detection ---
@@ -37,8 +38,6 @@ def _supports_unicode() -> bool:
     if sys.platform == "win32":
         # Windows consoles use cp1252 by default. Only trust UTF-8 if the
         # console code page is 65001 or stdout is explicitly UTF-8.
-        import ctypes
-
         try:
             cp = ctypes.windll.kernel32.GetConsoleOutputCP()
             if cp == 65001:
@@ -118,23 +117,6 @@ def yubikey_not_found_hint() -> str:
             "(services.msc > 'Smart Card' > Start)."
         )
     return "Ensure the YubiKey is plugged in."
-
-
-def generate_pin(length: int = 24) -> str:
-    """Generate a cryptographically random alphanumeric PIN.
-
-    Used by both Linux TPM (PKCS#11 token PIN) and YubiKey (PIV PIN)
-    to replace hardcoded defaults with per-setup random values.
-
-    Default length is 24 chars — since PINs are never human-typed
-    (stored in 0o600 config files), longer is strictly better.
-    YubiKey callers should pass length=8 (PIV spec limit).
-    """
-    import secrets  # pylint: disable=import-outside-toplevel
-    import string  # pylint: disable=import-outside-toplevel
-
-    alphabet = string.ascii_letters + string.digits
-    return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
 class _CleanFormatter(logging.Formatter):
@@ -234,64 +216,6 @@ def write_secure_file(filepath: Path | str, content: str) -> None:
             "  cd %USERPROFILE%\\Desktop && wif-bunker ...  (Windows)\n"
             "  cd ~/Desktop && wif-bunker ...                (macOS/Linux)"
         ) from exc
-
-
-def _require_command(name: str, *, package: str = "", install_hint: str = "") -> str:
-    """Verify an external command is available on PATH.
-
-    Returns the resolved path.  Raises RuntimeError with install
-    instructions if the command is not found.
-    """
-    path = shutil.which(name)
-    if path:
-        return path
-    msg = f"Required command '{name}' not found on PATH."
-    if package:
-        msg += f"\n  Package: {package}"
-    if install_hint:
-        msg += f"\n  Install: {install_hint}"
-    raise RuntimeError(msg)
-
-
-def require_commands(
-    commands: list[tuple[str, str, str]],
-) -> dict[str, str]:
-    """Check all required commands upfront and report every missing one at once.
-
-    Args:
-        commands: List of (name, package, install_hint) tuples.
-
-    Returns:
-        Dict mapping command name to resolved path.
-
-    Raises:
-        RuntimeError: Lists *all* missing commands with install instructions.
-    """
-    found: dict[str, str] = {}
-    missing: list[str] = []
-    apt_packages: set[str] = set()
-
-    for name, package, install_hint in commands:
-        path = shutil.which(name)
-        if path:
-            found[name] = path
-        else:
-            line = f"  • {name}"
-            if package:
-                line += f"  (package: {package})"
-                apt_packages.add(package)
-            if install_hint:
-                line += f"  — {install_hint}"
-            missing.append(line)
-
-    if missing:
-        msg = f"Missing {len(missing)} required command(s):\n" + "\n".join(missing)
-        if apt_packages:
-            pkg_list = " ".join(sorted(apt_packages))
-            msg += f"\n\nInstall all with:\n  sudo apt install {pkg_list}"
-        raise RuntimeError(msg)
-
-    return found
 
 
 def preflight_check_write_access(directory: Path) -> None:

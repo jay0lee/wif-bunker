@@ -4,7 +4,6 @@ from unittest.mock import patch
 import pytest
 
 from wif_bunker.attestation import (
-    _box,
     _format_text_report,
     generate_attestation,
     print_attestation_summary,
@@ -28,14 +27,6 @@ def test_generate_attestation_unsupported(monkeypatch):
     config.use_yubikey = False
     with pytest.raises(RuntimeError, match="Unsupported platform"):
         generate_attestation(config)
-
-
-def test_box():
-    result = _box("Label", ["line1", "line2"])
-    assert len(result) == 4
-    assert "Label" in result[0]
-    assert "line1" in result[1]
-    assert "line2" in result[2]
 
 
 def test_print_attestation_summary_unsupported(caplog):
@@ -105,6 +96,36 @@ def test_print_attestation_chain_tpm_no_issuer(caplog):
     )
     print_attestation_summary(report)
     assert "NCryptCreateClaim" in caplog.text
+
+
+def test_print_attestation_chain_no_org_and_yubikey_no_issuer(caplog):
+    caplog.set_level(logging.INFO)
+    report1 = AttestationReport(
+        platform="linux-tpm2",
+        supported=True,
+        hardware_type="TPM 2.0",
+        checks=[AttestationCheck("Test", True, "Detail")],
+        summary="summary",
+        tpm_info={"ManufacturerId": 1229870147},
+        ek_details={"issuer": "OU=IntermediateCA"},
+        workload_cn="wl",
+    )
+    print_attestation_summary(report1)
+    assert "Root CA: verified" in caplog.text
+
+    caplog.clear()
+    report2 = AttestationReport(
+        platform="yubikey",
+        supported=True,
+        hardware_type="YubiKey",
+        checks=[AttestationCheck("Test", True, "Detail")],
+        summary="summary",
+        tpm_info={},
+        ek_details={},
+        workload_cn="wl",
+    )
+    print_attestation_summary(report2)
+    assert "signed by Yubico Root CA" in caplog.text
 
 
 def test_format_text_report_unsupported():

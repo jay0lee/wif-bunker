@@ -8,19 +8,20 @@ from PyInstaller.utils.hooks import copy_metadata
 block_cipher = None
 
 # ── Hidden imports ──
-# Signer backends are imported lazily inside wif_bunker/signers.py.
+# Signer backends and platform attestation modules are imported lazily.
 hiddenimports = [
     'dpop_signer_yubikey',
     'dpop_signer_pkcs11',
     'dpop_signer_fido2_previewsign',
     'google.auth.dpop',
+    'wif_bunker.attestation.yubikey',
 ]
 if sys.platform == 'win32':
-    hiddenimports.append('dpop_signer_windows_certstore')
+    hiddenimports += ['dpop_signer_windows_certstore', 'wif_bunker.attestation.windows']
 elif sys.platform == 'darwin':
-    hiddenimports.append('dpop_signer_macos_secureenclave')
+    hiddenimports += ['dpop_signer_macos_secureenclave', 'wif_bunker.attestation.macos']
 elif sys.platform.startswith('linux'):
-    hiddenimports.append('dpop_signer_linux_tpm')
+    hiddenimports += ['dpop_signer_linux_tpm', 'tpm2_pytss', 'wif_bunker.attestation.linux']
 
 # ── Package metadata ──
 datas = []

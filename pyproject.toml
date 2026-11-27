@@ -35,7 +35,7 @@ packages = ["wif_bunker", "wif_bunker.attestation"]
 "wif_bunker.attestation" = ["roots/**/*.pem"]
 
 [project.scripts]
-wif-bunker = "wif_bunker:main"
+wif-bunker = "wif_bunker.cli:main"
 
 # ── Ruff ──
 [tool.ruff]
@@ -84,7 +84,7 @@ source = ["wif_bunker"]
 
 [tool.coverage.report]
 show_missing = true
-fail_under = 75
+fail_under = 90
 exclude_lines = [
     "pragma: no cover",
     "def _oauth_user_token",

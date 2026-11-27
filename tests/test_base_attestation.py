@@ -11,7 +11,6 @@ from OpenSSL.crypto import X509StoreContextError
 
 from wif_bunker.attestation.base import (
     _decode_manufacturer_id,
-    _load_certs,
     _parse_tcg_attributes,
     _verify_ek_chain_openssl,
     parse_ek_details,
@@ -37,16 +36,6 @@ def _generate_test_cert_pem():
         .sign(private_key, hashes.SHA256())
     )
     return cert.public_bytes(Encoding.PEM)
-
-
-def test_load_certs_skips_bad_files(tmp_path):
-    good_pem = _generate_test_cert_pem()
-
-    (tmp_path / "good.pem").write_bytes(good_pem)
-    (tmp_path / "bad.pem").write_text("this is not a cert")
-
-    certs = _load_certs(tmp_path)
-    assert len(certs) == 1
 
 
 def test_verify_ek_chain_openssl_no_roots(tmp_path):
@@ -145,6 +134,29 @@ def test_aia_chasing_success(mock_urlopen, mock_run, mock_verify, tmp_path):
     # urllib returns a cert
     cm = MagicMock()
     cm.__enter__.return_value.read.return_value = _generate_test_cert_pem()
+    mock_urlopen.return_value = cm
+
+    ek_pem = _generate_test_cert_pem().decode("utf-8")
+    check = _verify_ek_chain_openssl(ek_pem, roots_dir, intermediates_dir)
+    assert check.passed
+
+
+@patch("OpenSSL.crypto.X509StoreContext.verify_certificate")
+@patch("subprocess.run")
+@patch("urllib.request.urlopen")
+def test_aia_chasing_der_fallback(mock_urlopen, mock_run, mock_verify, tmp_path):
+    roots_dir = tmp_path / "roots"
+    roots_dir.mkdir()
+    (roots_dir / "root.pem").write_bytes(_generate_test_cert_pem())
+    intermediates_dir = tmp_path / "intermediates"
+    intermediates_dir.mkdir()
+
+    mock_verify.side_effect = [X509StoreContextError("unable to get local issuer certificate", [], None), None]
+    mock_run.return_value = MagicMock(returncode=0, stdout="CA Issuers - URI:http://test.com/cert.der")
+
+    der_bytes = x509.load_pem_x509_certificate(_generate_test_cert_pem()).public_bytes(Encoding.DER)
+    cm = MagicMock()
+    cm.__enter__.return_value.read.return_value = der_bytes
     mock_urlopen.return_value = cm
 
     ek_pem = _generate_test_cert_pem().decode("utf-8")

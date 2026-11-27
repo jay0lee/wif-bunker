@@ -5,6 +5,7 @@ import json
 import subprocess
 from unittest.mock import MagicMock, patch
 
+import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -392,3 +393,120 @@ class TestParseTcgAttributes:
         )
         attrs = _parse_tcg_attributes(cert)
         assert attrs == {}
+
+
+class TestWindowsAttestVerdictsAndThumbprint:
+    @patch("wif_bunker.attestation.windows.subprocess.run")
+    def test_key_provider_and_exportability_with_thumbprint(self, mock_run, sample_config):
+        from wif_bunker.attestation.windows import _check_exportability, _check_key_provider
+
+        sample_config.signer_params["thumbprint"] = "aa bb cc"
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="Microsoft Platform Crypto Provider|my-key", stderr=""
+        )
+        chk, info = _check_key_provider(sample_config)
+        assert chk.passed is True
+        assert info["key_name"] == "my-key"
+        assert "AABBCC" in mock_run.call_args.args[0][-1]
+
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="True\n", stderr="")
+        exp_chk = _check_exportability(sample_config)
+        assert exp_chk.passed is True
+
+    @pytest.mark.parametrize(
+        ("provider_info", "tpm_ok", "ek_ok", "prov_ok", "claim_ok", "exp_ok", "expected_phrase"),
+        [
+            (
+                {"provider": "Microsoft Software Key Storage Provider"},
+                True,
+                True,
+                False,
+                False,
+                False,
+                "Software Key Storage Provider",
+            ),
+            (
+                {"provider": "Microsoft Platform Crypto Provider"},
+                True,
+                True,
+                True,
+                True,
+                True,
+                "Cryptographically proven",
+            ),
+            (
+                {"provider": "Microsoft Platform Crypto Provider"},
+                True,
+                True,
+                True,
+                False,
+                True,
+                "NCryptCreateClaim failed",
+            ),
+            (
+                None,
+                True,
+                True,
+                False,
+                False,
+                False,
+                "not stored in the Platform Crypto Provider",
+            ),
+            (
+                None,
+                True,
+                False,
+                False,
+                False,
+                False,
+                "identity could not be fully verified",
+            ),
+        ],
+    )
+    def test_attest_windows_verdict_matrix(
+        self, sample_config, provider_info, tpm_ok, ek_ok, prov_ok, claim_ok, exp_ok, expected_phrase
+    ):
+        from wif_bunker.attestation.base import AttestationCheck
+        from wif_bunker.attestation.windows import _attest_windows
+
+        with (
+            patch("wif_bunker.attestation.windows._is_admin", return_value=True),
+            patch(
+                "wif_bunker.attestation.windows._check_tpm_status",
+                return_value=(AttestationCheck("TPM status", tpm_ok, "d"), {"TpmPresent": tpm_ok}),
+            ),
+            patch(
+                "wif_bunker.attestation.windows._check_ek_info",
+                return_value=(AttestationCheck("EK information", ek_ok, "d"), {"PublicKeyHash": "x"}),
+            ),
+            patch(
+                "wif_bunker.attestation.windows._extract_ek_certificate",
+                return_value=(
+                    AttestationCheck("EK certificate extracted", ek_ok, "d"),
+                    "PEM" if ek_ok else None,
+                    {"issuer": "CA"} if ek_ok else {},
+                ),
+            ),
+            patch(
+                "wif_bunker.attestation.windows._verify_ek_chain_windows",
+                return_value=AttestationCheck("EK certificate chain verified", ek_ok, "d"),
+            ),
+            patch(
+                "wif_bunker.attestation.windows._check_key_provider",
+                return_value=(AttestationCheck("Key storage provider", prov_ok, "d"), provider_info),
+            ),
+            patch(
+                "wif_bunker.attestation.windows._ncrypt_create_claim",
+                return_value=(
+                    AttestationCheck("NCryptCreateClaim attestation", claim_ok, "d"),
+                    b"blob" if claim_ok else None,
+                ),
+            ),
+            patch(
+                "wif_bunker.attestation.windows._check_exportability",
+                return_value=AttestationCheck("Key non-exportability", exp_ok, "d"),
+            ),
+            patch("wif_bunker.attestation.windows._check_platform_certificate", return_value=None),
+        ):
+            rep = _attest_windows(sample_config)
+        assert expected_phrase in rep.summary
