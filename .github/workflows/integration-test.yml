@@ -83,21 +83,21 @@ jobs:
             runner_id: windows
             signer_kind: windows-certstore
             artifact_name: wif-bunker-windows-2025-vs2026
-          # ── Self-hosted real hardware ──
-          - name: Hardware TPM (NUC8)
-            os: ubuntu-24.04
-            runs_on: '["self-hosted", "Linux", "X64", "tpm"]'
-            runner_id: nuc8-tpm
-            signer_kind: linux-hw-tpm
-            artifact_name: wif-bunker-ubuntu-24.04
-            self_hosted: true
-          - name: YubiKey (NUC8)
-            os: ubuntu-24.04
-            runs_on: '["self-hosted", "Linux", "X64", "yk"]'
-            runner_id: nuc8-yk
-            signer_kind: yubikey
-            artifact_name: wif-bunker-ubuntu-24.04
-            self_hosted: true
+          # ── Self-hosted real hardware (temporarily disabled while NUC8 is offline) ──
+          # - name: Hardware TPM (NUC8)
+          #   os: ubuntu-24.04
+          #   runs_on: '["self-hosted", "Linux", "X64", "tpm"]'
+          #   runner_id: nuc8-tpm
+          #   signer_kind: linux-hw-tpm
+          #   artifact_name: wif-bunker-ubuntu-24.04
+          #   self_hosted: true
+          # - name: YubiKey (NUC8)
+          #   os: ubuntu-24.04
+          #   runs_on: '["self-hosted", "Linux", "X64", "yk"]'
+          #   runner_id: nuc8-yk
+          #   signer_kind: yubikey
+          #   artifact_name: wif-bunker-ubuntu-24.04
+          #   self_hosted: true
 
     runs-on: ${{ matrix.runs_on && fromJSON(matrix.runs_on) || matrix.os }}
     name: ${{ matrix.name }}
