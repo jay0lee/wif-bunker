@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -102,9 +103,10 @@ def _load_linux_tpm(cfg: dict[str, Any]) -> Any:
 
     raw_handle = cfg.get("handle", 0x81000001)
     handle = _parse_int_handle(raw_handle)
+    tcti = cfg.get("tcti") or os.environ.get("TPM2TOOLS_TCTI")
     return LinuxTPMDPoPSigner(
         handle=handle,
-        tcti=cfg.get("tcti"),
+        tcti=tcti,
         auth=cfg.get("auth"),
         key_id=cfg.get("key_id"),
     )

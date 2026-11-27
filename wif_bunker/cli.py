@@ -389,16 +389,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 def _resolve_self_command() -> str:
     """Return an executable command prefix for invoking ``wif-bunker``.
 
+    Uses ``os.path.abspath`` (NOT ``Path.resolve()``) so Python virtual
+    environment symlinks are preserved and the subprocess stays inside the venv.
     Uses POSIX forward slashes so Google's Pluggable Auth parser
     (``shlex.split(..., posix=True)``) preserves paths cleanly on Windows too.
     """
     if getattr(sys, "frozen", False):
-        return f'"{Path(sys.executable).resolve().as_posix()}"'
-    argv0 = Path(sys.argv[0])
+        return f'"{Path(os.path.abspath(sys.executable)).as_posix()}"'
+    argv0 = Path(os.path.abspath(sys.argv[0]))
     if argv0.name == "__main__.py" or argv0.suffix == ".py":
-        return f'"{Path(sys.executable).resolve().as_posix()}" -m wif_bunker'
+        return f'"{Path(os.path.abspath(sys.executable)).as_posix()}" -m wif_bunker'
     if argv0.exists():
-        return f'"{argv0.resolve().as_posix()}"'
+        return f'"{argv0.as_posix()}"'
     return "wif-bunker"
 
 
@@ -574,7 +576,7 @@ def _cmd_setup(args: argparse.Namespace, parser: argparse.ArgumentParser) -> Non
             authed = AuthorizedSession(adc_creds)
             api_res = authed.get(
                 f"https://cloudresourcemanager.googleapis.com/v1/projects/{bunker_cfg.project_id}",
-                timeout=15,
+                timeout=30,
             )
             api_res.raise_for_status()
             logger.info("%s Stock google-auth ADC via localhost agent succeeded!", SYM_OK)
@@ -667,13 +669,23 @@ def _main_impl() -> None:
     parser = _build_arg_parser()
     args = parser.parse_args()
 
-    # For `sign-jwt`, keep stdout strictly clean for Pluggable Auth JSON by logging to stderr.
-    log_stream = sys.stderr if args.command == "sign-jwt" else None
+    # Google's Pluggable Auth (google.auth.pluggable) merges stderr into stdout
+    # (stderr=subprocess.STDOUT) and calls json.loads() on the combined output.
+    # Suppress INFO/WARNING logs during `sign-jwt` unless --debug is set so
+    # signer init messages never corrupt the Pluggable Auth JSON envelope.
+    if args.command == "sign-jwt":
+        log_stream = sys.stderr
+        log_level = logging.DEBUG if args.debug else logging.ERROR
+    else:
+        log_stream = None
+        log_level = logging.DEBUG if args.debug else logging.INFO
+
     handler = logging.StreamHandler(log_stream)
     handler.setFormatter(_CleanFormatter())
     logging.basicConfig(
-        level=logging.DEBUG if args.debug else logging.INFO,
+        level=log_level,
         handlers=[handler],
+        force=True,
     )
 
     if args.no_redact:

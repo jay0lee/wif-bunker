@@ -185,3 +185,24 @@ class TestResolveSelfCommand:
             cmd = _resolve_self_command()
         assert cmd.endswith('" -m wif_bunker')
         assert "__main__.py" not in cmd
+
+    def test_sign_jwt_suppresses_info_logs_on_stderr(self, tmp_path, sample_bunker_config, capsys):
+        bunker_file = tmp_path / "bunker.json"
+        sample_bunker_config.save(bunker_file)
+
+        orig_load = __import__("wif_bunker.signers", fromlist=["load_signer"]).load_signer
+
+        def noisy_load_signer(cfg):
+            logging.getLogger("dpop_signer_noisy").info("Signer initialized noise!")
+            return orig_load(cfg)
+
+        with (
+            patch("wif_bunker.cli.load_signer", side_effect=noisy_load_signer),
+            patch("sys.argv", ["wif-bunker", "sign-jwt", "--config", str(bunker_file)]),
+        ):
+            _main_impl()
+
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        parsed = json.loads(captured.out)
+        assert parsed["success"] is True

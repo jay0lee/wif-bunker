@@ -92,6 +92,16 @@ class TestHardwareSignerDispatch:
         load_signer({"type": "linux-tpm", "handle": "0x81000001", "tcti": "swtpm:port=2321", "auth": "pw"})
         mock_cls.assert_called_once_with(handle=0x81000001, tcti="swtpm:port=2321", auth="pw", key_id=None)
 
+    def test_linux_tpm_inherits_tpm2tools_tcti_env(self, monkeypatch):
+        fake_mod = ModuleType("dpop_signer_linux_tpm")
+        mock_cls = MagicMock()
+        fake_mod.LinuxTPMDPoPSigner = mock_cls
+        monkeypatch.setitem(sys.modules, "dpop_signer_linux_tpm", fake_mod)
+        monkeypatch.setenv("TPM2TOOLS_TCTI", "tabrmd:bus_type=session")
+
+        load_signer({"type": "linux-tpm", "handle": "0x81000001"})
+        mock_cls.assert_called_once_with(handle=0x81000001, tcti="tabrmd:bus_type=session", auth=None, key_id=None)
+
     def test_windows_certstore_dispatches(self, monkeypatch):
         fake_mod = ModuleType("dpop_signer_windows_certstore")
         mock_cls = MagicMock()
