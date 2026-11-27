@@ -37,10 +37,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-26.04, ubuntu-22.04-arm, ubuntu-24.04-arm, ubuntu-26.04-arm, macos-15, macos-26, windows-2025-vs2026]
+        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-26.04, ubuntu-22.04-arm, ubuntu-24.04-arm, ubuntu-26.04-arm, macos-15, macos-26, windows-2025-vs2026, windows-11-arm]
 
     env:
       VERSION: ${{ needs.version.outputs.version }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       # Force Python to use UTF-8 for stdout/stderr on Windows (default is cp1252)
       PYTHONIOENCODING: utf-8
       # Windows code signing — cert SHA1 thumbprint (public, not secret)
@@ -119,6 +120,14 @@ jobs:
           fi
           "${PYTHON}" -m pip install --upgrade pip
           "${PYTHON}" -m pip install pyinstaller
+          if [[ "${RUNNER_OS}" == "Windows" && "${RUNNER_ARCH}" == "ARM64" ]]; then
+            # PyPI does not publish win_arm64 wheels for cryptography — use jay0lee/cryptography-wheels
+            WHEEL_URL=$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN:-}" \
+              https://api.github.com/repos/jay0lee/cryptography-wheels/releases/latest \
+              | "${PYTHON}" -c "import json, sys; rel = json.load(sys.stdin); print(next(a['browser_download_url'] for a in rel['assets'] if 'win_arm64' in a['name'] and a['name'].endswith('.whl')))")
+            echo "Installing Windows ARM64 cryptography wheel: ${WHEEL_URL}"
+            "${PYTHON}" -m pip install "${WHEEL_URL}"
+          fi
           "${PYTHON}" -m pip install --only-deps .
 
       # ══════════════════════════════════════════════════════════════════════
@@ -218,13 +227,28 @@ jobs:
           xcrun notarytool submit "$zipfilename" --key "$KEY_FILE" --key-id "$APPLE_KEY_ID" --issuer "$APPLE_ISSUER_ID"
           rm -v "$zipfilename"
 
+      - name: "Windows: Ensure InnoSetup is installed"
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          WIN_ARCH=$([ "${RUNNER_ARCH}" = "ARM64" ] && echo "arm64" || echo "x86_64")
+          echo "WIN_ARCH=${WIN_ARCH}" >> "$GITHUB_ENV"
+          if ! command -v iscc &>/dev/null; then
+            if [ -x "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" ]; then
+              echo "/c/Program Files (x86)/Inno Setup 6" >> "$GITHUB_PATH"
+            else
+              choco install innosetup -y --no-progress
+              echo "/c/Program Files (x86)/Inno Setup 6" >> "$GITHUB_PATH"
+            fi
+          fi
+
       - name: Package (Windows — InnoSetup)
         if: runner.os == 'Windows' && env.TOTP_SECRET == ''
         shell: bash
         env:
           TOTP_SECRET: ${{ secrets.TOTP_SECRET }}
         run: |
-          iscc /DVersion="$VERSION" 'packaging\windows\wif-bunker.iss'
+          iscc /DVersion="$VERSION" /DArch="$WIN_ARCH" 'packaging\windows\wif-bunker.iss'
 
       - name: "Debug: dump iscc signed command"
         if: runner.os == 'Windows' && env.TOTP_SECRET != ''
@@ -238,8 +262,8 @@ jobs:
           ls -la 'packaging\windows\wif-bunker.iss' || ls -la packaging/windows/wif-bunker.iss
           echo "=== WINDOWS_CODESIGN_CERT_HASH ==="
           echo "${CERTUM_CERT_THUMBPRINT:-$WINDOWS_CODESIGN_CERT_HASH}"
-          echo "=== VERSION ==="
-          echo "$VERSION"
+          echo "=== VERSION / WIN_ARCH ==="
+          echo "$VERSION / $WIN_ARCH"
           echo "=== iscc location ==="
           which iscc || echo "iscc not on PATH, using full path"
           echo "=== signtool location ==="
@@ -251,6 +275,7 @@ jobs:
             /DSignToolName=wifbunkersigntool \
             /S"wifbunkersigntool=$signtool sign /sha1 $cert_hash /tr http://time.certum.pl /td SHA256 /fd SHA256 /v \$f" \
             /DVersion="$VERSION" \
+            /DArch="$WIN_ARCH" \
             'packaging\windows\wif-bunker.iss'
 
       - name: Package (Windows — InnoSetup, signed)
@@ -267,6 +292,7 @@ jobs:
             /DSignToolName=wifbunkersigntool \
             /S"wifbunkersigntool=$signtool sign /sha1 $cert_hash /tr http://time.certum.pl /td SHA256 /fd SHA256 /v \$f" \
             /DVersion="$VERSION" \
+            /DArch="$WIN_ARCH" \
             'packaging\windows\wif-bunker.iss'
 
       - name: "Windows: Verify InnoSetup installer signature"

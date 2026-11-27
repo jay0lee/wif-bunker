@@ -48,7 +48,7 @@ jobs:
           PRUNE_LEGACY="${{ inputs.prune_legacy_pools }}"
 
           # Runner IDs — MUST match integration-test.yml matrix.runner_id values
-          RUNNERS="u2204-x64 u2404-x64 u2604-x64 u2204-arm u2404-arm u2604-arm macos-15 macos-26 windows nuc8-tpm nuc8-yk"
+          RUNNERS="u2204-x64 u2404-x64 u2604-x64 u2204-arm u2404-arm u2604-arm macos-15 macos-26 windows windows-arm64 nuc8-tpm nuc8-yk"
 
           iam_bind() {
             for attempt in 1 2 3 4 5; do

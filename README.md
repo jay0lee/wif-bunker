@@ -48,7 +48,7 @@ bash <(curl -s -S -L https://raw.githubusercontent.com/jay0lee/wif-bunker/main/p
 
 ### Windows
 
-Download and run `wif-bunker-VERSION-windows-x86_64-setup.exe` from [Releases](https://github.com/jay0lee/wif-bunker/releases).
+Download and run `wif-bunker-VERSION-windows-x86_64-setup.exe` (or `wif-bunker-VERSION-windows-arm64-setup.exe` for Windows on ARM) from [Releases](https://github.com/jay0lee/wif-bunker/releases).
 
 ### From source (Python 3.10+)
 

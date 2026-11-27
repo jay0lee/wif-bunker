@@ -77,12 +77,17 @@ jobs:
             runner_id: macos-26
             signer_kind: software-pem
             artifact_name: wif-bunker-macos-26
-          # ── Windows x64 (Windows Certificate Store CNG signer) ──
+          # ── Windows x64 & ARM64 (Windows Certificate Store CNG signer) ──
           - os: windows-2025-vs2026
             name: Windows x64
             runner_id: windows
             signer_kind: windows-certstore
             artifact_name: wif-bunker-windows-2025-vs2026
+          - os: windows-11-arm
+            name: Windows ARM64
+            runner_id: windows-arm64
+            signer_kind: windows-certstore
+            artifact_name: wif-bunker-windows-11-arm
           # ── Self-hosted real hardware (temporarily disabled while NUC8 is offline) ──
           # - name: Hardware TPM (NUC8)
           #   os: ubuntu-24.04
@@ -156,6 +161,13 @@ jobs:
 
           if [[ "${RUNNER_OS}" == "Linux" ]]; then
             export CFLAGS="-std=c11 ${CFLAGS:-}"
+          elif [[ "${RUNNER_OS}" == "Windows" && "${RUNNER_ARCH}" == "ARM64" ]]; then
+            # PyPI does not publish win_arm64 wheels for cryptography — use jay0lee/cryptography-wheels
+            WHEEL_URL=$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN:-}" \
+              https://api.github.com/repos/jay0lee/cryptography-wheels/releases/latest \
+              | "${PYTHON}" -c "import json, sys; rel = json.load(sys.stdin); print(next(a['browser_download_url'] for a in rel['assets'] if 'win_arm64' in a['name'] and a['name'].endswith('.whl')))")
+            echo "Installing Windows ARM64 cryptography wheel: ${WHEEL_URL}"
+            "${PYTHON}" -m pip install "${WHEEL_URL}"
           fi
           "${PYTHON}" -m pip install --upgrade pip
           "${PYTHON}" -m pip install --upgrade --only-deps .

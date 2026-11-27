@@ -5,6 +5,16 @@
   #define Version "0.0.0" ; Default fallback version
 #endif
 
+#ifndef Arch
+  #define Arch "x86_64"
+#endif
+
+#if Arch == "arm64"
+  #define InnoArch "arm64"
+#else
+  #define InnoArch "x64"
+#endif
+
 [Setup]
 AppName=WIF Bunker
 AppVersion={#Version}
@@ -13,10 +23,11 @@ AppPublisherURL=https://github.com/jay0lee/wif-bunker
 DefaultDirName={autopf}\WIF Bunker
 DefaultGroupName=WIF Bunker
 DisableProgramGroupPage=yes
-OutputBaseFilename=wif-bunker-{#Version}-windows-x86_64-setup
+OutputBaseFilename=wif-bunker-{#Version}-windows-{#Arch}-setup
 Compression=lzma2
 SolidCompression=yes
-ArchitecturesInstallIn64BitMode=x64
+ArchitecturesAllowed={#InnoArch}
+ArchitecturesInstallIn64BitMode={#InnoArch}
 PrivilegesRequired=lowest
 ChangesEnvironment=yes
 DirExistsWarning=no
