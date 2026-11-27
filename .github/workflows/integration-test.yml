@@ -88,21 +88,21 @@ jobs:
             runner_id: windows-arm64
             signer_kind: windows-certstore
             artifact_name: wif-bunker-windows-11-arm
-          # ── Self-hosted real hardware (temporarily disabled while NUC8 is offline) ──
-          # - name: Hardware TPM (NUC8)
-          #   os: ubuntu-24.04
-          #   runs_on: '["self-hosted", "Linux", "X64", "tpm"]'
-          #   runner_id: nuc8-tpm
-          #   signer_kind: linux-hw-tpm
-          #   artifact_name: wif-bunker-ubuntu-24.04
-          #   self_hosted: true
-          # - name: YubiKey (NUC8)
-          #   os: ubuntu-24.04
-          #   runs_on: '["self-hosted", "Linux", "X64", "yk"]'
-          #   runner_id: nuc8-yk
-          #   signer_kind: yubikey
-          #   artifact_name: wif-bunker-ubuntu-24.04
-          #   self_hosted: true
+          # ── Self-hosted real hardware (NUC8 — two isolated runners on one host) ──
+          - name: Hardware TPM (NUC8)
+            os: ubuntu-24.04
+            runs_on: '["self-hosted", "Linux", "X64", "tpm"]'
+            runner_id: nuc8-tpm
+            signer_kind: linux-hw-tpm
+            artifact_name: wif-bunker-ubuntu-24.04
+            self_hosted: true
+          - name: YubiKey (NUC8)
+            os: ubuntu-24.04
+            runs_on: '["self-hosted", "Linux", "X64", "yk"]'
+            runner_id: nuc8-yk
+            signer_kind: yubikey
+            artifact_name: wif-bunker-ubuntu-24.04
+            self_hosted: true
 
     runs-on: ${{ matrix.runs_on && fromJSON(matrix.runs_on) || matrix.os }}
     name: ${{ matrix.name }}
@@ -116,6 +116,9 @@ jobs:
       BUNKER_SA: bunker-wif-sa@wif-test-${{ matrix.runner_id }}.iam.gserviceaccount.com
       WORKLOAD_SUBJECT: bunker-ci-workload
       PYTHONIOENCODING: utf-8
+      # Isolate per-runner config/runtime dirs so parallel runners on NUC8 never contend on $HOME
+      CLOUDSDK_CONFIG: ${{ runner.temp }}/gcloud-config
+      XDG_RUNTIME_DIR: ${{ runner.temp }}/xdg-runtime
 
     defaults:
       run:
@@ -282,7 +285,7 @@ jobs:
           tpm2_flushcontext --saved-session
           HANDLES=$(tpm2_getcap handles-persistent | grep -oP '0x[0-9A-Fa-f]+' || true)
           for h in $HANDLES; do
-            tpm2_evictcontrol -c "$h"
+            tpm2_evictcontrol -C o -c "$h"
           done
 
           tpm2_createprimary -C o -g sha256 -G ecc -c "$RUNNER_TEMP/primary.ctx"
@@ -329,7 +332,10 @@ jobs:
                           pin_policy=PIN_POLICY.ONCE,
                           touch_policy=TOUCH_POLICY.NEVER,
                       )
-                      print(f"Generated ES256 key in PIV slot 9c on YubiKey {serial}")
+                      # Store slot's attestation cert in 9c so firmware <5.3 (e.g. 5.2.7),
+                      # which lacks GET_METADATA, still exposes the public key to dpop-signer-yubikey.
+                      piv.put_certificate(SLOT.SIGNATURE, piv.attest_key(SLOT.SIGNATURE))
+                      print(f"Generated ES256 key + cert in PIV slot 9c on YubiKey {serial}")
                   break
           PYEOF
 
@@ -505,7 +511,7 @@ jobs:
         run: |
           if [ "${{ matrix.signer_kind }}" = "linux-hw-tpm" ]; then
             HANDLES=$(tpm2_getcap handles-persistent | grep -oP '0x[0-9A-Fa-f]+' || true)
-            for h in $HANDLES; do tpm2_evictcontrol -c "$h"; done
+            for h in $HANDLES; do tpm2_evictcontrol -C o -c "$h"; done
           elif [ "${{ matrix.signer_kind }}" = "yubikey" ] && [ -n "${{ steps.yubikey.outputs.serial }}" ]; then
             "${PYTHON}" -c "import sys; from ykman.device import list_all_devices; from yubikit.core.smartcard import SmartCardConnection; from yubikit.piv import PivSession; serial=int(sys.argv[1]); [PivSession(dev.open_connection(SmartCardConnection)).reset() for dev, info in list_all_devices() if info.serial == serial]" "${{ steps.yubikey.outputs.serial }}"
           fi
