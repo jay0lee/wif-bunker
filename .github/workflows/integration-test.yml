@@ -116,9 +116,6 @@ jobs:
       BUNKER_SA: bunker-wif-sa@wif-test-${{ matrix.runner_id }}.iam.gserviceaccount.com
       WORKLOAD_SUBJECT: bunker-ci-workload
       PYTHONIOENCODING: utf-8
-      # Isolate per-runner config/runtime dirs so parallel runners on NUC8 never contend on $HOME
-      CLOUDSDK_CONFIG: ${{ runner.temp }}/gcloud-config
-      XDG_RUNTIME_DIR: ${{ runner.temp }}/xdg-runtime
 
     defaults:
       run:
@@ -126,6 +123,13 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: "Isolate per-runner gcloud & runtime dirs"
+        run: |
+          mkdir -p "$RUNNER_TEMP/gcloud-config" "$RUNNER_TEMP/xdg-runtime"
+          chmod 700 "$RUNNER_TEMP/xdg-runtime" 2>/dev/null || true
+          echo "CLOUDSDK_CONFIG=$RUNNER_TEMP/gcloud-config" >> "$GITHUB_ENV"
+          echo "XDG_RUNTIME_DIR=$RUNNER_TEMP/xdg-runtime" >> "$GITHUB_ENV"
 
       # ── Authenticate to GCP via WIF as this runner's static CI SA ──
       - id: auth
