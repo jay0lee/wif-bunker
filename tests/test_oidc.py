@@ -178,6 +178,7 @@ class TestAdcConfigBuilders:
         assert cfg["token_url"] == "http://127.0.0.1:43210/v1/token"
         assert cfg["credential_source"] == {"file": str(secret_file)}
         assert "service_account_impersonation_url" not in cfg
+        assert "quota_project_id" not in cfg
 
     def test_build_executable_adc_config_with_sa_and_output_file(self, sample_bunker_config, tmp_path):
         bunker_path = tmp_path / "bunker.json"
@@ -191,6 +192,7 @@ class TestAdcConfigBuilders:
         assert cfg["type"] == "external_account"
         assert cfg["token_url"] == "https://sts.googleapis.com/v1/token"
         assert "service_account_impersonation_url" in cfg
+        assert "quota_project_id" not in cfg
         exe = cfg["credential_source"]["executable"]
         assert "sign-jwt" in exe["command"]
         assert exe["output_file"] == str(cache_path.resolve())

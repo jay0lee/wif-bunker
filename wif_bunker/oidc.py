@@ -273,7 +273,6 @@ def build_agent_adc_config(
         "credential_source": {
             "file": str(secret_file),
         },
-        "quota_project_id": bunker_cfg.project_id,
     }
 
 
@@ -318,7 +317,6 @@ def build_executable_adc_config(
         "credential_source": {
             "executable": executable_cfg,
         },
-        "quota_project_id": bunker_cfg.project_id,
     }
     if bunker_cfg.service_account_email:
         adc["service_account_impersonation_url"] = _IAM_CREDENTIALS_URL_TEMPLATE.format(

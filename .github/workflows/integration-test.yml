@@ -390,9 +390,9 @@ jobs:
             --config "$RUNNER_TEMP/bunker.json" \
             --adc-file "$RUNNER_TEMP/adc-agent.json" \
             --secret-file "$RUNNER_TEMP/agent-secret" \
-            --warm &
+            > "$RUNNER_TEMP/agent.log" 2>&1 < /dev/null &
           AGENT_PID=$!
-          trap 'kill "$AGENT_PID" 2>/dev/null || true' EXIT
+          trap 'rc=$?; kill "$AGENT_PID" 2>/dev/null || true; [ "$rc" -ne 0 ] && [ -f "$RUNNER_TEMP/agent.log" ] && cat "$RUNNER_TEMP/agent.log" || true' EXIT
 
           for i in $(seq 1 30); do
             [ -f "$RUNNER_TEMP/adc-agent.json" ] && break
@@ -446,9 +446,10 @@ jobs:
           $WIF_CMD agent \
             --config "$RUNNER_TEMP/bunker-nosa.json" \
             --adc-file "$RUNNER_TEMP/adc-nosa.json" \
-            --secret-file "$RUNNER_TEMP/agent-secret-nosa" &
+            --secret-file "$RUNNER_TEMP/agent-secret-nosa" \
+            > "$RUNNER_TEMP/agent-nosa.log" 2>&1 < /dev/null &
           AGENT_PID=$!
-          trap 'kill "$AGENT_PID" 2>/dev/null || true' EXIT
+          trap 'rc=$?; kill "$AGENT_PID" 2>/dev/null || true; [ "$rc" -ne 0 ] && [ -f "$RUNNER_TEMP/agent-nosa.log" ] && cat "$RUNNER_TEMP/agent-nosa.log" || true' EXIT
 
           for i in $(seq 1 30); do
             [ -f "$RUNNER_TEMP/adc-nosa.json" ] && break
