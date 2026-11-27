@@ -1,132 +1,167 @@
-"""Configuration dataclasses, constants, and key algorithm definitions."""
+"""Configuration dataclasses and constants for WIF Bunker (OIDC WIF)."""
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
 
 # --- Tuning Constants ---
 MAX_BACKOFF_SECONDS = 60
 API_RETRY_TIMEOUT_SECONDS = 900  # 15 minutes max total retry time
 LRO_TIMEOUT_SECONDS = 300
 
+# Default lifetimes
+DEFAULT_OIDC_JWT_LIFETIME_SECONDS = 60  # Short-lived in-RAM assertion for agent mode
+DEFAULT_EXECUTABLE_JWT_LIFETIME_SECONDS = 300  # 5 min assertion for executable mode
+DEFAULT_AGENT_REFRESH_MARGIN_SECONDS = 300  # Refresh 5 min before 1-hour expiry
 
-# WIF maximum certificate lifetime (Google enforced).
-_WIF_MAX_CERT_LIFETIME_DAYS = 390
-_DEFAULT_CERT_LIFETIME_DAYS = 90
+# Algorithms supported by GCP Workload Identity Federation OIDC static JWKS
+SUPPORTED_OIDC_ALGORITHMS = ("ES256", "RS256")
 
-# --- Key Algorithm Definitions ---
-# Maps user-facing algorithm names to platform-specific parameters.
-# Each entry: (description, supported_platforms)
-_KEY_ALGORITHMS: dict[str, dict] = {
-    "es256": {
-        "desc": "ECDSA P-256 (default, fastest)",
-        "platforms": {"darwin", "win32", "linux", "yubikey"},
-        "macos_sc_auth": "p-256-ne",  # sc_auth -k flag
-        "windows_certreq": "ECDSA_P256",  # certreq INF KeyAlgorithm (legacy)
-        "ncrypt_algo": "ECDSA_P256",  # NCryptCreatePersistedKey algorithm
-        "ncrypt_key_length": None,  # ECC key length is implicit in algorithm
-        "ncrypt_cng_class": "ECDsaCng",  # .NET class for CopyWithPrivateKey
-        "linux_tpm2": "ecc256",  # tpm2_ptool --algorithm
-    },
-    "es384": {
-        "desc": "ECDSA P-384",
-        "platforms": {"darwin", "win32", "linux", "yubikey"},
-        "macos_sc_auth": "p-384-ne",
-        "windows_certreq": "ECDSA_P384",
-        "ncrypt_algo": "ECDSA_P384",
-        "ncrypt_key_length": None,
-        "ncrypt_cng_class": "ECDsaCng",
-        "linux_tpm2": "ecc384",
-    },
-    "rsa2048": {
-        "desc": "RSA 2048-bit",
-        "platforms": {"win32", "linux", "yubikey"},
-        "windows_certreq": "RSA",
-        "windows_key_length": 2048,
-        "ncrypt_algo": "RSA",
-        "ncrypt_key_length": 2048,
-        "ncrypt_cng_class": "RSACng",
-        "linux_tpm2": "rsa2048",
-    },
-    "rsa3072": {
-        "desc": "RSA 3072-bit",
-        "platforms": {"win32", "linux"},
-        "windows_certreq": "RSA",
-        "windows_key_length": 3072,
-        "ncrypt_algo": "RSA",
-        "ncrypt_key_length": 3072,
-        "ncrypt_cng_class": "RSACng",
-        "linux_tpm2": "rsa3072",
-    },
-    "rsa4096": {
-        "desc": "RSA 4096-bit (slowest, YubiKey firmware 5.7+)",
-        "platforms": {"win32", "linux", "yubikey"},
-        "windows_certreq": "RSA",
-        "windows_key_length": 4096,
-        "ncrypt_algo": "RSA",
-        "ncrypt_key_length": 4096,
-        "ncrypt_cng_class": "RSACng",
-        "linux_tpm2": "rsa4096",
-    },
-}
+# Supported pluggable hardware/software signer backends
+SIGNER_TYPES = (
+    "linux-tpm",
+    "windows-certstore",
+    "macos-secureenclave",
+    "yubikey",
+    "pkcs11",
+    "fido2-previewsign",
+    "software",
+)
+
+# Config files written by wif-bunker
+_CONFIG_FILES = ("bunker.json", "adc.json")
 
 
-# --- Config file names written by wif-bunker ---
-_CONFIG_FILES = ("adc.json", "certificate_config.json", "workload_cert.pem", "trust_chain.pem")
+@dataclass
+class BunkerConfig:
+    """Persistent local configuration written to ``bunker.json`` (0600).
 
-
-def _generate_tpm_pin(length: int = 24) -> str:
-    """Generate a random alphanumeric PIN for TPM PKCS#11 tokens.
-
-    Default 24 chars — never human-typed, stored in 0o600 config files.
+    Contains NO private key material — only the GCP WIF resource coordinates,
+    public JWK metadata, and parameters telling the chosen signer how to locate
+    the pre-existing hardware key.
     """
-    import secrets  # pylint: disable=import-outside-toplevel
-    import string  # pylint: disable=import-outside-toplevel
 
-    alphabet = string.ascii_letters + string.digits
-    return "".join(secrets.choice(alphabet) for _ in range(length))
+    project_id: str
+    project_number: str
+    pool_id: str
+    provider_id: str
+    audience: str
+    issuer_uri: str
+    subject: str
+    signer: dict[str, Any]
+    public_jwk: dict[str, Any]
+    service_account_email: str | None = None
+    version: int = 1
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a JSON-compatible dictionary."""
+        data: dict[str, Any] = {
+            "version": self.version,
+            "project_id": self.project_id,
+            "project_number": self.project_number,
+            "pool_id": self.pool_id,
+            "provider_id": self.provider_id,
+            "audience": self.audience,
+            "issuer_uri": self.issuer_uri,
+            "subject": self.subject,
+            "service_account_email": self.service_account_email,
+            "signer": self.signer,
+            "public_jwk": self.public_jwk,
+        }
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> BunkerConfig:
+        """Deserialize from a dictionary loaded from ``bunker.json``."""
+        required = (
+            "project_id",
+            "project_number",
+            "pool_id",
+            "provider_id",
+            "audience",
+            "issuer_uri",
+            "subject",
+            "signer",
+            "public_jwk",
+        )
+        missing = [k for k in required if k not in data]
+        if missing:
+            raise ValueError(f"Invalid bunker.json: missing required field(s): {', '.join(missing)}")
+        return cls(
+            version=int(data.get("version", 1)),
+            project_id=str(data["project_id"]),
+            project_number=str(data["project_number"]),
+            pool_id=str(data["pool_id"]),
+            provider_id=str(data["provider_id"]),
+            audience=str(data["audience"]),
+            issuer_uri=str(data["issuer_uri"]),
+            subject=str(data["subject"]),
+            service_account_email=data.get("service_account_email"),
+            signer=dict(data["signer"]),
+            public_jwk=dict(data["public_jwk"]),
+        )
+
+    def save(self, path: Path | str) -> Path:
+        """Write configuration to *path* with strict 0600 permissions."""
+        from wif_bunker.utils import write_secure_file  # pylint: disable=import-outside-toplevel
+
+        out_path = Path(path)
+        write_secure_file(out_path, json.dumps(self.to_dict(), indent=2) + "\n")
+        return out_path
+
+    @classmethod
+    def load(cls, path: Path | str) -> BunkerConfig:
+        """Load configuration from *path*."""
+        in_path = Path(path)
+        if not in_path.exists():
+            raise FileNotFoundError(f"WIF Bunker config file not found: {in_path}")
+        try:
+            raw = json.loads(in_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid JSON in {in_path}: {exc}") from exc
+        if not isinstance(raw, dict):
+            raise ValueError(f"Invalid bunker.json in {in_path}: expected JSON object")
+        return cls.from_dict(raw)
 
 
-# --- Runtime Configuration ---
 @dataclass
 class WorkloadConfig:
-    """Runtime configuration generated at execution time, not import time."""
+    """Runtime configuration for setup and attestation commands."""
 
     sa_name: str = "bunker-wif-sa"
     pool_id: str = "bunker-wif-pool"
-    provider_id: str = field(init=False)  # unique per run
-    linux_tpm_pin: str = field(default_factory=lambda: _generate_tpm_pin())
-    key_algorithm: str = "es256"
-    cert_lifetime_days: int = _DEFAULT_CERT_LIFETIME_DAYS
-    soft_key: bool = False  # Use software keys (CI testing, no TPM required)
-    use_yubikey: bool = False  # Use YubiKey PIV instead of platform TPM/SE
-    yubikey_serial: int | None = None  # Specific YubiKey serial (if multiple)
-    yubikey_slot: str = "9a"  # PIV slot: 9a, 9c, 9d, 9e
-    yubikey_touch_policy: str = "never"  # never, cached, always
+    provider_id: str = field(init=False)
     suffix: str = field(default_factory=lambda: str(int(time.time())))
     project_id: str = field(init=False)
-    workload_cn: str = field(init=False)
-    ca_cn: str = field(init=False)
+    workload_cn: str = field(init=False)  # Also used as OIDC JWT `sub` and attestation label
+    issuer_uri: str = field(init=False)
+
+    # Signer selection & locator parameters
+    signer_type: str | None = None
+    signer_params: dict[str, Any] = field(default_factory=dict)
+
+    # Attestation-specific optional targets
+    use_yubikey: bool = False
+    yubikey_serial: int | None = None
+    yubikey_slot: str = "9c"
+    linux_tpm_handle: int | None = None
+    windows_store_location: str = "current_user"
 
     def __post_init__(self) -> None:
         self.project_id = f"bunker-wif-{self.suffix}"
-        self.provider_id = f"bunker-x509-prov-{self.suffix}"
+        self.provider_id = f"bunker-oidc-prov-{self.suffix}"
         self.workload_cn = f"bunker-workload-{self.suffix}"
-        self.ca_cn = f"bunker-ca-{self.suffix}"
+        self.issuer_uri = f"https://wif-bunker.internal/{self.provider_id}"
 
     @property
-    def key_algo_config(self) -> dict:
-        """Returns the platform-specific parameters for the configured algorithm."""
-        return _KEY_ALGORITHMS[self.key_algorithm]
+    def subject(self) -> str:
+        """OIDC JWT subject claim (`sub`)."""
+        return self.workload_cn
 
-
-@dataclass
-class CertificateBundle:
-    """Result of hardware-backed cert generation."""
-
-    trust_anchor_pem: str  # CA cert PEM — uploaded to GCP as trust anchor
-    workload_cert_pem: str  # Workload cert PEM — needed on-disk for google-auth
-    issuer_cn: str  # CA's CN — used in ECP config for cert selection
-    serial_number_hex: str  # Workload cert serial (hex) — for WIF condition
-    sha256_fingerprint: str  # Workload cert SHA-256 fingerprint (base64)
+    @subject.setter
+    def subject(self, value: str) -> None:
+        self.workload_cn = value

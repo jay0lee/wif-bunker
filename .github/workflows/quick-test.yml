@@ -142,6 +142,14 @@ jobs:
         id: setup-python-ssl
         uses: jay0lee/python-openssl-latest@v1
 
+      # ── System libs (Linux) ──
+      - name: "Install system dependencies (Linux)"
+        if: needs.config.outputs.install_wif_bunker == 'true' && runner.os == 'Linux' && needs.config.outputs.runner != 'hardware-tpm' && needs.config.outputs.runner != 'yubikey'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libpcsclite-dev libtss2-dev swig pkg-config
+
       # ── Install wif-bunker ──
       - name: "Install wif-bunker"
         if: needs.config.outputs.install_wif_bunker == 'true'
@@ -155,40 +163,11 @@ jobs:
             source .venv/bin/activate
             echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
           fi
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            export CFLAGS="-std=c11 ${CFLAGS:-}"
+          fi
           pip install --upgrade pip
           pip install .
-
-      # ── Build hardmTLS ──
-      - name: "Install Rust toolchain"
-        if: needs.config.outputs.install_wif_bunker == 'true'
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: "Windows: Configure MSVC for hardmTLS"
-        if: needs.config.outputs.install_wif_bunker == 'true' && runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
-        with:
-          arch: ${{ runner.arch }}
-
-      - name: "Windows: Hide Git link.exe (shadows MSVC)"
-        if: needs.config.outputs.install_wif_bunker == 'true' && runner.os == 'Windows'
-        shell: bash
-        run: |
-          GIT_LINK="/c/Program Files/Git/usr/bin/link.exe"
-          if [ -f "$GIT_LINK" ]; then
-            mv "$GIT_LINK" "${GIT_LINK}.bak"
-            echo "Renamed Git link.exe to avoid MSVC collision"
-          fi
-
-      - name: "Build hardmTLS"
-        if: needs.config.outputs.install_wif_bunker == 'true'
-        shell: bash
-        env:
-          OPENSSL_DIR: ${{ steps.setup-python-ssl.outputs.openssl-path }}
-        run: |
-          cd hardmtls-native
-          cargo build --release
-          echo "hardmTLS library built:"
-          ls -la target/release/libhardmtls* target/release/hardmtls* 2>/dev/null || true
 
       # ── TPM Reset (hardware-tpm only) ──
       - name: "Reset TPM to clean state"
@@ -196,37 +175,22 @@ jobs:
         shell: bash
         run: |
           echo "=== TPM Info ==="
-          tpm2_getcap properties-fixed 2>/dev/null | head -20 || echo "(tpm2_getcap failed)"
+          tpm2_getcap properties-fixed | head -20
+
+          echo ""
+          echo "=== Flushing transient contexts ==="
+          tpm2_flushcontext --transient-object
+          tpm2_flushcontext --loaded-session
+          tpm2_flushcontext --saved-session
 
           echo ""
           echo "=== Evicting persistent handles ==="
-          HANDLES=$(tpm2_getcap handles-persistent 2>/dev/null | grep -oP '0x[0-9A-Fa-f]+' || true)
+          HANDLES=$(tpm2_getcap handles-persistent | grep -oP '0x[0-9A-Fa-f]+' || true)
           for h in $HANDLES; do
             echo "  Evicting $h"
-            tpm2_evictcontrol -c "$h" 2>/dev/null || true
+            tpm2_evictcontrol -c "$h"
           done
           [ -n "$HANDLES" ] && echo "Evicted $(echo "$HANDLES" | wc -w) handle(s)." || echo "No stale handles."
-
-          echo ""
-          echo "=== Resetting PKCS#11 store ==="
-          rm -rf "$HOME/.tpm2_pkcs11"
-          mkdir -p "$HOME/.tpm2_pkcs11"
-          export TPM2_PKCS11_STORE="$HOME/.tpm2_pkcs11"
-
-          echo ""
-          echo "=== Bootstrap DB via C library ==="
-          pkcs11-tool --module /usr/lib/x86_64-linux-gnu/pkcs11/libtpm2_pkcs11.so -T 2>&1 || true
-
-          echo ""
-          echo "=== Initialize tpm2-pkcs11 store (token created by WIF Bunker) ==="
-          if command -v tpm2_ptool &>/dev/null; then
-            tpm2_ptool init --path="$HOME/.tpm2_pkcs11" 2>/dev/null || true
-            echo "Initialized fresh tpm2-pkcs11 store."
-          fi
-
-          echo ""
-          echo "=== Verify PKCS#11 store ==="
-          ls -la "$HOME/.tpm2_pkcs11/"
 
       # ── Diagnostics: dump environment ──
       - name: "Environment dump"
@@ -245,30 +209,18 @@ jobs:
 
           if command -v tpm2_getcap &>/dev/null; then
             echo "=== TPM ==="
-            tpm2_getcap properties-fixed 2>/dev/null | grep -E "(TPM2_PT_MANUFACTURER|TPM2_PT_FIRMWARE)" || true
+            tpm2_getcap properties-fixed | grep -E "(TPM2_PT_MANUFACTURER|TPM2_PT_FIRMWARE)" || true
             echo ""
             echo "=== TPM Persistent Handles ==="
-            tpm2_getcap handles-persistent 2>/dev/null || echo "(none)"
-            echo ""
-            echo "=== PKCS#11 Store ==="
-            echo "TPM2_PKCS11_STORE=${TPM2_PKCS11_STORE:-'(not set)'}"
-            ls -la "$HOME/.tpm2_pkcs11/" 2>/dev/null || echo "(not found)"
-            echo ""
-            echo "=== PKCS#11 Tokens ==="
-            pkcs11-tool --module /usr/lib/x86_64-linux-gnu/pkcs11/libtpm2_pkcs11.so -T 2>&1 || true
+            tpm2_getcap handles-persistent || echo "(none)"
           fi
 
       # ── Run the script ──
       - name: "Run script"
         shell: bash
         run: |
-          # Activate venv if it exists
           if [ -d ".venv" ]; then
             source .venv/bin/activate || . .venv/Scripts/activate 2>/dev/null
-          fi
-          # Set TPM env for self-hosted
-          if command -v tpm2_getcap &>/dev/null; then
-            export TPM2_PKCS11_STORE="$HOME/.tpm2_pkcs11"
           fi
 
           ${{ needs.config.outputs.script }}
@@ -279,15 +231,18 @@ jobs:
         shell: bash
         run: |
           echo "=== Generated files ==="
-          find . -maxdepth 2 -name "*.pem" -o -name "*.json" -o -name "*.log" 2>/dev/null | sort || true
+          find . -maxdepth 2 \( -name "*.pem" -o -name "*.json" -o -name "*.log" \) | sort || true
 
           if command -v tpm2_getcap &>/dev/null; then
             echo ""
             echo "=== TPM Persistent Handles (post-run) ==="
-            tpm2_getcap handles-persistent 2>/dev/null || echo "(none)"
+            tpm2_getcap handles-persistent || echo "(none)"
+          fi
+
+          if [ -f "bunker.json" ]; then
             echo ""
-            echo "=== PKCS#11 Store (post-run) ==="
-            ls -la "$HOME/.tpm2_pkcs11/" 2>/dev/null || echo "(not found)"
+            echo "=== bunker.json (post-run) ==="
+            cat bunker.json
           fi
 
           if [ -f "adc.json" ]; then
@@ -301,7 +256,8 @@ jobs:
         if: always() && (needs.config.outputs.runner == 'hardware-tpm' || needs.config.outputs.runner == 'yubikey')
         shell: bash
         run: |
-          HANDLES=$(tpm2_getcap handles-persistent 2>/dev/null | grep -oP '0x[0-9A-Fa-f]+' || true)
-          for h in $HANDLES; do tpm2_evictcontrol -c "$h" 2>/dev/null || true; done
-          rm -rf "$HOME/.tpm2_pkcs11"
-          rm -f adc.json bunker-workload-*.pem
+          if [ "${{ needs.config.outputs.runner }}" = "hardware-tpm" ]; then
+            HANDLES=$(tpm2_getcap handles-persistent | grep -oP '0x[0-9A-Fa-f]+' || true)
+            for h in $HANDLES; do tpm2_evictcontrol -c "$h"; done
+          fi
+          rm -f adc.json bunker.json

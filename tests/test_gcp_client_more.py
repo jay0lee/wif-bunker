@@ -108,20 +108,28 @@ def test_setup_wif_infrastructure():
 
     config = MagicMock()
     config.pool_id = "pool1"
-    config.provider_id = "prov1"
+    config.provider_id = "bunker-oidc-prov-1"
     config.project_id = "proj1"
     config.sa_name = "sa1"
+    config.issuer_uri = "https://wif-bunker.internal/bunker-oidc-prov-1"
 
-    cert_bundle = MagicMock()
-    cert_bundle.sha256_fingerprint = "fp"
-    cert_bundle.trust_anchor_pem = "pem"
+    jwks = {"keys": [{"kty": "EC", "crv": "P-256", "x": "aa", "y": "bb", "alg": "ES256", "kid": "k1", "use": "sig"}]}
 
-    with patch.object(client, "_api_call_with_retry", return_value={"name": "op", "email": "sa@x.com"}):
+    with patch.object(client, "_api_call_with_retry", return_value={"name": "op", "email": "sa@x.com"}) as mock_call:
         with patch.object(client, "_wait_for_lro"):
             with patch.object(client, "_wait_for_wif_resource"):
-                sa_email, prov_id = client.setup_wif_infrastructure(config, "123", cert_bundle, False, True)
+                sa_email, prov_id = client.setup_wif_infrastructure(config, "123", jwks, False, True)
                 assert sa_email == "sa@x.com"
-                assert prov_id == "prov1"
+                assert prov_id == "bunker-oidc-prov-1"
+                # Verify static-JWKS OIDC provider payload was sent
+                prov_calls = [
+                    c for c in mock_call.call_args_list if "providers?workloadIdentityPoolProviderId" in c[0][1]
+                ]
+                assert len(prov_calls) == 1
+                payload = prov_calls[0][0][2]
+                assert payload["oidc"]["issuerUri"] == config.issuer_uri
+                assert "jwksJson" in payload["oidc"]
+                assert payload["attributeMapping"] == {"google.subject": "assertion.sub"}
 
 
 def test_apply_iam_bindings():

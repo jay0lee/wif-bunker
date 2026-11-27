@@ -9,15 +9,8 @@ Verifies that attestation correctly fails when given:
 
 from __future__ import annotations
 
-import datetime
 import json
 from unittest.mock import MagicMock, patch
-
-import pytest
-from cryptography import x509
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, rsa
-from cryptography.x509.oid import NameOID
 
 from wif_bunker.attestation import generate_attestation, write_attestation_report
 from wif_bunker.attestation.base import AttestationCheck, AttestationReport
@@ -25,102 +18,66 @@ from wif_bunker.config import WorkloadConfig
 from wif_bunker.modes import _run_attest
 
 
-def _self_signed_pem(cn: str = "fake-workload-9999") -> str:
-    """Generate a self-signed PEM cert with no hardware backing."""
-    key = ec.generate_private_key(ec.SECP256R1())
-    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
-    cert = (
-        x509.CertificateBuilder()
-        .subject_name(name)
-        .issuer_name(name)
-        .public_key(key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
-        .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=30))
-        .sign(key, hashes.SHA256())
-    )
-    return cert.public_bytes(serialization.Encoding.PEM).decode()
-
-
-def _no_cn_pem() -> str:
-    """Generate a cert with no CN (only Organization)."""
-    key = ec.generate_private_key(ec.SECP256R1())
-    name = x509.Name([x509.NameAttribute(NameOID.ORGANIZATION_NAME, "No CN Corp")])
-    cert = (
-        x509.CertificateBuilder()
-        .subject_name(name)
-        .issuer_name(name)
-        .public_key(key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
-        .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=30))
-        .sign(key, hashes.SHA256())
-    )
-    return cert.public_bytes(serialization.Encoding.PEM).decode()
-
-
-def _rsa_self_signed_pem(cn: str = "rsa-fake-workload") -> str:
-    """Generate an RSA self-signed cert."""
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
-    cert = (
-        x509.CertificateBuilder()
-        .subject_name(name)
-        .issuer_name(name)
-        .public_key(key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
-        .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=30))
-        .sign(key, hashes.SHA256())
-    )
-    return cert.public_bytes(serialization.Encoding.PEM).decode()
-
-
-class TestRunAttestCertParsing:
-    """Tests for _run_attest cert-file handling (before platform dispatch)."""
-
-    def test_nonexistent_cert_file_exits(self, tmp_path):
-        """--attest --cert-file with a nonexistent file raises SystemExit."""
-        config = WorkloadConfig()
-        with pytest.raises(SystemExit):
-            _run_attest(config, str(tmp_path / "output"), str(tmp_path / "nope.pem"))
-
-    def test_garbage_cert_file_raises(self, tmp_path):
-        """--attest with a garbage file that isn't PEM raises."""
-        garbage = tmp_path / "garbage.pem"
-        garbage.write_text("this is not a certificate", encoding="utf-8")
-        config = WorkloadConfig()
-        with pytest.raises(Exception):  # noqa: B017
-            _run_attest(config, str(tmp_path / "output"), str(garbage))
+class TestRunAttestConfigHints:
+    """Tests for _run_attest bunker.json loading before platform dispatch."""
 
     @patch("wif_bunker.modes.generate_attestation")
-    def test_self_signed_cert_extracts_cn(self, mock_attest, tmp_path):
-        """Self-signed cert CN is correctly extracted and set on config."""
-        cert_pem = _self_signed_pem("my-test-workload-42")
-        cert_file = tmp_path / "workload_cert.pem"
-        cert_file.write_text(cert_pem, encoding="utf-8")
-
+    def test_corrupt_bunker_config_warns_and_continues(self, mock_attest, tmp_path, caplog):
+        garbage = tmp_path / "bunker.json"
+        garbage.write_text("not valid json", encoding="utf-8")
         mock_attest.return_value = AttestationReport(platform="test", supported=False, hardware_type="Test")
         config = WorkloadConfig()
-        _run_attest(config, str(tmp_path / "output"), str(cert_file))
+        _run_attest(config, str(tmp_path / "output"), str(garbage))
+        mock_attest.assert_called_once_with(config)
+        assert "Could not load" in caplog.text
 
-        assert config.workload_cn == "my-test-workload-42"
+    @patch("wif_bunker.modes.generate_attestation")
+    def test_loads_linux_tpm_handle_from_bunker_json(self, mock_attest, tmp_path, sample_bunker_config):
+        sample_bunker_config.signer = {"type": "linux-tpm", "handle": "0x81000001"}
+        bunker_file = tmp_path / "bunker.json"
+        sample_bunker_config.save(bunker_file)
+
+        mock_attest.return_value = AttestationReport(platform="linux-tpm2", supported=True, hardware_type="TPM 2.0")
+        config = WorkloadConfig()
+        _run_attest(config, str(tmp_path / "output"), str(bunker_file))
+
+        assert config.linux_tpm_handle == 0x81000001
         mock_attest.assert_called_once_with(config)
 
     @patch("wif_bunker.modes.generate_attestation")
-    def test_no_cn_cert_uses_default(self, mock_attest, tmp_path):
-        """Cert with no CN uses the default config CN."""
-        cert_pem = _no_cn_pem()
-        cert_file = tmp_path / "no_cn.pem"
-        cert_file.write_text(cert_pem, encoding="utf-8")
+    def test_loads_yubikey_hints_from_bunker_json(self, mock_attest, tmp_path, sample_bunker_config):
+        sample_bunker_config.signer = {"type": "yubikey", "slot": "9a", "serial": 20602167}
+        bunker_file = tmp_path / "bunker.json"
+        sample_bunker_config.save(bunker_file)
 
-        mock_attest.return_value = AttestationReport(platform="test", supported=False, hardware_type="Test")
+        mock_attest.return_value = AttestationReport(platform="yubikey", supported=True, hardware_type="YubiKey")
         config = WorkloadConfig()
-        original_cn = config.workload_cn
-        _run_attest(config, str(tmp_path / "output"), str(cert_file))
+        _run_attest(config, str(tmp_path / "output"), str(bunker_file))
 
-        # CN should remain unchanged since cert has no CN
-        assert config.workload_cn == original_cn
+        assert config.use_yubikey is True
+        assert config.yubikey_slot == "9a"
+        assert config.yubikey_serial == 20602167
+        mock_attest.assert_called_once_with(config)
+
+    @patch("wif_bunker.modes.generate_attestation")
+    def test_loads_windows_hints_from_bunker_json(self, mock_attest, tmp_path, sample_bunker_config):
+        sample_bunker_config.signer = {
+            "type": "windows-certstore",
+            "subject": "WIF Bunker Key",
+            "thumbprint": "AABBCC",
+            "store_location": "local_machine",
+        }
+        bunker_file = tmp_path / "bunker.json"
+        sample_bunker_config.save(bunker_file)
+
+        mock_attest.return_value = AttestationReport(platform="windows-cng", supported=True, hardware_type="CNG/TPM")
+        config = WorkloadConfig()
+        _run_attest(config, str(tmp_path / "output"), str(bunker_file))
+
+        assert config.workload_cn == "WIF Bunker Key"
+        assert config.signer_params["thumbprint"] == "AABBCC"
+        assert config.windows_store_location == "local_machine"
+        mock_attest.assert_called_once_with(config)
 
 
 class TestAttestationWithSelfSignedCert:
@@ -211,17 +168,13 @@ class TestAttestationWithSelfSignedCert:
 
 
 class TestRunAttestEndToEnd:
-    """Full _run_attest flow with self-signed cert and mocked platform."""
+    """Full _run_attest flow with mocked platform."""
 
     @patch("wif_bunker.modes.generate_attestation")
-    def test_self_signed_cert_writes_failing_report(self, mock_attest, tmp_path):
-        """A self-signed cert produces a failing attestation report."""
-        cert_pem = _self_signed_pem("self-signed-test")
-        cert_file = tmp_path / "workload_cert.pem"
-        cert_file.write_text(cert_pem, encoding="utf-8")
+    def test_failing_attestation_writes_report(self, mock_attest, tmp_path):
+        """A failing attestation produces valid JSON & text reports."""
         output_dir = tmp_path / "attest-output"
 
-        # Return a report where everything fails
         mock_attest.return_value = AttestationReport(
             platform="test",
             supported=True,
@@ -238,37 +191,23 @@ class TestRunAttestEndToEnd:
             summary="0/7 checks passed",
         )
 
-        _run_attest(WorkloadConfig(), str(output_dir), str(cert_file))
+        _run_attest(WorkloadConfig(), str(output_dir), None)
 
-        # Report should be written
         assert (output_dir / "attestation_report.json").exists()
         data = json.loads((output_dir / "attestation_report.json").read_text(encoding="utf-8"))
         assert data["checks_passed"] == 0
         assert data["checks_total"] == 7
 
     @patch("wif_bunker.modes.generate_attestation")
-    def test_rsa_self_signed_cert_extracts_cn(self, mock_attest, tmp_path):
-        """RSA self-signed cert CN is correctly parsed."""
-        cert_pem = _rsa_self_signed_pem("rsa-test-workload")
-        cert_file = tmp_path / "rsa_cert.pem"
-        cert_file.write_text(cert_pem, encoding="utf-8")
-
-        mock_attest.return_value = AttestationReport(platform="test", supported=False, hardware_type="Test")
-        config = WorkloadConfig()
-        _run_attest(config, str(tmp_path / "output"), str(cert_file))
-
-        assert config.workload_cn == "rsa-test-workload"
-
-    @patch("wif_bunker.modes.generate_attestation")
-    def test_no_cert_file_attests_platform_only(self, mock_attest, tmp_path):
-        """Without --cert-file, attestation runs platform-only mode."""
+    def test_no_bunker_config_attests_platform_only(self, mock_attest, tmp_path, monkeypatch):
+        """Without bunker.json, attestation runs platform-only mode."""
+        monkeypatch.chdir(tmp_path)
         mock_attest.return_value = AttestationReport(platform="test", supported=False, hardware_type="Test")
         config = WorkloadConfig()
         original_cn = config.workload_cn
 
         _run_attest(config, str(tmp_path / "output"), None)
 
-        # CN should remain the default
         assert config.workload_cn == original_cn
         mock_attest.assert_called_once()
 

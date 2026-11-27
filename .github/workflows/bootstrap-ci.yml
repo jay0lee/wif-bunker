@@ -1,0 +1,194 @@
+name: Bootstrap Static CI Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      prune_legacy_pools:
+        description: 'Delete legacy dynamic bunker-pool-* WIF pools and stale IAM bindings'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  bootstrap:
+    name: Ensure Static Per-Runner Projects, Pools, and SAs
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: wif-ci-bootstrap
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: Provision static per-runner GCP resources
+        run: |
+          set -euo pipefail
+
+          SANDBOX_FOLDER="${{ secrets.SANDBOX_FOLDER_ID }}"
+          WIF_POOL="${{ secrets.WIF_POOL_NAME }}"
+          GH_REPO="${{ github.repository }}"
+          STATIC_POOL="bunker-ci-pool"
+          STATIC_SA="bunker-wif-sa"
+          STATIC_SUBJECT="bunker-ci-workload"
+          PRUNE_LEGACY="${{ inputs.prune_legacy_pools }}"
+
+          # Runner IDs — MUST match integration-test.yml matrix.runner_id values
+          RUNNERS="u2204-x64 u2404-x64 u2604-x64 u2204-arm u2404-arm u2604-arm macos-15 macos-26 windows nuc8-tpm nuc8-yk"
+
+          iam_bind() {
+            for attempt in 1 2 3 4 5; do
+              if "$@" 2>/dev/null; then
+                return 0
+              fi
+              echo "    IAM bind attempt $attempt failed, retrying in 10s..."
+              sleep 10
+            done
+            echo "    IAM bind failed after 5 attempts: $*"
+            return 1
+          }
+
+          EXISTING_FOLDERS=$(gcloud resource-manager folders list \
+            --folder="$SANDBOX_FOLDER" \
+            --format="csv[no-heading](displayName,name)" || true)
+
+          for RUNNER_ID in $RUNNERS; do
+            echo "================================================================"
+            echo "Runner: ${RUNNER_ID}"
+            echo "================================================================"
+            CI_PROJECT="wif-ci-${RUNNER_ID}"
+            CI_SA_NAME="ci-runner"
+            CI_SA_EMAIL="${CI_SA_NAME}@${CI_PROJECT}.iam.gserviceaccount.com"
+            TEST_PROJECT="wif-test-${RUNNER_ID}"
+            BUNKER_SA_EMAIL="${STATIC_SA}@${TEST_PROJECT}.iam.gserviceaccount.com"
+
+            # 1. Folders
+            RUNNER_FOLDER_ID=$(echo "$EXISTING_FOLDERS" | grep "^${RUNNER_ID}," | head -1 | cut -d',' -f2 | sed 's|folders/||' || true)
+            if [ -z "$RUNNER_FOLDER_ID" ]; then
+              RUNNER_FOLDER_ID=$(gcloud resource-manager folders create \
+                --display-name="$RUNNER_ID" --folder="$SANDBOX_FOLDER" \
+                --format="value(name)" | sed 's|folders/||')
+            fi
+            TESTS_FOLDER_ID=$(gcloud resource-manager folders list \
+              --folder="$RUNNER_FOLDER_ID" --filter="displayName=tests" \
+              --format="value(name)" | head -1 | sed 's|folders/||' || true)
+            if [ -z "$TESTS_FOLDER_ID" ]; then
+              TESTS_FOLDER_ID=$(gcloud resource-manager folders create \
+                --display-name="tests" --folder="$RUNNER_FOLDER_ID" \
+                --format="value(name)" | sed 's|folders/||')
+            fi
+
+            # 2. CI runner project & SA
+            if ! gcloud projects describe "$CI_PROJECT" --format="value(lifecycleState)" 2>/dev/null | grep -q ACTIVE; then
+              gcloud projects create "$CI_PROJECT" --name="CI Runner ${RUNNER_ID}" --folder="$RUNNER_FOLDER_ID"
+              gcloud services enable iam.googleapis.com cloudresourcemanager.googleapis.com \
+                serviceusage.googleapis.com sts.googleapis.com iamcredentials.googleapis.com \
+                --project="$CI_PROJECT"
+            fi
+            if ! gcloud iam service-accounts describe "$CI_SA_EMAIL" --project="$CI_PROJECT" &>/dev/null; then
+              gcloud iam service-accounts create "$CI_SA_NAME" --project="$CI_PROJECT" --display-name="CI Runner ${RUNNER_ID}"
+              sleep 15
+            fi
+            iam_bind gcloud projects add-iam-policy-binding "$CI_PROJECT" \
+              --member="serviceAccount:${CI_SA_EMAIL}" --role="roles/owner"
+            iam_bind gcloud iam service-accounts add-iam-policy-binding "$CI_SA_EMAIL" \
+              --project="$CI_PROJECT" --role="roles/iam.workloadIdentityUser" \
+              --member="principalSet://iam.googleapis.com/${WIF_POOL}/attribute.repository/${GH_REPO}"
+
+            # 3. Static test project
+            if ! gcloud projects describe "$TEST_PROJECT" --format="value(lifecycleState)" 2>/dev/null | grep -q ACTIVE; then
+              gcloud projects create "$TEST_PROJECT" --name="WIF Test ${RUNNER_ID}" --folder="$TESTS_FOLDER_ID"
+              gcloud services enable iam.googleapis.com cloudresourcemanager.googleapis.com \
+                serviceusage.googleapis.com sts.googleapis.com iamcredentials.googleapis.com \
+                --project="$TEST_PROJECT"
+            fi
+            iam_bind gcloud projects add-iam-policy-binding "$TEST_PROJECT" \
+              --member="serviceAccount:${CI_SA_EMAIL}" --role="roles/owner"
+
+            TEST_PROJECT_NUM=$(gcloud projects describe "$TEST_PROJECT" --format="value(projectNumber)")
+
+            # 4. Static WIF pool + static bunker SA + static IAM bindings
+            if ! gcloud iam workload-identity-pools describe "$STATIC_POOL" \
+              --project="$TEST_PROJECT" --location=global &>/dev/null; then
+              gcloud iam workload-identity-pools create "$STATIC_POOL" \
+                --project="$TEST_PROJECT" --location=global \
+                --display-name="WIF Bunker Static CI Pool"
+            fi
+            if ! gcloud iam service-accounts describe "$BUNKER_SA_EMAIL" --project="$TEST_PROJECT" &>/dev/null; then
+              gcloud iam service-accounts create "$STATIC_SA" \
+                --project="$TEST_PROJECT" --display-name="WIF Bunker Static CI SA"
+              sleep 10
+            fi
+
+            WIF_SUBJECT_PRINCIPAL="principal://iam.googleapis.com/projects/${TEST_PROJECT_NUM}/locations/global/workloadIdentityPools/${STATIC_POOL}/subject/${STATIC_SUBJECT}"
+            WIF_POOL_PRINCIPAL_SET="principalSet://iam.googleapis.com/projects/${TEST_PROJECT_NUM}/locations/global/workloadIdentityPools/${STATIC_POOL}/*"
+
+            iam_bind gcloud iam service-accounts add-iam-policy-binding "$BUNKER_SA_EMAIL" \
+              --project="$TEST_PROJECT" --role="roles/iam.workloadIdentityUser" \
+              --member="$WIF_SUBJECT_PRINCIPAL"
+            iam_bind gcloud projects add-iam-policy-binding "$TEST_PROJECT" \
+              --member="serviceAccount:${BUNKER_SA_EMAIL}" --role="roles/browser" --condition=None
+            iam_bind gcloud projects add-iam-policy-binding "$TEST_PROJECT" \
+              --member="$WIF_POOL_PRINCIPAL_SET" --role="roles/browser" --condition=None
+
+            # 5. Optional cleanup of legacy dynamic bunker-pool-* pools and stale IAM bindings
+            if [ "$PRUNE_LEGACY" = "true" ]; then
+              OLD_POOLS=$(gcloud iam workload-identity-pools list \
+                --project="$TEST_PROJECT" --location=global \
+                --filter="state=ACTIVE" --format="value(name.basename())" || true)
+              for pool in $OLD_POOLS; do
+                if [[ "$pool" == bunker-pool-* ]]; then
+                  echo "  Deleting legacy dynamic pool: $pool"
+                  gcloud iam workload-identity-pools delete "$pool" \
+                    --project="$TEST_PROJECT" --location=global --quiet || true
+                fi
+              done
+
+              # Remove stale principalSet://.../bunker-pool-* and deleted: members from project IAM policy
+              POLICY_FILE="$RUNNER_TEMP/policy-${RUNNER_ID}.json"
+              CLEAN_FILE="$RUNNER_TEMP/policy-clean-${RUNNER_ID}.json"
+              gcloud projects get-iam-policy "$TEST_PROJECT" --format=json > "$POLICY_FILE"
+              python3 - "$POLICY_FILE" "$CLEAN_FILE" <<'PYEOF'
+          import json, sys
+          with open(sys.argv[1], encoding="utf-8") as f:
+              policy = json.load(f)
+          changed = False
+          new_bindings = []
+          for b in policy.get("bindings", []):
+              old_m = b.get("members", [])
+              new_m = [
+                  m for m in old_m
+                  if "workloadIdentityPools/bunker-pool-" not in m and not m.startswith("deleted:")
+              ]
+              if len(new_m) != len(old_m):
+                  changed = True
+              if new_m:
+                  b["members"] = new_m
+                  new_bindings.append(b)
+          policy["bindings"] = new_bindings
+          with open(sys.argv[2], "w", encoding="utf-8") as f:
+              json.dump(policy, f, indent=2)
+          print("CHANGED" if changed else "UNCHANGED")
+          PYEOF
+              if grep -q "bunker-pool-\|deleted:" "$POLICY_FILE"; then
+                echo "  Pruning stale legacy IAM bindings on $TEST_PROJECT..."
+                gcloud projects set-iam-policy "$TEST_PROJECT" "$CLEAN_FILE" --quiet >/dev/null
+              fi
+            fi
+
+            echo "✓ Static CI infra ready for ${RUNNER_ID} (${TEST_PROJECT} / ${STATIC_POOL} / ${BUNKER_SA_EMAIL})"
+          done

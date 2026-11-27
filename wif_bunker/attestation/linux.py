@@ -18,7 +18,6 @@ manufacturer provisioning services (no library equivalent exists).
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import shutil
@@ -491,35 +490,47 @@ def _credential_activation(ectx, ek_handle, ak_handle) -> AttestationCheck:
         )
 
 
-def _certify_key(ectx, ak_handle) -> tuple[AttestationCheck, bool, bytes | None, bytes | None]:
+def _certify_key(
+    ectx,
+    ak_handle,
+    tpm_handle: int | None = None,
+) -> tuple[AttestationCheck, bool, bytes | None, bytes | None]:
     """Certify a key using TPM2_Certify with the AK via ESAPI.
 
-    Creates a primary key in the owner hierarchy (parent of all tpm2-pkcs11
-    keys) and has the AK certify it, proving the key hierarchy lives
+    When *tpm_handle* is supplied (for example, the persistent TPM 2.0 handle
+    configured for ``linux-tpm``, such as ``0x81000001``), certifies that exact
+    persistent key directly.  Otherwise, creates a temporary primary key in the
+    owner hierarchy and has the AK certify it, proving the key hierarchy lives
     inside the TPM.
     """
     from tpm2_pytss import ESYS_TR as _ESYS_TR  # pylint: disable=import-outside-toplevel
     from tpm2_pytss import TPM2_ALG
+    from tpm2_pytss.types import TPMT_SIG_SCHEME  # pylint: disable=import-outside-toplevel
 
+    created_ephemeral = False
+    target_handle = None
     try:
-        # Create a primary in owner hierarchy (parent of tpm2-pkcs11 keys)
-        primary_handle, _, _, _, _ = ectx.create_primary(
-            in_sensitive=None,
-            in_public="rsa2048",
-            primary_handle=_ESYS_TR.RH_OWNER,
-        )
-
-        # Certify the primary key with the AK
-        from tpm2_pytss.types import TPMT_SIG_SCHEME  # pylint: disable=import-outside-toplevel
+        if tpm_handle is not None:
+            target_handle = ectx.tr_from_tpmpublic(tpm_handle)
+            target_desc = f"persistent TPM handle 0x{tpm_handle:08X}"
+        else:
+            target_handle, _, _, _, _ = ectx.create_primary(
+                in_sensitive=None,
+                in_public="rsa2048",
+                primary_handle=_ESYS_TR.RH_OWNER,
+            )
+            created_ephemeral = True
+            target_desc = "owner-hierarchy key"
 
         certify_info, signature = ectx.certify(
-            object_handle=primary_handle,
+            object_handle=target_handle,
             sign_handle=ak_handle,
             qualifying_data=b"",
             in_scheme=TPMT_SIG_SCHEME(scheme=TPM2_ALG.NULL),
         )
 
-        ectx.flush_context(primary_handle)
+        if created_ephemeral and target_handle is not None:
+            ectx.flush_context(target_handle)
 
         attest_bytes = bytes(certify_info)
         sig_bytes = bytes(signature)
@@ -529,7 +540,7 @@ def _certify_key(ectx, ak_handle) -> tuple[AttestationCheck, bool, bytes | None,
                 name="Key attestation (tpm2_certify)",
                 passed=True,
                 detail=(
-                    "TPM2_Certify produced attestation blob and signature. "
+                    f"TPM2_Certify produced attestation blob and signature for {target_desc}. "
                     "The TPM cryptographically certifies this key exists "
                     "within its boundary with fixedTPM attributes."
                 ),
@@ -540,6 +551,11 @@ def _certify_key(ectx, ak_handle) -> tuple[AttestationCheck, bool, bytes | None,
         )
 
     except Exception as exc:
+        if created_ephemeral and target_handle is not None:
+            try:
+                ectx.flush_context(target_handle)
+            except Exception:
+                pass
         return (
             AttestationCheck(
                 name="Key attestation (tpm2_certify)",
@@ -548,77 +564,6 @@ def _certify_key(ectx, ak_handle) -> tuple[AttestationCheck, bool, bytes | None,
             ),
             False,
             None,
-            None,
-        )
-
-
-def _extract_workload_key_from_pkcs11() -> tuple[AttestationCheck, dict | None]:
-    """Query the PKCS#11 store via python-pkcs11 for our bunker-wif token.
-
-    Uses the PKCS#11 API instead of raw SQLite queries — schema-independent
-    and consistent with the keystore module.
-    """
-    try:
-        import pkcs11  # pylint: disable=import-outside-toplevel
-
-        from wif_bunker.keystore.linux import _find_pkcs11_lib  # pylint: disable=import-outside-toplevel
-    except ImportError:
-        return (
-            AttestationCheck(
-                name="Workload key found in PKCS#11 store",
-                passed=False,
-                detail="python-pkcs11 not available",
-            ),
-            None,
-        )
-
-    try:
-        lib_path = _find_pkcs11_lib()
-        lib = pkcs11.lib(lib_path)
-
-        # Look for our token
-        try:
-            token = lib.get_token(token_label="bunker-wif")
-        except (pkcs11.NoSuchToken, pkcs11.PKCS11Error):
-            return (
-                AttestationCheck(
-                    name="Workload key found in PKCS#11 store",
-                    passed=False,
-                    detail=f"No bunker-wif token found in PKCS#11 store ({lib_path})",
-                ),
-                None,
-            )
-
-        # Count objects in the token (read-only, no PIN needed for public objects)
-        try:
-            with token.open() as session:
-                objects = list(session.get_objects())
-                obj_count = len(objects)
-        except pkcs11.PKCS11Error:
-            obj_count = -1  # Can't count without PIN
-
-        token_info = {
-            "store_path": lib_path,
-            "token_label": "bunker-wif",
-            "object_count": obj_count if obj_count >= 0 else "unknown (PIN required)",
-        }
-
-        return (
-            AttestationCheck(
-                name="Workload key found in PKCS#11 store",
-                passed=True,
-                detail=f"Token 'bunker-wif' found in PKCS#11 store ({lib_path}) with {obj_count} object(s)",
-            ),
-            token_info,
-        )
-
-    except RuntimeError as exc:
-        return (
-            AttestationCheck(
-                name="Workload key found in PKCS#11 store",
-                passed=False,
-                detail=f"PKCS#11 store error: {exc}",
-            ),
             None,
         )
 
@@ -721,7 +666,11 @@ def _attest_linux(config: WorkloadConfig) -> AttestationReport:  # pylint: disab
                 checks.append(cred_check)
 
                 # Step 5: Certify the key
-                certify_check, certified, attest_bytes, sig_bytes = _certify_key(ectx, ak_handle)
+                certify_check, certified, attest_bytes, sig_bytes = _certify_key(
+                    ectx,
+                    ak_handle,
+                    tpm_handle=config.linux_tpm_handle,
+                )
                 checks.append(certify_check)
 
                 if certified:
@@ -765,18 +714,6 @@ def _attest_linux(config: WorkloadConfig) -> AttestationReport:  # pylint: disab
                         detail="Skipped — AK creation failed",
                     )
                 )
-
-        # Step 6: PKCS#11 store cross-reference (outside ESAPI context)
-        pkcs11_check, token_info = _extract_workload_key_from_pkcs11()
-        checks.append(pkcs11_check)
-        if token_info:
-            artifacts.append(
-                AttestationArtifact(
-                    filename="pkcs11_token_info.json",
-                    content=json.dumps(token_info, indent=2),
-                    description="PKCS#11 token/slot/key metadata from tpm2-pkcs11 store",
-                )
-            )
 
     check_map = {chk.name: chk.passed for chk in checks}
 

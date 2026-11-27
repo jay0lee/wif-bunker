@@ -1,4 +1,3 @@
-import builtins
 import logging
 import os
 from unittest.mock import MagicMock, Mock, patch
@@ -10,7 +9,6 @@ from wif_bunker.utils import (
     _CleanFormatter,
     _require_command,
     _supports_unicode,
-    preflight_check_openssl_shared,
     require_commands,
     with_retries,
 )
@@ -104,76 +102,3 @@ def test_require_commands():
 
     with patch("shutil.which", return_value="/bin/ls"):
         assert require_commands([("ls", "coreutils", "")]) == {"ls": "/bin/ls"}
-
-
-@patch("sys.platform", "linux")
-def test_preflight_check_openssl_shared_linux_static():
-    with patch("wif_bunker.utils.logger.warning") as mock_warn, patch("subprocess.run") as mock_run:
-        mock_run.return_value = Mock(stdout="no matching shared library")
-        preflight_check_openssl_shared()
-        mock_warn.assert_called()
-
-
-@patch("sys.platform", "linux")
-def test_preflight_check_openssl_shared_linux_shared():
-    with patch("wif_bunker.utils.logger.warning") as mock_warn, patch("subprocess.run") as mock_run:
-        mock_run.return_value = Mock(stdout="libssl.so")
-        preflight_check_openssl_shared()
-        mock_warn.assert_not_called()
-
-
-@patch("sys.platform", "darwin")
-def test_preflight_check_openssl_shared_darwin_static():
-    with patch("wif_bunker.utils.logger.warning") as mock_warn, patch("subprocess.run") as mock_run:
-        mock_run.return_value = Mock(stdout="no matching shared library")
-        preflight_check_openssl_shared()
-        mock_warn.assert_called()
-
-
-@patch("sys.platform", "win32")
-def test_preflight_check_openssl_shared_win32_static():
-    with patch("wif_bunker.utils.logger.warning") as mock_warn, patch("shutil.which", return_value="dumpbin"):
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = Mock(stdout="no matching shared library")
-            preflight_check_openssl_shared()
-            mock_warn.assert_called()
-
-
-@patch("sys.platform", "win32")
-def test_preflight_check_openssl_shared_win32_no_dumpbin():
-    with patch("wif_bunker.utils.logger.warning") as mock_warn, patch("shutil.which", return_value=None):
-        preflight_check_openssl_shared()
-        mock_warn.assert_not_called()
-
-
-@patch("sys.platform", "unknown")
-def test_preflight_check_openssl_shared_unknown():
-    with patch("wif_bunker.utils.logger.warning") as mock_warn:
-        preflight_check_openssl_shared()
-        mock_warn.assert_not_called()
-
-
-def test_preflight_check_openssl_shared_no_ssl():
-    real_import = builtins.__import__
-
-    def mock_import(name, *args, **kwargs):
-        if name == "_ssl":
-            raise ImportError("no _ssl")
-        return real_import(name, *args, **kwargs)
-
-    with patch("builtins.__import__", side_effect=mock_import):
-        preflight_check_openssl_shared()
-
-
-def test_preflight_check_openssl_shared_subprocess_timeout():
-    with patch("sys.platform", "linux"):
-        with patch("subprocess.run", side_effect=__import__("subprocess").TimeoutExpired(cmd="ldd", timeout=10)):
-            preflight_check_openssl_shared()
-
-
-def test_preflight_check_openssl_shared_no_file(monkeypatch):
-    import _ssl
-
-    monkeypatch.delattr(_ssl, "__file__", raising=False)
-    # Shouldn't raise anything
-    preflight_check_openssl_shared()

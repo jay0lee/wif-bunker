@@ -247,7 +247,7 @@ def attest_yubikey(config: WorkloadConfig) -> AttestationReport:
             platform="yubikey",
             supported=False,
             hardware_type="YubiKey",
-            not_supported_reason="yubikey-manager not installed. Run 'pip install wif-bunker[yubikey]'.",
+            not_supported_reason="yubikey-manager not installed. Run 'pip install yubikey-manager'.",
             summary="YubiKey attestation requires the yubikey-manager package.",
         )
 

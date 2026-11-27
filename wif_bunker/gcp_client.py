@@ -523,13 +523,14 @@ class GCPClient:
         self,
         config: Any,
         project_number: str,
-        cert_bundle: Any,
+        jwks: dict[str, Any],
         reuse_pool: bool,
         use_sa: bool,
         sa_email: str | None = None,
         sa_name: str | None = None,
+        reuse_provider: bool = False,
     ) -> tuple[str | None, str]:
-        """Creates SA, WIF Pool, and WIF Provider in parallel."""
+        """Creates SA, WIF Pool, and Static-JWKS OIDC WIF Provider in parallel."""
         iam_base = "iam.googleapis.com"
         pool_res_url = (
             f"https://{iam_base}/v1/projects/{project_number}/locations/global/workloadIdentityPools/{config.pool_id}"
@@ -571,10 +572,6 @@ class GCPClient:
             except requests.exceptions.HTTPError as exc:
                 if exc.response is not None and exc.response.status_code == 409:
                     logger.info("    Pool already exists: %s", config.pool_id)
-                    # Verify the existing pool is actually usable — it could
-                    # be soft-deleted (state: DELETE_REQUESTED) after a recent
-                    # deletion.  In that case waiting for ACTIVE will never
-                    # succeed, so fail fast with a clear message.
                     try:
                         pool_data = self._api_call("GET", pool_res_url)
                         pool_state = pool_data.get("state", "UNKNOWN")
@@ -585,15 +582,15 @@ class GCPClient:
                                 f"GCP retains deleted pools for 30 days.  Use a "
                                 f"different pool name with --create-pool=<name> "
                                 f"or wait for the deletion to complete."
-                            )
+                            ) from exc
                     except requests.exceptions.HTTPError:
-                        pass  # GET failed — let _wait_for_wif_resource handle it
+                        pass
                 else:
                     raise
             self._wait_for_wif_resource(pool_res_url)
 
         def create_provider_task() -> None:
-            if reuse_pool:
+            if reuse_pool and not reuse_provider:
                 try:
                     provs = self._api_call(
                         "GET",
@@ -601,7 +598,7 @@ class GCPClient:
                     ).get("workloadIdentityPoolProviders", [])
                     for prov in provs:
                         pname = prov["name"].split("/")[-1]
-                        if pname.startswith("bunker-x509-prov-") and pname != config.provider_id:
+                        if pname.startswith(("bunker-oidc-prov-", "bunker-x509-prov-")) and pname != config.provider_id:
                             logger.info("    Deleting stale provider: %s", pname)
                             try:
                                 del_op = self._api_call("DELETE", f"{pool_res_url}/providers/{pname}")
@@ -620,31 +617,75 @@ class GCPClient:
                 except Exception:
                     logger.debug("Failed to list/delete providers", exc_info=True)
 
-            cert_pin_condition = f'assertion.sha256Fingerprint == "{cert_bundle.sha256_fingerprint}"'
-            logger.info("    Cert pin condition: %s", cert_pin_condition)
+            audience_url = (
+                f"https://iam.googleapis.com/projects/{project_number}"
+                f"/locations/global/workloadIdentityPools/{config.pool_id}"
+                f"/providers/{config.provider_id}"
+            )
             provider_payload = {
-                "displayName": "WIF Bunker X.509 Provider",
-                "x509": {
-                    "trustStore": {
-                        "trustAnchors": [
-                            {"pemCertificate": cert_bundle.trust_anchor_pem},
-                        ],
-                    },
+                "displayName": "WIF Bunker OIDC Provider",
+                "oidc": {
+                    "issuerUri": config.issuer_uri,
+                    "allowedAudiences": [audience_url],
+                    "jwksJson": json.dumps(jwks),
                 },
-                "attributeMapping": {"google.subject": "assertion.subject.dn.cn"},
-                "attributeCondition": cert_pin_condition,
+                "attributeMapping": {
+                    "google.subject": "assertion.sub",
+                },
             }
+            patch_url = (
+                f"{provider_res_url}"
+                "?updateMask=displayName,oidc.issuerUri,oidc.allowedAudiences,oidc.jwksJson,attributeMapping"
+            )
 
             if reuse_pool:
                 logger.info("[Thread] Reusing WIF pool: %s", config.pool_id)
 
-            logger.info("[Thread] Creating WIF X.509 Provider: %s", config.provider_id)
-            prov_op = self._api_call_with_retry(
-                "POST",
-                f"{pool_res_url}/providers?workloadIdentityPoolProviderId={config.provider_id}",
-                provider_payload,
-                retry_on_propagation=True,
-            )
+            if reuse_provider:
+                logger.info("[Thread] Updating existing WIF OIDC Provider in place: %s", config.provider_id)
+                try:
+                    prov_op = self._api_call_with_retry(
+                        "PATCH",
+                        patch_url,
+                        provider_payload,
+                        retry_on_propagation=False,
+                    )
+                    self._wait_for_lro(iam_base, prov_op["name"])
+                    self._wait_for_wif_resource(provider_res_url)
+                    return
+                except requests.exceptions.HTTPError as exc:
+                    if exc.response is not None and exc.response.status_code == 404:
+                        logger.info("    Provider %s not found; creating it...", config.provider_id)
+                    else:
+                        raise
+
+            logger.info("[Thread] Creating WIF OIDC Provider: %s", config.provider_id)
+            try:
+                prov_op = self._api_call_with_retry(
+                    "POST",
+                    f"{pool_res_url}/providers?workloadIdentityPoolProviderId={config.provider_id}",
+                    provider_payload,
+                    retry_on_propagation=True,
+                )
+            except requests.exceptions.HTTPError as exc:
+                if exc.response is not None and exc.response.status_code == 409:
+                    prov_data = self._api_call("GET", provider_res_url)
+                    prov_state = prov_data.get("state", "UNKNOWN") if prov_data else "UNKNOWN"
+                    if prov_state != "ACTIVE":
+                        raise RuntimeError(
+                            f"WIF provider '{config.provider_id}' exists in state '{prov_state}' "
+                            "(likely soft-deleted). GCP retains deleted providers for 30 days. "
+                            "Use a different ID with --create-provider=<name> or wait for deletion."
+                        ) from exc
+                    logger.info("    Provider already exists (ACTIVE); updating JWKS in place...")
+                    prov_op = self._api_call_with_retry(
+                        "PATCH",
+                        patch_url,
+                        provider_payload,
+                        retry_on_propagation=True,
+                    )
+                else:
+                    raise
             self._wait_for_lro(iam_base, prov_op["name"])
             self._wait_for_wif_resource(provider_res_url)
 
@@ -683,6 +724,12 @@ class GCPClient:
             f"/subject/{workload_cn}"
         )
 
+        def _has_binding(policy: dict[str, Any], role: str, member: str) -> bool:
+            return any(
+                b.get("role") == role and not b.get("condition") and member in b.get("members", [])
+                for b in policy.get("bindings", [])
+            )
+
         if use_sa and sa_email:
             sa_iam_url = f"https://{iam_base}/v1/projects/{config.project_id}/serviceAccounts/{sa_email}:setIamPolicy"
             sa_policy = self._api_call_with_retry(
@@ -692,16 +739,21 @@ class GCPClient:
             )
             if sa_policy is None:
                 sa_policy = {}
+            sa_pruned = False
             for b in sa_policy.get("bindings", []):
-                b["members"] = [
-                    m for m in b.get("members", [])
-                    if not (m.startswith("deleted:") and sa_email in m)
-                ]
+                old_members = b.get("members", [])
+                new_members = [m for m in old_members if not (m.startswith("deleted:") and sa_email in m)]
+                if len(new_members) != len(old_members):
+                    sa_pruned = True
+                    b["members"] = new_members
             sa_policy["bindings"] = [b for b in sa_policy.get("bindings", []) if b.get("members")]
-            sa_policy.setdefault("bindings", []).append(
-                {"role": "roles/iam.workloadIdentityUser", "members": [wif_principal]},
-            )
-            self._api_call_with_retry("POST", sa_iam_url, {"policy": sa_policy}, retry_on_propagation=True)
+            sa_role = "roles/iam.workloadIdentityUser"
+            if sa_pruned or not _has_binding(sa_policy, sa_role, wif_principal):
+                if not _has_binding(sa_policy, sa_role, wif_principal):
+                    sa_policy.setdefault("bindings", []).append({"role": sa_role, "members": [wif_principal]})
+                self._api_call_with_retry("POST", sa_iam_url, {"policy": sa_policy}, retry_on_propagation=True)
+            else:
+                logger.info("    SA IAM binding already present for %s", wif_principal)
 
         proj_iam_url = f"https://{crm_base}/v1/projects/{config.project_id}:setIamPolicy"
         proj_policy = self._api_call_with_retry(
@@ -711,17 +763,22 @@ class GCPClient:
         )
         if proj_policy is None:
             proj_policy = {}
+        proj_pruned = False
         if use_sa and sa_email:
             proj_member = f"serviceAccount:{sa_email}"
             for b in proj_policy.get("bindings", []):
-                b["members"] = [
-                    m for m in b.get("members", [])
-                    if not (m.startswith("deleted:") and sa_email in m)
-                ]
+                old_members = b.get("members", [])
+                new_members = [m for m in old_members if not (m.startswith("deleted:") and sa_email in m)]
+                if len(new_members) != len(old_members):
+                    proj_pruned = True
+                    b["members"] = new_members
             proj_policy["bindings"] = [b for b in proj_policy.get("bindings", []) if b.get("members")]
         else:
             proj_member = wif_principal
-        proj_policy.setdefault("bindings", []).append(
-            {"role": "roles/browser", "members": [proj_member]},
-        )
-        self._api_call_with_retry("POST", proj_iam_url, {"policy": proj_policy}, retry_on_propagation=True)
+        proj_role = "roles/browser"
+        if proj_pruned or not _has_binding(proj_policy, proj_role, proj_member):
+            if not _has_binding(proj_policy, proj_role, proj_member):
+                proj_policy.setdefault("bindings", []).append({"role": proj_role, "members": [proj_member]})
+            self._api_call_with_retry("POST", proj_iam_url, {"policy": proj_policy}, retry_on_propagation=True)
+        else:
+            logger.info("    Project IAM binding already present for %s", proj_member)

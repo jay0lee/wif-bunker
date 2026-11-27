@@ -13,7 +13,6 @@ from __future__ import annotations
 import logging
 import os
 import time
-from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -23,7 +22,6 @@ from wif_bunker.utils import (
     _CleanFormatter,
     _require_command,
     _supports_unicode,
-    preflight_check_openssl_shared,
     with_retries,
 )
 
@@ -235,61 +233,3 @@ class TestRequireCommandEdgeCases:
         msg = str(exc_info.value)
         assert "Package: mypkg" in msg
         assert "Install: brew install mypkg" in msg
-
-
-# ---------------------------------------------------------------------------
-# preflight_check_openssl_shared edge cases
-# ---------------------------------------------------------------------------
-
-
-class TestPreflightCheckOpensslEdgeCases:
-    """Additional edge-case tests for preflight_check_openssl_shared."""
-
-    @patch("sys.platform", "linux")
-    def test_linux_subprocess_os_error(self):
-        """Covers lines 307: OSError from subprocess."""
-        with patch("subprocess.run", side_effect=OSError("command not found")):
-            preflight_check_openssl_shared()
-
-    @patch("sys.platform", "win32")
-    def test_win32_shared_libraries(self):
-        """Covers lines 292-304: Windows with dumpbin and shared libs found."""
-        with (
-            patch("shutil.which", return_value="/usr/bin/dumpbin"),
-            patch("subprocess.run") as mock_run,
-            patch("wif_bunker.utils.logger.warning") as mock_warn,
-        ):
-            mock_run.return_value = Mock(stdout="LIBSSL.DLL\nLIBCRYPTO.DLL")
-            preflight_check_openssl_shared()
-            mock_warn.assert_not_called()
-
-    @patch("sys.platform", "darwin")
-    def test_darwin_shared_libraries(self):
-        """Covers lines 284-291: macOS with shared libs found."""
-        with (
-            patch("subprocess.run") as mock_run,
-            patch("wif_bunker.utils.logger.warning") as mock_warn,
-        ):
-            mock_run.return_value = Mock(stdout="libssl.3.dylib\nlibcrypto.3.dylib")
-            preflight_check_openssl_shared()
-            mock_warn.assert_not_called()
-
-    @patch("sys.platform", "linux")
-    def test_linux_static_ssl_warns(self):
-        """Covers lines 310-322: static OpenSSL warning emitted."""
-        with (
-            patch("subprocess.run") as mock_run,
-            patch("wif_bunker.utils.logger.warning") as mock_warn,
-        ):
-            mock_run.return_value = Mock(stdout="libc.so.6\nlibm.so.6")
-            preflight_check_openssl_shared()
-            assert mock_warn.call_count >= 1
-
-    def test_ssl_path_not_exists(self):
-        """Covers lines 272: ssl_path exists check returns False."""
-        with (
-            patch.object(Path, "exists", return_value=False),
-            patch("wif_bunker.utils.logger.warning"),
-        ):
-            # Path.exists returns False so should return early — shouldn't crash
-            preflight_check_openssl_shared()

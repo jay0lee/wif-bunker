@@ -95,51 +95,23 @@ jobs:
           cat version_info.txt
 
       # ══════════════════════════════════════════════════════════════════════
-      # Build hardmTLS + package
+      # Install dependencies & package (pure Python — no Rust/hardmTLS build)
       # ══════════════════════════════════════════════════════════════════════
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: "Windows: Configure MSVC for hardmTLS"
-        if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
-        with:
-          arch: ${{ runner.arch }}
-
-      - name: "Windows: Hide Git link.exe (shadows MSVC)"
-        if: runner.os == 'Windows'
-        run: |
-          GIT_LINK="/c/Program Files/Git/usr/bin/link.exe"
-          if [ -f "$GIT_LINK" ]; then
-            mv "$GIT_LINK" "${GIT_LINK}.bak"
-            echo "Renamed Git link.exe to avoid MSVC collision"
-          fi
-
-      - name: Build hardmTLS
-        working-directory: hardmtls-native
-        env:
-          OPENSSL_DIR: ${{ steps.setup-python-ssl.outputs.openssl-path }}
-        run: cargo build --release
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libpcsclite-dev libtss2-dev pkg-config
+          sudo apt-get install -y --no-install-recommends libpcsclite-dev libtss2-dev swig pkg-config
 
       - name: Install dependencies
-        env:
-          OPENSSL_DIR: ${{ steps.setup-python-ssl.outputs.openssl-path }}
         run: |
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            export CFLAGS="-std=c11 ${CFLAGS:-}"
+          fi
           "${PYTHON}" -m pip install --upgrade pip
           "${PYTHON}" -m pip install pyinstaller
-          # Build cryptography from source against our compiled OpenSSL so the
-          # bundled cryptography, Python, hardmTLS, and libcrypto all link the
-          # same OpenSSL.  Pre-built PyPI wheels are compiled against OpenSSL
-          # 3.x which conflicts with our bundled OpenSSL 4.x libcrypto.
-          "${PYTHON}" -m pip install --no-binary cryptography --no-cache-dir cryptography
-          "${PYTHON}" -m pip install --only-deps ".[yubikey]"
+          "${PYTHON}" -m pip install --only-deps .
 
       # ══════════════════════════════════════════════════════════════════════
       # macOS: Import developer certificate for code signing
@@ -378,9 +350,6 @@ jobs:
       use_built_binary: true
     secrets:
       WIF_PROVIDER: ${{ secrets.WIF_PROVIDER }}
-      WIF_SERVICE_ACCOUNT: ${{ secrets.WIF_SERVICE_ACCOUNT }}
-      SANDBOX_FOLDER_ID: ${{ secrets.SANDBOX_FOLDER_ID }}
-      WIF_POOL_NAME: ${{ secrets.WIF_POOL_NAME }}
 
   # ── Job 3: Tag + Release (only if tests pass) ──
   release:
@@ -418,7 +387,7 @@ jobs:
       - name: Clean up non-release files
         run: |
           cd artifacts
-          rm -rf lib ecp hardmtls _internal
+          rm -rf lib _internal
           find . -maxdepth 1 -type f ! -name '*.tar.gz' ! -name '*-setup.exe' ! -name '*.spdx.json' -delete
           echo "Release artifacts:"
           ls -la

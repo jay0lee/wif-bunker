@@ -1,5 +1,8 @@
-"""Tests for CLI argument parsing and config dispatch."""
+"""Tests for WIF Bunker v2 CLI argument parsing and subcommand dispatch."""
 
+from __future__ import annotations
+
+import json
 import logging
 import os
 import sys
@@ -11,132 +14,147 @@ from wif_bunker.cli import _main_impl
 from wif_bunker.utils import preflight_check_write_access
 
 
-class TestArgumentParsing:
-    @patch("wif_bunker.cli._run_cert_only")
-    def test_cert_only_flag(self, mock_run_cert_only, tmp_path):
-        with patch("sys.argv", ["wif-bunker", "--cert-only", "--output-dir", str(tmp_path)]):
-            _main_impl()
-        mock_run_cert_only.assert_called_once()
-
+class TestSubcommandDispatch:
     @patch("wif_bunker.cli._run_status")
-    @patch("sys.argv", ["wif-bunker", "--status"])
-    def test_status_flag(self, mock_run_status):
-        _main_impl()
-        mock_run_status.assert_called_once()
+    def test_status_subcommand(self, mock_status):
+        with patch("sys.argv", ["wif-bunker", "status", "--config", "b.json", "--adc-file", "a.json"]):
+            _main_impl()
+        mock_status.assert_called_once_with(config_path="b.json", adc_path="a.json")
+
+    @patch("wif_bunker.cli._run_all_versions")
+    def test_versions_subcommand(self, mock_versions):
+        with patch("sys.argv", ["wif-bunker", "versions"]):
+            _main_impl()
+        mock_versions.assert_called_once()
+
+    @patch("wif_bunker.cli._run_all_versions")
+    def test_all_versions_flag(self, mock_versions):
+        with patch("sys.argv", ["wif-bunker", "--all-versions"]):
+            _main_impl()
+        mock_versions.assert_called_once()
 
     @patch("wif_bunker.cli._run_attest")
-    @patch("sys.argv", ["wif-bunker", "--attest"])
-    def test_attest_flag(self, mock_run_attest):
-        _main_impl()
-        mock_run_attest.assert_called_once()
-
-    @patch("sys.argv", ["wif-bunker", "--cert-file", "foo.pem"])
-    def test_cert_file_without_attest_errors(self):
-        with pytest.raises(SystemExit) as exc_info:
+    def test_attest_subcommand_flags(self, mock_attest, tmp_path):
+        with patch(
+            "sys.argv",
+            [
+                "wif-bunker",
+                "attest",
+                "--tpm-handle",
+                "0x81000001",
+                "--output-dir",
+                str(tmp_path),
+            ],
+        ):
             _main_impl()
-        assert exc_info.value.code == 2
+        cfg = mock_attest.call_args[0][0]
+        assert cfg.linux_tpm_handle == 0x81000001
+        assert mock_attest.call_args.kwargs["output_dir"] == str(tmp_path)
 
-    @patch("sys.argv", ["wif-bunker", "--output-dir", "/tmp"])
-    def test_output_dir_without_mode_errors(self):
-        with pytest.raises(SystemExit) as exc_info:
+    @patch("wif_bunker.cli._run_attest")
+    def test_attest_yubikey_flags(self, mock_attest):
+        with patch(
+            "sys.argv",
+            ["wif-bunker", "attest", "--use-yubikey", "--yubikey-slot", "9a", "--yubikey-serial", "12345"],
+        ):
             _main_impl()
-        assert exc_info.value.code == 2
+        cfg = mock_attest.call_args[0][0]
+        assert cfg.use_yubikey is True
+        assert cfg.yubikey_slot == "9a"
+        assert cfg.yubikey_serial == 12345
 
-    @patch("sys.argv", ["wif-bunker", "--use-adc", "--client-secrets-file", "f.json"])
-    def test_use_adc_with_client_secrets_errors(self):
-        with pytest.raises(SystemExit) as exc_info:
+    @patch("wif_bunker.cli.run_agent_foreground")
+    def test_agent_subcommand(self, mock_run_agent, tmp_path, sample_bunker_config):
+        bunker_file = tmp_path / "bunker.json"
+        sample_bunker_config.save(bunker_file)
+        with patch(
+            "sys.argv",
+            [
+                "wif-bunker",
+                "agent",
+                "--config",
+                str(bunker_file),
+                "--port",
+                "8765",
+                "--warm",
+            ],
+        ):
             _main_impl()
-        assert exc_info.value.code == 2
+        mock_run_agent.assert_called_once()
+        assert mock_run_agent.call_args.kwargs["port"] == 8765
+        assert mock_run_agent.call_args.kwargs["eager_warm"] is True
 
-    @patch("sys.platform", "darwin")
-    @patch("sys.argv", ["wif-bunker", "--soft-key"])
-    def test_soft_key_on_non_windows_errors(self):
-        with pytest.raises(SystemExit) as exc_info:
-            _main_impl()
-        assert exc_info.value.code == 2
+    def test_sign_jwt_subcommand_json_and_raw(self, tmp_path, sample_bunker_config, capsys):
+        bunker_file = tmp_path / "bunker.json"
+        cache_file = tmp_path / "cache.json"
+        sample_bunker_config.save(bunker_file)
 
-    @patch("sys.argv", ["wif-bunker", "--cert-lifetime", "999"])
-    def test_cert_lifetime_too_high(self):
-        with pytest.raises(SystemExit) as exc_info:
+        with patch(
+            "sys.argv",
+            ["wif-bunker", "sign-jwt", "--config", str(bunker_file), "--output-file", str(cache_file)],
+        ):
             _main_impl()
-        assert exc_info.value.code == 2
 
-    @patch("sys.argv", ["wif-bunker", "--cert-lifetime", "0"])
-    def test_cert_lifetime_zero(self):
-        with pytest.raises(SystemExit) as exc_info:
+        out = json.loads(capsys.readouterr().out)
+        assert out["version"] == 1
+        assert out["success"] is True
+        assert out["id_token"].count(".") == 2
+        assert json.loads(cache_file.read_text(encoding="utf-8")) == out
+
+        with patch("sys.argv", ["wif-bunker", "sign-jwt", "--config", str(bunker_file), "--raw"]):
             _main_impl()
-        assert exc_info.value.code == 2
+        raw = capsys.readouterr().out.strip()
+        assert raw.count(".") == 2
 
     @patch("wif_bunker.cli.logging.basicConfig")
     @patch("wif_bunker.cli._run_status")
-    @patch("sys.argv", ["wif-bunker", "--status", "--debug"])
-    def test_debug_flag_sets_debug_level(self, mock_run_status, mock_basic_config):
-        _main_impl()
-        mock_run_status.assert_called_once()
-        mock_basic_config.assert_called_once()
-        assert mock_basic_config.call_args[1]["level"] == logging.DEBUG
+    def test_debug_flag_before_or_after_subcommand(self, mock_status, mock_basic_config):
+        with patch("sys.argv", ["wif-bunker", "status", "--debug"]):
+            _main_impl()
+        mock_status.assert_called_once()
+        assert mock_basic_config.call_args.kwargs["level"] == logging.DEBUG
 
 
-class TestConfigOverrides:
-    @patch("wif_bunker.cli._run_cert_only")
-    def test_use_project_sets_config(self, mock_run_cert_only, tmp_path):
-        with patch(
-            "sys.argv",
-            ["wif-bunker", "--cert-only", "--output-dir", str(tmp_path), "--use-project", "my-proj"],
+class TestSetupArgValidation:
+    def test_missing_signer_errors(self):
+        with patch("sys.argv", ["wif-bunker", "setup", "--use-project", "p"]), pytest.raises(SystemExit) as exc:
+            _main_impl()
+        assert exc.value.code == 2
+
+    def test_use_adc_and_client_secrets_mutually_exclusive(self):
+        with (
+            patch(
+                "sys.argv",
+                ["wif-bunker", "setup", "--signer", "yubikey", "--use-adc", "--client-secrets-file", "f.json"],
+            ),
+            pytest.raises(SystemExit) as exc,
         ):
             _main_impl()
-        config = mock_run_cert_only.call_args[0][0]
-        assert config.project_id == "my-proj"
+        assert exc.value.code == 2
 
-    @patch("wif_bunker.cli._run_cert_only")
-    def test_create_project_sets_config(self, mock_run_cert_only, tmp_path):
-        with patch(
-            "sys.argv",
-            ["wif-bunker", "--cert-only", "--output-dir", str(tmp_path), "--create-project", "my-proj-new"],
+    def test_issuer_uri_must_be_https(self):
+        with (
+            patch("sys.argv", ["wif-bunker", "setup", "--signer", "yubikey", "--issuer-uri", "http://bad"]),
+            pytest.raises(SystemExit) as exc,
         ):
             _main_impl()
-        config = mock_run_cert_only.call_args[0][0]
-        assert config.project_id == "my-proj-new"
+        assert exc.value.code == 2
 
-    @patch("wif_bunker.cli._run_cert_only")
-    def test_use_pool_sets_config(self, mock_run_cert_only, tmp_path):
-        with patch(
-            "sys.argv",
-            ["wif-bunker", "--cert-only", "--output-dir", str(tmp_path), "--use-pool", "my-pool"],
+    def test_windows_certstore_requires_selector(self):
+        with (
+            patch("sys.argv", ["wif-bunker", "setup", "--signer", "windows-certstore"]),
+            pytest.raises(SystemExit) as exc,
         ):
             _main_impl()
-        config = mock_run_cert_only.call_args[0][0]
-        assert config.pool_id == "my-pool"
+        assert exc.value.code == 2
 
-    @patch("wif_bunker.cli._run_cert_only")
-    def test_create_pool_sets_config(self, mock_run_cert_only, tmp_path):
-        with patch(
-            "sys.argv",
-            ["wif-bunker", "--cert-only", "--output-dir", str(tmp_path), "--create-pool", "my-pool-new"],
+    def test_macos_se_requires_selector(self):
+        with (
+            patch("sys.argv", ["wif-bunker", "setup", "--signer", "macos-secureenclave"]),
+            pytest.raises(SystemExit) as exc,
         ):
             _main_impl()
-        config = mock_run_cert_only.call_args[0][0]
-        assert config.pool_id == "my-pool-new"
-
-    @patch("wif_bunker.cli._run_cert_only")
-    def test_key_algorithm_override(self, mock_run_cert_only, tmp_path):
-        with patch(
-            "sys.argv",
-            ["wif-bunker", "--cert-only", "--output-dir", str(tmp_path), "--key-algorithm", "es384"],
-        ):
-            _main_impl()
-        config = mock_run_cert_only.call_args[0][0]
-        assert config.key_algorithm == "es384"
-
-    @patch("wif_bunker.cli._run_cert_only")
-    def test_cert_lifetime_sets_config(self, mock_run_cert_only, tmp_path):
-        with patch(
-            "sys.argv",
-            ["wif-bunker", "--cert-only", "--output-dir", str(tmp_path), "--cert-lifetime", "30"],
-        ):
-            _main_impl()
-        config = mock_run_cert_only.call_args[0][0]
-        assert config.cert_lifetime_days == 30
+        assert exc.value.code == 2
 
 
 class TestPreflightWriteAccess:

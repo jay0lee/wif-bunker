@@ -1,21 +1,24 @@
 [project]
 name = "wif-bunker"
-version = "0.1.0"
-description = "Hardware-backed Workload Identity Federation for Google Cloud"
+version = "0.2.0"
+description = "Hardware-backed OIDC Workload Identity Federation for Google Cloud"
 requires-python = ">=3.10"
 dependencies = [
     "requests>=2.31",
-    "cffi>=2.0.0",
     "cryptography>=44.0",
     "pyOpenSSL>=24.0",
-    "python-pkcs11>=0.7",
+    "google-auth @ git+https://github.com/jay0lee/google-cloud-python.git@main#subdirectory=packages/google-auth",
+    "dpop-signer-yubikey @ git+https://github.com/jay0lee/dpop-signers.git#subdirectory=yubikey",
+    "dpop-signer-pkcs11 @ git+https://github.com/jay0lee/dpop-signers.git#subdirectory=pkcs11",
+    "dpop-signer-fido2-previewsign @ git+https://github.com/jay0lee/dpop-signers.git#subdirectory=fido2-previewsign",
+    "dpop-signer-windows-certstore @ git+https://github.com/jay0lee/dpop-signers.git#subdirectory=windows-certstore ; sys_platform == 'win32'",
+    "dpop-signer-macos-secureenclave @ git+https://github.com/jay0lee/dpop-signers.git#subdirectory=macos-secureenclave ; sys_platform == 'darwin'",
+    "dpop-signer-linux-tpm @ git+https://github.com/jay0lee/dpop-signers.git#subdirectory=linux-tpm ; sys_platform == 'linux'",
     # Pin to upstream 3.0.0-rc1 (d462fb4): PyPI v2.3.0 fails to build on
     # GCC 15 / C23 (Ubuntu 26.04) due to pycparser header incompatibilities.
     # Upstream master has the fix but no release yet.  Track:
     # https://github.com/tpm2-software/tpm2-pytss/issues/639
     "tpm2-pytss @ git+https://github.com/tpm2-software/tpm2-pytss.git@d462fb475e313074a07badab50e67f2944182f36 ; sys_platform == 'linux'",
-    "yubikey-manager>=5.0",
-    "google-auth @ https://github.com/jay0lee/google-cloud-python/releases/download/google-auth-v2.56.2-bunker4/google_auth-2.56.2+bunker4-py3-none-any.whl",
 ]
 
 [project.optional-dependencies]
@@ -26,7 +29,7 @@ dev = [
 ]
 
 [tool.setuptools]
-packages = ["wif_bunker", "wif_bunker.keystore", "wif_bunker.attestation"]
+packages = ["wif_bunker", "wif_bunker.attestation"]
 
 [tool.setuptools.package-data]
 "wif_bunker.attestation" = ["roots/**/*.pem"]
@@ -61,7 +64,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["wif_bunker", "get_ecp"]
+known-first-party = ["wif_bunker"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["SIM117", "RUF043", "RUF059"]

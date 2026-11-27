@@ -228,14 +228,29 @@ def _verify_ek_chain_windows(ek_pem: str) -> AttestationCheck:
     return verify_ek_chain(ek_pem)
 
 
+def _windows_store_path(config: WorkloadConfig) -> str:
+    """Return PowerShell Cert: store path matching *config.windows_store_location*."""
+    loc = getattr(config, "windows_store_location", "current_user") or "current_user"
+    store_root = "LocalMachine" if loc == "local_machine" else "CurrentUser"
+    return f"Cert:\\{store_root}\\My"
+
+
 def _check_key_provider(config: WorkloadConfig) -> tuple[AttestationCheck, dict | None]:
     """Verify the bunker key's CNG storage provider via cert private key info."""
     key_cn = config.workload_cn
+    store_path = _windows_store_path(config)
+    thumbprint = str(config.signer_params.get("thumbprint") or "").replace(" ", "").upper()
+    if thumbprint:
+        selector = f"Where-Object {{ $_.Thumbprint -eq '{thumbprint}' }}"
+        target_label = f"thumbprint {thumbprint}"
+    else:
+        selector = f"Where-Object {{ $_.Subject -eq 'CN={key_cn}' }}"
+        target_label = f"CN '{key_cn}'"
     # Query the cert's private key provider using .NET CNG APIs via PowerShell.
     # This works for both RSA and ECDSA keys and avoids certutil -csp (legacy).
     ps_cmd = (
-        f"$cert = Get-ChildItem Cert:\\CurrentUser\\My | "
-        f"Where-Object {{ $_.Subject -eq 'CN={key_cn}' }}; "
+        f"$cert = Get-ChildItem {store_path} | "
+        f"{selector} | Select-Object -First 1; "
         f"if (-not $cert) {{ Write-Output 'CERT_NOT_FOUND'; exit }}; "
         f"if (-not $cert.HasPrivateKey) {{ Write-Output 'NO_PRIVATE_KEY'; exit }}; "
         # Try RSA first, then ECDSA — one will succeed depending on key algorithm
@@ -256,7 +271,7 @@ def _check_key_provider(config: WorkloadConfig) -> tuple[AttestationCheck, dict 
             AttestationCheck(
                 name="Key storage provider",
                 passed=False,
-                detail=f"Certificate with CN '{key_cn}' not found in Cert:\\CurrentUser\\My",
+                detail=f"Certificate with {target_label} not found in {store_path}",
             ),
             None,
         )
@@ -266,7 +281,7 @@ def _check_key_provider(config: WorkloadConfig) -> tuple[AttestationCheck, dict 
             AttestationCheck(
                 name="Key storage provider",
                 passed=False,
-                detail=f"Could not determine CNG key provider for '{key_cn}'. Output: {output[:200]}",
+                detail=f"Could not determine CNG key provider for {target_label}. Output: {output[:200]}",
             ),
             None,
         )
@@ -289,7 +304,7 @@ def _check_key_provider(config: WorkloadConfig) -> tuple[AttestationCheck, dict 
             passed=False,
             detail=(
                 f"Key '{key_cn}' is in {provider} (not TPM-backed). "
-                "Use a TPM-backed key (remove --soft-key) for hardware attestation."
+                "Provision a TPM-backed key in Microsoft Platform Crypto Provider for hardware attestation."
             ),
         ),
         {"provider": provider, "key_name": key_name},
@@ -578,10 +593,18 @@ def _ncrypt_create_claim(config: WorkloadConfig, key_info: dict | None = None) -
 
 
 def _check_exportability(config: WorkloadConfig) -> AttestationCheck:
-    """Verify the key is non-exportable via certutil."""
+    """Verify the key is non-exportable via PowerShell."""
+    store_path = _windows_store_path(config)
+    thumbprint = str(config.signer_params.get("thumbprint") or "").replace(" ", "").upper()
+    if thumbprint:
+        selector = f"Where-Object {{ $_.Thumbprint -eq '{thumbprint}' }}"
+        target_label = f"thumbprint {thumbprint}"
+    else:
+        selector = f"Where-Object {{ $_.Subject -like '*{config.workload_cn}*' }}"
+        target_label = f"CN '{config.workload_cn}'"
     result = _run_powershell(
-        f"$cert = Get-ChildItem Cert:\\CurrentUser\\My | "
-        f"Where-Object {{ $_.Subject -like '*{config.workload_cn}*' }}; "
+        f"$cert = Get-ChildItem {store_path} | "
+        f"{selector} | Select-Object -First 1; "
         f"if ($cert) {{ $cert.HasPrivateKey; $cert.PrivateKey }} else {{ 'NOT_FOUND' }}"
     )
 
@@ -589,7 +612,7 @@ def _check_exportability(config: WorkloadConfig) -> AttestationCheck:
         return AttestationCheck(
             name="Key non-exportability",
             passed=False,
-            detail=f"Certificate with CN '{config.workload_cn}' not found in cert store",
+            detail=f"Certificate with {target_label} not found in cert store",
         )
 
     # TPM-backed keys will show HasPrivateKey=True but PrivateKey access will fail
@@ -974,9 +997,9 @@ def _attest_windows(config: WorkloadConfig) -> AttestationReport:
 
     if is_software:
         summary = (
-            "The workload key is stored in software (--soft-key mode). "
+            "The workload key is stored in the Microsoft Software Key Storage Provider. "
             "Software keys cannot be attested to a TPM. "
-            "Remove --soft-key to use hardware-bound keys."
+            "Provision a key in Microsoft Platform Crypto Provider for hardware-bound keys."
         )
     elif tpm_verified and key_proven:
         summary = (
@@ -996,8 +1019,8 @@ def _attest_windows(config: WorkloadConfig) -> AttestationReport:
         summary = (
             "Your device has a verified, genuine TPM but the workload key is "
             "not stored in the Platform Crypto Provider. The key may be in a "
-            "software key store. Re-run setup without --soft-key to create a "
-            "TPM-bound key."
+            "software key store. Provision a TPM-bound key in Microsoft Platform "
+            "Crypto Provider and re-run setup."
         )
     elif tpm_present and not tpm_verified:
         summary = (

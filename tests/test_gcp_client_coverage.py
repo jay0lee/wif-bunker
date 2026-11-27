@@ -424,22 +424,20 @@ class TestSetupWifInfrastructure:
         config = MagicMock()
         config.project_id = "test-proj"
         config.pool_id = "bunker-wif-pool"
-        config.provider_id = "bunker-x509-prov-123"
+        config.provider_id = "bunker-oidc-prov-123"
+        config.issuer_uri = "https://wif-bunker.internal/bunker-oidc-prov-123"
         config.sa_name = "bunker-wif-sa"
         return config
 
-    def _make_mock_cert_bundle(self):
-        """Create a mock cert bundle."""
-        bundle = MagicMock()
-        bundle.trust_anchor_pem = "-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----"
-        bundle.sha256_fingerprint = "abc123fp"
-        return bundle
+    def _make_mock_jwks(self):
+        """Create a sample JWKS dict."""
+        return {"keys": [{"kty": "EC", "crv": "P-256", "x": "a", "y": "b", "alg": "ES256", "kid": "k1", "use": "sig"}]}
 
     def test_creates_sa_and_pool_and_provider(self):
         """Full WIF infrastructure creation with new SA."""
         client = _make_client_with_token()
         config = self._make_mock_config()
-        bundle = self._make_mock_cert_bundle()
+        jwks = self._make_mock_jwks()
 
         with (
             patch.object(
@@ -461,7 +459,7 @@ class TestSetupWifInfrastructure:
             sa_email, provider_id = client.setup_wif_infrastructure(
                 config=config,
                 project_number="123456",
-                cert_bundle=bundle,
+                jwks=jwks,
                 reuse_pool=False,
                 use_sa=True,
             )
@@ -474,12 +472,12 @@ class TestSetupWifInfrastructure:
         """reuse_pool=True skips pool creation, cleans stale providers."""
         client = _make_client_with_token()
         config = self._make_mock_config()
-        bundle = self._make_mock_cert_bundle()
+        jwks = self._make_mock_jwks()
 
         stale_providers = {
             "workloadIdentityPoolProviders": [
-                {"name": "projects/123/locations/global/workloadIdentityPools/pool/providers/bunker-x509-prov-old"},
-                {"name": "projects/123/locations/global/workloadIdentityPools/pool/providers/bunker-x509-prov-123"},
+                {"name": "projects/123/locations/global/workloadIdentityPools/pool/providers/bunker-oidc-prov-old"},
+                {"name": "projects/123/locations/global/workloadIdentityPools/pool/providers/bunker-oidc-prov-123"},
             ]
         }
 
@@ -504,7 +502,7 @@ class TestSetupWifInfrastructure:
             sa_email, provider_id = client.setup_wif_infrastructure(
                 config=config,
                 project_number="123456",
-                cert_bundle=bundle,
+                jwks=jwks,
                 reuse_pool=True,
                 use_sa=False,
             )
@@ -517,7 +515,7 @@ class TestSetupWifInfrastructure:
         """SA creation returns 409 (already exists)."""
         client = _make_client_with_token()
         config = self._make_mock_config()
-        bundle = self._make_mock_cert_bundle()
+        jwks = self._make_mock_jwks()
 
         resp_409 = _mock_response(409)
 
@@ -543,7 +541,7 @@ class TestSetupWifInfrastructure:
             sa_email, _ = client.setup_wif_infrastructure(
                 config=config,
                 project_number="123456",
-                cert_bundle=bundle,
+                jwks=jwks,
                 reuse_pool=False,
                 use_sa=True,
             )
@@ -555,7 +553,7 @@ class TestSetupWifInfrastructure:
         """Pre-existing sa_email skips SA creation."""
         client = _make_client_with_token()
         config = self._make_mock_config()
-        bundle = self._make_mock_cert_bundle()
+        jwks = self._make_mock_jwks()
 
         with (
             patch.object(
@@ -573,7 +571,7 @@ class TestSetupWifInfrastructure:
             sa_email, _ = client.setup_wif_infrastructure(
                 config=config,
                 project_number="123456",
-                cert_bundle=bundle,
+                jwks=jwks,
                 reuse_pool=False,
                 use_sa=True,
                 sa_email="existing-sa@proj.iam.gserviceaccount.com",
@@ -586,7 +584,7 @@ class TestSetupWifInfrastructure:
         """Exception listing providers is caught and logged."""
         client = _make_client_with_token()
         config = self._make_mock_config()
-        bundle = self._make_mock_cert_bundle()
+        jwks = self._make_mock_jwks()
 
         with (
             patch.object(
@@ -606,7 +604,7 @@ class TestSetupWifInfrastructure:
             sa_email, _ = client.setup_wif_infrastructure(
                 config=config,
                 project_number="123456",
-                cert_bundle=bundle,
+                jwks=jwks,
                 reuse_pool=True,
                 use_sa=False,
             )
@@ -618,7 +616,7 @@ class TestSetupWifInfrastructure:
         """Exception deleting stale provider is caught and logged as warning."""
         client = _make_client_with_token()
         config = self._make_mock_config()
-        bundle = self._make_mock_cert_bundle()
+        jwks = self._make_mock_jwks()
 
         stale_providers = {
             "workloadIdentityPoolProviders": [
@@ -651,7 +649,7 @@ class TestSetupWifInfrastructure:
             sa_email, _ = client.setup_wif_infrastructure(
                 config=config,
                 project_number="123456",
-                cert_bundle=bundle,
+                jwks=jwks,
                 reuse_pool=True,
                 use_sa=False,
             )
@@ -663,7 +661,7 @@ class TestSetupWifInfrastructure:
         """Pool creation returns 409."""
         client = _make_client_with_token()
         config = self._make_mock_config()
-        bundle = self._make_mock_cert_bundle()
+        jwks = self._make_mock_jwks()
 
         resp_409 = _mock_response(409)
 
@@ -687,7 +685,7 @@ class TestSetupWifInfrastructure:
             _, _ = client.setup_wif_infrastructure(
                 config=config,
                 project_number="123456",
-                cert_bundle=bundle,
+                jwks=jwks,
                 reuse_pool=False,
                 use_sa=False,
             )
@@ -903,7 +901,6 @@ class TestApplyIamBindings:
         client.session.close()
 
 
-
 # ---------------------------------------------------------------------------
 # _wait_for_lro — error in completed operation (lines 384-387)
 # ---------------------------------------------------------------------------
@@ -941,28 +938,25 @@ class TestSetupWifSaNon409:
         config = MagicMock()
         config.project_id = "test-proj"
         config.pool_id = "bunker-wif-pool"
-        config.provider_id = "bunker-x509-prov-123"
+        config.provider_id = "bunker-oidc-prov-123"
+        config.issuer_uri = "https://wif-bunker.internal/bunker-oidc-prov-123"
         config.sa_name = "bunker-wif-sa"
         return config
 
-    def _make_mock_cert_bundle(self):
-        bundle = MagicMock()
-        bundle.trust_anchor_pem = "-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----"
-        bundle.sha256_fingerprint = "abc123fp"
-        return bundle
+    def _make_mock_jwks(self):
+        return {"keys": [{"kty": "EC", "crv": "P-256", "x": "a", "y": "b", "alg": "ES256", "kid": "k1", "use": "sig"}]}
 
     def test_sa_creation_non_409_error_reraises(self):
-        """SA creation returns non-409 HTTPError → re-raised, not swallowed."""
+        """SA creation returns non-409 HTTPError -> re-raised, not swallowed."""
         client = _make_client_with_token()
         config = self._make_mock_config()
-        bundle = self._make_mock_cert_bundle()
+        jwks = self._make_mock_jwks()
 
         resp_500 = _mock_response(500)
 
         def mock_api_call_with_retry(method, url, json_payload=None, *, retry_on_propagation=False, timeout=900):
             if "serviceAccounts" in url:
                 resp_500.raise_for_status()
-            # Pool creation succeeds
             return {"name": "operations/pool-op"}
 
         with (
@@ -975,7 +969,7 @@ class TestSetupWifSaNon409:
             client.setup_wif_infrastructure(
                 config=config,
                 project_number="123456",
-                cert_bundle=bundle,
+                jwks=jwks,
                 reuse_pool=False,
                 use_sa=True,
             )
@@ -983,31 +977,24 @@ class TestSetupWifSaNon409:
         client.session.close()
 
 
-# ---------------------------------------------------------------------------
-# setup_wif_infrastructure — pool non-409 error re-raises (line 546)
-# ---------------------------------------------------------------------------
-
-
 class TestSetupWifPoolNon409:
     def _make_mock_config(self):
         config = MagicMock()
         config.project_id = "test-proj"
         config.pool_id = "bunker-wif-pool"
-        config.provider_id = "bunker-x509-prov-123"
+        config.provider_id = "bunker-oidc-prov-123"
+        config.issuer_uri = "https://wif-bunker.internal/bunker-oidc-prov-123"
         config.sa_name = "bunker-wif-sa"
         return config
 
-    def _make_mock_cert_bundle(self):
-        bundle = MagicMock()
-        bundle.trust_anchor_pem = "-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----"
-        bundle.sha256_fingerprint = "abc123fp"
-        return bundle
+    def _make_mock_jwks(self):
+        return {"keys": [{"kty": "EC", "crv": "P-256", "x": "a", "y": "b", "alg": "ES256", "kid": "k1", "use": "sig"}]}
 
     def test_pool_creation_non_409_error_reraises(self):
-        """Pool creation returns non-409 HTTPError → re-raised."""
+        """Pool creation returns non-409 HTTPError -> re-raised."""
         client = _make_client_with_token()
         config = self._make_mock_config()
-        bundle = self._make_mock_cert_bundle()
+        jwks = self._make_mock_jwks()
 
         resp_500 = _mock_response(500)
 
@@ -1026,7 +1013,7 @@ class TestSetupWifPoolNon409:
             client.setup_wif_infrastructure(
                 config=config,
                 project_number="123456",
-                cert_bundle=bundle,
+                jwks=jwks,
                 reuse_pool=False,
                 use_sa=False,
             )
@@ -1034,31 +1021,24 @@ class TestSetupWifPoolNon409:
         client.session.close()
 
 
-# ---------------------------------------------------------------------------
-# setup_wif_infrastructure — provider listing HTTPError (line 570)
-# ---------------------------------------------------------------------------
-
-
 class TestSetupWifProviderListHTTPError:
     def _make_mock_config(self):
         config = MagicMock()
         config.project_id = "test-proj"
         config.pool_id = "bunker-wif-pool"
-        config.provider_id = "bunker-x509-prov-123"
+        config.provider_id = "bunker-oidc-prov-123"
+        config.issuer_uri = "https://wif-bunker.internal/bunker-oidc-prov-123"
         config.sa_name = "bunker-wif-sa"
         return config
 
-    def _make_mock_cert_bundle(self):
-        bundle = MagicMock()
-        bundle.trust_anchor_pem = "-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----"
-        bundle.sha256_fingerprint = "abc123fp"
-        return bundle
+    def _make_mock_jwks(self):
+        return {"keys": [{"kty": "EC", "crv": "P-256", "x": "a", "y": "b", "alg": "ES256", "kid": "k1", "use": "sig"}]}
 
     def test_provider_list_http_error_logged_as_warning(self):
         """HTTPError listing providers in reuse_pool mode is caught and logged."""
         client = _make_client_with_token()
         config = self._make_mock_config()
-        bundle = self._make_mock_cert_bundle()
+        jwks = self._make_mock_jwks()
 
         resp_403 = _mock_response(403)
 
@@ -1081,11 +1061,172 @@ class TestSetupWifProviderListHTTPError:
             sa_email, _ = client.setup_wif_infrastructure(
                 config=config,
                 project_number="123456",
-                cert_bundle=bundle,
+                jwks=jwks,
                 reuse_pool=True,
                 use_sa=False,
             )
 
-        # Should complete successfully despite the HTTPError
         assert sa_email is None
+        client.session.close()
+
+
+class TestSetupWifProviderReuseAndPatch:
+    def _make_mock_config(self):
+        config = MagicMock()
+        config.project_id = "test-proj"
+        config.pool_id = "bunker-ci-pool"
+        config.provider_id = "bunker-ci-oidc"
+        config.issuer_uri = "https://wif-bunker.internal/bunker-ci-oidc"
+        config.sa_name = "bunker-wif-sa"
+        return config
+
+    def _make_mock_jwks(self):
+        return {"keys": [{"kty": "EC", "crv": "P-256", "x": "a", "y": "b", "alg": "ES256", "kid": "k1", "use": "sig"}]}
+
+    def test_reuse_provider_patches_in_place(self):
+        client = _make_client_with_token()
+        config = self._make_mock_config()
+        jwks = self._make_mock_jwks()
+
+        with (
+            patch.object(client, "_api_call_with_retry", return_value={"name": "operations/patch-op"}) as mock_retry,
+            patch.object(client, "_wait_for_lro"),
+            patch.object(client, "_wait_for_wif_resource"),
+        ):
+            sa_email, prov_id = client.setup_wif_infrastructure(
+                config=config,
+                project_number="123456",
+                jwks=jwks,
+                reuse_pool=True,
+                use_sa=True,
+                sa_email="sa@test-proj.iam.gserviceaccount.com",
+                reuse_provider=True,
+            )
+
+        assert sa_email == "sa@test-proj.iam.gserviceaccount.com"
+        assert prov_id == "bunker-ci-oidc"
+        mock_retry.assert_called_once()
+        assert mock_retry.call_args[0][0] == "PATCH"
+        assert "updateMask=" in mock_retry.call_args[0][1]
+        client.session.close()
+
+    def test_reuse_provider_404_falls_back_to_post_create(self):
+        client = _make_client_with_token()
+        config = self._make_mock_config()
+        jwks = self._make_mock_jwks()
+        resp_404 = _mock_response(404)
+
+        calls = []
+
+        def side_effect(method, url, json_payload=None, *, retry_on_propagation=False, timeout=900):
+            calls.append((method, url))
+            if method == "PATCH":
+                resp_404.raise_for_status()
+            return {"name": "operations/create-op"}
+
+        with (
+            patch.object(client, "_api_call_with_retry", side_effect=side_effect),
+            patch.object(client, "_wait_for_lro"),
+            patch.object(client, "_wait_for_wif_resource"),
+        ):
+            _, prov_id = client.setup_wif_infrastructure(
+                config=config,
+                project_number="123456",
+                jwks=jwks,
+                reuse_pool=True,
+                use_sa=False,
+                reuse_provider=True,
+            )
+
+        assert prov_id == "bunker-ci-oidc"
+        assert [c[0] for c in calls] == ["PATCH", "POST"]
+        client.session.close()
+
+    def test_post_409_active_provider_patches_in_place(self):
+        client = _make_client_with_token()
+        config = self._make_mock_config()
+        jwks = self._make_mock_jwks()
+        resp_409 = _mock_response(409)
+
+        calls = []
+
+        def side_effect(method, url, json_payload=None, *, retry_on_propagation=False, timeout=900):
+            calls.append((method, url))
+            if method == "POST":
+                resp_409.raise_for_status()
+            return {"name": "operations/patch-op"}
+
+        with (
+            patch.object(client, "_api_call", return_value={"state": "ACTIVE"}),
+            patch.object(client, "_api_call_with_retry", side_effect=side_effect),
+            patch.object(client, "_wait_for_lro"),
+            patch.object(client, "_wait_for_wif_resource"),
+        ):
+            _, prov_id = client.setup_wif_infrastructure(
+                config=config,
+                project_number="123456",
+                jwks=jwks,
+                reuse_pool=True,
+                use_sa=False,
+                reuse_provider=False,
+            )
+
+        assert prov_id == "bunker-ci-oidc"
+        assert [c[0] for c in calls] == ["POST", "PATCH"]
+        client.session.close()
+
+    def test_post_409_deleted_provider_raises_runtime_error(self):
+        client = _make_client_with_token()
+        config = self._make_mock_config()
+        jwks = self._make_mock_jwks()
+        resp_409 = _mock_response(409)
+
+        def side_effect(method, url, json_payload=None, *, retry_on_propagation=False, timeout=900):
+            resp_409.raise_for_status()
+
+        with (
+            patch.object(client, "_api_call", return_value={"state": "DELETED"}),
+            patch.object(client, "_api_call_with_retry", side_effect=side_effect),
+            pytest.raises(RuntimeError, match="soft-deleted"),
+        ):
+            client.setup_wif_infrastructure(
+                config=config,
+                project_number="123456",
+                jwks=jwks,
+                reuse_pool=True,
+                use_sa=False,
+                reuse_provider=False,
+            )
+        client.session.close()
+
+    def test_apply_iam_bindings_skips_set_when_already_bound(self):
+        client = _make_client_with_token()
+        config = self._make_mock_config()
+        wif_principal = (
+            "principal://iam.googleapis.com/projects/123456/locations/global/"
+            "workloadIdentityPools/bunker-ci-pool/subject/bunker-ci-workload"
+        )
+        sa_email = "bunker-wif-sa@test-proj.iam.gserviceaccount.com"
+
+        calls = []
+
+        def side_effect(method, url, json_payload=None, *, retry_on_propagation=False, timeout=900):
+            calls.append((method, url))
+            if "serviceAccounts" in url:
+                return {"bindings": [{"role": "roles/iam.workloadIdentityUser", "members": [wif_principal]}]}
+            return {"bindings": [{"role": "roles/browser", "members": [f"serviceAccount:{sa_email}"]}]}
+
+        with patch.object(client, "_api_call_with_retry", side_effect=side_effect):
+            client.apply_iam_bindings(
+                config=config,
+                project_number="123456",
+                workload_cn="bunker-ci-workload",
+                pool_id="bunker-ci-pool",
+                sa_email=sa_email,
+                use_sa=True,
+            )
+
+        # Only the two getIamPolicy reads should run; zero setIamPolicy writes!
+        assert len(calls) == 2
+        assert all("getIamPolicy" in url for _, url in calls)
         client.session.close()

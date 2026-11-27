@@ -10,6 +10,7 @@ if "tpm2_pytss" not in sys.modules:
     _mock_tpm2_pytss = ModuleType("tpm2_pytss")
     _mock_tpm2_pytss.ESAPI = MagicMock
     _mock_tpm2_pytss.ESYS_TR = MagicMock()
+    _mock_tpm2_pytss.TPM2_ALG = MagicMock()
     _mock_tpm2_pytss.TPM2_CAP = MagicMock()
     _mock_tpm2_pytss.TPM2_PT = MagicMock()
     _mock_tpm2_pytss.TPM2_PT.MANUFACTURER = 0x105
@@ -24,7 +25,11 @@ if "tpm2_pytss" not in sys.modules:
     _mock_tpm2_pytss.TPMT_SYM_DEF = MagicMock
     sys.modules["tpm2_pytss"] = _mock_tpm2_pytss
 
-    # Mock sub-modules
+    _mock_types = ModuleType("tpm2_pytss.types")
+    _mock_types.TPMT_SIG_SCHEME = MagicMock()
+    _mock_types.TPM2B_PUBLIC = MagicMock()
+    sys.modules["tpm2_pytss.types"] = _mock_types
+
     _mock_utils = ModuleType("tpm2_pytss.utils")
     _mock_utils.make_credential = MagicMock()
     sys.modules["tpm2_pytss.utils"] = _mock_utils
@@ -33,12 +38,12 @@ if "tpm2_pytss" not in sys.modules:
     sys.modules["tpm2_pytss.internal"] = _mock_internal
 
     _mock_crypto = ModuleType("tpm2_pytss.internal.crypto")
-    _mock_crypto.public_to_crypto_key = MagicMock()
+    _mock_crypto._public_to_pem = MagicMock()
     sys.modules["tpm2_pytss.internal.crypto"] = _mock_crypto
 
 from wif_bunker.attestation.linux import (
+    _certify_key,
     _extract_ek_certificate,
-    _extract_workload_key_from_pkcs11,
     _get_tpm_info,
 )
 
@@ -47,7 +52,7 @@ class TestLinuxEkExtraction:
     @patch("wif_bunker.attestation.linux._extract_ek_certificate_cli_fallback", return_value=(None, None))
     @patch("wif_bunker.attestation.linux._extract_ek_certificate_esapi", return_value=(None, None))
     def test_no_ek_certificate(self, mock_esapi, mock_cli):
-        """Neither ESAPI nor CLI finds an EK cert → failure check."""
+        """Neither ESAPI nor CLI finds an EK cert -> failure check."""
         work_dir = Path("/tmp")
         mock_ectx = MagicMock()
         check, pem = _extract_ek_certificate(work_dir, mock_ectx)
@@ -58,14 +63,14 @@ class TestLinuxEkExtraction:
 
 class TestLinuxTpmInfo:
     def test_get_tpm_info_failure(self):
-        """get_capability raises → returns None."""
+        """get_capability raises -> returns None."""
         mock_ectx = MagicMock()
         mock_ectx.get_capability.side_effect = RuntimeError("no TPM")
         result = _get_tpm_info(mock_ectx)
         assert result is None
 
     def test_get_tpm_info_success(self):
-        """get_capability succeeds → parses Manufacturer and FW version."""
+        """get_capability succeeds -> parses Manufacturer and FW version."""
         mock_ectx = MagicMock()
         mock_prop = MagicMock()
         mock_prop.property = 0x105  # _PT_MANUFACTURER
@@ -123,47 +128,45 @@ class TestExtractEkCertificateEsapi:
         assert pem is None
 
 
-class TestPkcs11StoreQuery:
-    @patch("wif_bunker.keystore.linux._find_pkcs11_lib")
-    @patch("pkcs11.lib")
-    def test_token_found(self, mock_pkcs11_lib, mock_find_lib):
-        """bunker-wif token found → success check."""
-        mock_find_lib.return_value = "/usr/lib/pkcs11/libtpm2_pkcs11.so"
-        mock_lib = MagicMock()
-        mock_pkcs11_lib.return_value = mock_lib
+class TestCertifyKey:
+    def test_certifies_persistent_handle_without_flushing(self):
+        mock_ectx = MagicMock()
+        mock_ectx.tr_from_tpmpublic.return_value = "PERSISTENT_TR"
+        mock_ectx.certify.return_value = (b"attest-blob", b"sig-blob")
 
-        mock_token = MagicMock()
-        mock_lib.get_token.return_value = mock_token
+        check, ok, attest_bytes, sig_bytes = _certify_key(mock_ectx, "AK_HANDLE", tpm_handle=0x81000001)
 
-        mock_session = MagicMock()
-        mock_session.get_objects.return_value = [MagicMock(), MagicMock()]
-        mock_token.open.return_value.__enter__ = MagicMock(return_value=mock_session)
-        mock_token.open.return_value.__exit__ = MagicMock(return_value=False)
-
-        check, info = _extract_workload_key_from_pkcs11()
+        assert ok is True
         assert check.passed is True
-        assert info["token_label"] == "bunker-wif"
-        assert info["object_count"] == 2
+        assert "0x81000001" in check.detail
+        assert attest_bytes == b"attest-blob"
+        assert sig_bytes == b"sig-blob"
+        mock_ectx.tr_from_tpmpublic.assert_called_once_with(0x81000001)
+        mock_ectx.create_primary.assert_not_called()
+        mock_ectx.flush_context.assert_not_called()
 
-    @patch("wif_bunker.keystore.linux._find_pkcs11_lib")
-    @patch("pkcs11.lib")
-    def test_no_token(self, mock_pkcs11_lib, mock_find_lib):
-        """No bunker-wif token → failure check."""
-        import pkcs11 as pkcs11_mod
+    def test_certifies_ephemeral_primary_when_no_handle_and_flushes(self):
+        mock_ectx = MagicMock()
+        mock_ectx.create_primary.return_value = ("TMP_PRIMARY", None, None, None, None)
+        mock_ectx.certify.return_value = (b"attest-blob", b"sig-blob")
 
-        mock_find_lib.return_value = "/usr/lib/pkcs11/libtpm2_pkcs11.so"
-        mock_lib = MagicMock()
-        mock_pkcs11_lib.return_value = mock_lib
+        check, ok, attest_bytes, sig_bytes = _certify_key(mock_ectx, "AK_HANDLE", tpm_handle=None)
 
-        mock_lib.get_token.side_effect = pkcs11_mod.NoSuchToken()
+        assert ok is True
+        assert check.passed is True
+        assert attest_bytes == b"attest-blob"
+        assert sig_bytes == b"sig-blob"
+        mock_ectx.create_primary.assert_called_once()
+        mock_ectx.flush_context.assert_called_once_with("TMP_PRIMARY")
 
-        check, info = _extract_workload_key_from_pkcs11()
+    def test_certify_error_returns_failed_check(self):
+        mock_ectx = MagicMock()
+        mock_ectx.tr_from_tpmpublic.side_effect = RuntimeError("TPM_RC_HANDLE")
+
+        check, ok, attest_bytes, sig_bytes = _certify_key(mock_ectx, "AK_HANDLE", tpm_handle=0x81000099)
+
+        assert ok is False
         assert check.passed is False
-        assert info is None
-
-    @patch("wif_bunker.keystore.linux._find_pkcs11_lib", side_effect=RuntimeError("no .so"))
-    def test_no_pkcs11_lib(self, mock_find_lib):
-        """PKCS#11 library not found → failure check."""
-        check, info = _extract_workload_key_from_pkcs11()
-        assert check.passed is False
-        assert info is None
+        assert "TPM_RC_HANDLE" in check.detail
+        assert attest_bytes is None
+        assert sig_bytes is None

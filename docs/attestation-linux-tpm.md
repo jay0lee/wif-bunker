@@ -112,27 +112,11 @@ tpm2_activatecredential -c ak.ctx -C ek.ctx -i cred.secret -o decrypted.txt -P s
 
 The AK signs a cryptographic proof that a specific workload key is inside the TPM.
 
-**CLI (`tpm2-tools`):**
-```bash
-tpm2_createprimary -C o -g sha256 -G rsa -c owner_primary.ctx
-tpm2_certify -c owner_primary.ctx -C ak.ctx -g sha256 -o attest.bin -s sig.bin
-```
-
 **Library (`tpm2-pytss`):**
-- Setup: Use `ESAPI.create_primary()` in the owner hierarchy.
-- Certification: Use `ESAPI.certify()` with the target key and the AK.
+- When `config.linux_tpm_handle` is configured (for example, `0x81000001` from `dpop-signer-linux-tpm`), load the persistent handle directly with `ESAPI.tr_from_tpmpublic(tpm_handle)` and certify it via `ESAPI.certify()` (do NOT flush persistent handles).
+- Otherwise, create an ephemeral primary key via `ESAPI.create_primary()` in the owner hierarchy, certify it via `ESAPI.certify()`, and flush the temporary handle.
 
 **Note:** Some versions of `tpm2-pytss` require an explicit `in_scheme` parameter for `certify()`. Use `TPMT_SIG_SCHEME(scheme=TPM2_ALG.NULL)` to let the AK use its built-in signing scheme.
-
-### Step 6: PKCS#11 Store Query
-
-Find the relevant keys that a workload is using.
-
-**CLI/Filesystem:**
-Querying the raw `tpm2_pkcs11.sqlite3` database manually. *(Not recommended, fragile schema)*
-
-**Library (`python-pkcs11`):**
-Use the `python-pkcs11` library to interface with the PKCS#11 token directly and enumerate keys safely.
 
 ## 4. Key Concepts
 

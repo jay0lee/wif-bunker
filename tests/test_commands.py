@@ -1,6 +1,3 @@
-import importlib.util
-import subprocess
-
 import pytest
 
 from wif_bunker.utils import _require_command, require_commands
@@ -64,35 +61,3 @@ def test_require_commands_empty_list():
     """An empty command list should succeed and return an empty dict."""
     result = require_commands([])
     assert result == {}
-
-
-# ---------------------------------------------------------------------------
-# _check_tpm_linux (requires python-pkcs11)
-# ---------------------------------------------------------------------------
-
-_has_pkcs11 = importlib.util.find_spec("pkcs11") is not None
-pytestmark_pkcs11 = pytest.mark.skipif(not _has_pkcs11, reason="python-pkcs11 not installed")
-
-
-@pytestmark_pkcs11
-def test_check_tpm_linux_devnode_exists(monkeypatch):
-    from wif_bunker.keystore.linux import _check_tpm_linux
-
-    monkeypatch.setattr("pathlib.Path.exists", lambda self: True)
-    monkeypatch.setattr("os.access", lambda path, mode: True)
-    _check_tpm_linux()
-
-
-@pytestmark_pkcs11
-def test_check_tpm_linux_no_tpm_raises(monkeypatch):
-    from wif_bunker.keystore.linux import _check_tpm_linux
-
-    monkeypatch.setattr("pathlib.Path.exists", lambda self: False)
-    monkeypatch.setattr("os.environ.get", lambda x: None)
-
-    def mock_run(*args, **kwargs):
-        raise FileNotFoundError()
-
-    monkeypatch.setattr(subprocess, "run", mock_run)
-    with pytest.raises(RuntimeError):
-        _check_tpm_linux()

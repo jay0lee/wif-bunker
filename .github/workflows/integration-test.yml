@@ -7,23 +7,17 @@ on:
   workflow_call:
     inputs:
       wif_bunker_cmd:
-        description: 'Command to invoke wif-bunker (e.g. $PYTHON -m wif_bunker or ./wif-bunker)'
+        description: 'Command to invoke wif-bunker (e.g. $PYTHON -m wif_bunker or ./wif-bunker/wif-bunker)'
         required: false
         default: '$PYTHON -m wif_bunker'
         type: string
       use_built_binary:
-        description: 'Set true to download and test a pre-built binary artifact (hardmTLS bundled)'
+        description: 'Set true to download and test a pre-built PyInstaller binary artifact'
         required: false
         default: false
         type: boolean
     secrets:
       WIF_PROVIDER:
-        required: true
-      WIF_SERVICE_ACCOUNT:
-        required: true
-      SANDBOX_FOLDER_ID:
-        required: true
-      WIF_POOL_NAME:
         required: true
 
 permissions:
@@ -31,368 +25,91 @@ permissions:
   id-token: write  # Required for OIDC token exchange with GCP
 
 jobs:
-  # ──────────────────────────────────────────────────────────────────────
-  # Bootstrap: ensure per-runner GCP projects exist
-  # ──────────────────────────────────────────────────────────────────────
-  bootstrap:
-    name: Bootstrap Runner Infrastructure
-    runs-on: ubuntu-24.04
-    concurrency:
-      group: wif-ci-bootstrap
-      cancel-in-progress: false
-    outputs:
-      runner_map: ${{ steps.setup.outputs.runner_map }}
-    defaults:
-      run:
-        shell: bash
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - id: auth
-        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
-        with:
-          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
-          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
-
-      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
-
-      - id: setup
-        name: Ensure per-runner projects and folders
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          SANDBOX_FOLDER="${{ secrets.SANDBOX_FOLDER_ID }}"
-          WIF_POOL="${{ secrets.WIF_POOL_NAME }}"
-          GH_REPO="${{ github.repository }}"
-
-          # Runner IDs — MUST match matrix.runner_id values exactly
-          RUNNERS="u2204-x64 u2404-x64 u2604-x64 u2204-arm u2404-arm u2604-arm macos-15 macos-26 windows nuc8-tpm nuc8-yk"
-
-          declare -A RUNNER_SA
-          declare -A RUNNER_TESTS_FOLDER
-          declare -A RUNNER_TEST_PROJECT
-
-          # ── Get existing child folders of sandbox ──
-          EXISTING_FOLDERS=$(gcloud resource-manager folders list \
-            --folder="$SANDBOX_FOLDER" \
-            --format="csv[no-heading](displayName,name)" 2>/dev/null || true)
-
-          for RUNNER_ID in $RUNNERS; do
-            PROJECT_ID="wif-ci-${RUNNER_ID}"
-            SA_NAME="ci-runner"
-            SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
-
-            # ── Find or create runner folder ──
-            RUNNER_FOLDER_ID=$(echo "$EXISTING_FOLDERS" | \
-              grep "^${RUNNER_ID}," | head -1 | cut -d',' -f2 | \
-              sed 's|folders/||' || true)
-
-            if [ -n "$RUNNER_FOLDER_ID" ]; then
-              echo "✓ Runner folder exists: ${RUNNER_ID}/ (${RUNNER_FOLDER_ID})"
-            else
-              echo "Creating runner folder: ${RUNNER_ID}/"
-              RUNNER_FOLDER_ID=$(gcloud resource-manager folders create \
-                --display-name="$RUNNER_ID" \
-                --folder="$SANDBOX_FOLDER" \
-                --format="value(name)" | sed 's|folders/||')
-              echo "  Created folder: $RUNNER_FOLDER_ID"
-            fi
-
-            # ── Find or create tests/ subfolder ──
-            TESTS_FOLDER_ID=$(gcloud resource-manager folders list \
-              --folder="$RUNNER_FOLDER_ID" \
-              --filter="displayName=tests" \
-              --format="value(name)" 2>/dev/null | head -1 | sed 's|folders/||' || true)
-
-            if [ -n "$TESTS_FOLDER_ID" ]; then
-              echo "  ✓ Tests folder exists: ${RUNNER_ID}/tests/ (${TESTS_FOLDER_ID})"
-            else
-              echo "  Creating tests folder: ${RUNNER_ID}/tests/"
-              TESTS_FOLDER_ID=$(gcloud resource-manager folders create \
-                --display-name="tests" \
-                --folder="$RUNNER_FOLDER_ID" \
-                --format="value(name)" | sed 's|folders/||')
-              echo "  Created tests folder: $TESTS_FOLDER_ID"
-            fi
-
-            # ── Find or create runner project ──
-            if gcloud projects describe "$PROJECT_ID" --format="value(lifecycleState)" 2>/dev/null | grep -q ACTIVE; then
-              echo "  ✓ Runner project exists: $PROJECT_ID"
-            else
-              echo "  Creating runner project: $PROJECT_ID"
-              gcloud projects create "$PROJECT_ID" \
-                --name="CI Runner ${RUNNER_ID}" \
-                --folder="$RUNNER_FOLDER_ID"
-
-              # Enable APIs
-              gcloud services enable \
-                iam.googleapis.com \
-                cloudresourcemanager.googleapis.com \
-                serviceusage.googleapis.com \
-                sts.googleapis.com \
-                iamcredentials.googleapis.com \
-                --project="$PROJECT_ID"
-            fi
-
-            # ── Ensure CI runner SA exists (idempotent) ──
-            if gcloud iam service-accounts describe "$SA_EMAIL" --project="$PROJECT_ID" &>/dev/null; then
-              echo "  ✓ Runner SA exists: $SA_EMAIL"
-            else
-              echo "  Creating runner SA: $SA_EMAIL"
-              gcloud iam service-accounts create "$SA_NAME" \
-                --project="$PROJECT_ID" \
-                --display-name="CI Runner ${RUNNER_ID}"
-
-              # Wait for SA to propagate before adding IAM bindings
-              echo "  Waiting for SA propagation..."
-              for i in $(seq 1 30); do
-                if gcloud iam service-accounts describe "$SA_EMAIL" --project="$PROJECT_ID" &>/dev/null; then
-                  echo "  SA visible after ${i}s"
-                  break
-                fi
-                sleep 1
-              done
-              # Extra wait — describe succeeds before IAM fully propagates
-              sleep 10
-            fi
-
-            # ── Ensure IAM bindings (idempotent — add-iam-policy-binding is a no-op if already set) ──
-            # Retry wrapper for IAM bindings (eventual consistency)
-            iam_bind() {
-              for attempt in 1 2 3 4 5; do
-                if "$@" 2>/dev/null; then
-                  return 0
-                fi
-                echo "    IAM bind attempt $attempt failed, retrying in 10s..."
-                sleep 10
-              done
-              echo "    IAM bind failed after 5 attempts: $*"
-              return 1
-            }
-
-            # SA is owner of its own project
-            iam_bind gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-              --member="serviceAccount:${SA_EMAIL}" \
-              --role="roles/owner"
-
-            # SA can create/manage test projects in its own tests/ folder
-            for ROLE in \
-              roles/resourcemanager.projectCreator \
-              roles/resourcemanager.projectDeleter \
-              roles/browser \
-              roles/serviceusage.serviceUsageAdmin; do
-              iam_bind gcloud resource-manager folders add-iam-policy-binding "$TESTS_FOLDER_ID" \
-                --member="serviceAccount:${SA_EMAIL}" \
-                --role="$ROLE" \
-                --condition=None
-            done
-
-            # Allow GHA OIDC to impersonate this SA
-            iam_bind gcloud iam service-accounts add-iam-policy-binding "${SA_EMAIL}" \
-              --project="$PROJECT_ID" \
-              --role="roles/iam.workloadIdentityUser" \
-              --member="principalSet://iam.googleapis.com/${WIF_POOL}/attribute.repository/${GH_REPO}"
-
-            echo "  ✓ Ready: $PROJECT_ID → $SA_EMAIL"
-
-            # ── Ensure persistent test project exists in tests/ folder ──
-            TEST_PROJECT_ID="wif-test-${RUNNER_ID}"
-            if gcloud projects describe "$TEST_PROJECT_ID" --format="value(lifecycleState)" 2>/dev/null | grep -q ACTIVE; then
-              echo "  ✓ Test project exists: $TEST_PROJECT_ID"
-            else
-              echo "  Creating test project: $TEST_PROJECT_ID"
-              gcloud projects create "$TEST_PROJECT_ID" \
-                --name="WIF Test ${RUNNER_ID}" \
-                --folder="$TESTS_FOLDER_ID"
-
-              gcloud services enable \
-                iam.googleapis.com \
-                cloudresourcemanager.googleapis.com \
-                serviceusage.googleapis.com \
-                sts.googleapis.com \
-                iamcredentials.googleapis.com \
-                --project="$TEST_PROJECT_ID"
-            fi
-
-            # CI runner SA needs owner on test project to create pools/SAs
-            iam_bind gcloud projects add-iam-policy-binding "$TEST_PROJECT_ID" \
-              --member="serviceAccount:${SA_EMAIL}" \
-              --role="roles/owner"
-
-            RUNNER_SA[$RUNNER_ID]="$SA_EMAIL"
-            RUNNER_TESTS_FOLDER[$RUNNER_ID]="$TESTS_FOLDER_ID"
-            RUNNER_TEST_PROJECT[$RUNNER_ID]="$TEST_PROJECT_ID"
-          done
-
-          # ── Cleanup orphaned runner folders ──
-          while IFS=',' read -r display_name folder_path; do
-            [ -z "$display_name" ] && continue
-            # Skip non-runner entries (e.g. the host project won't have a folder entry)
-            if ! echo "$RUNNERS" | grep -qw "$display_name"; then
-              ORPHAN_ID=$(echo "$folder_path" | sed 's|folders/||')
-              echo "🗑 Cleaning up orphaned runner folder: $display_name/ ($ORPHAN_ID)"
-
-              # Delete test projects inside tests/ subfolder
-              CHILD_FOLDERS=$(gcloud resource-manager folders list \
-                --folder="$ORPHAN_ID" --format="value(name)" 2>/dev/null || true)
-              for cf in $CHILD_FOLDERS; do
-                CF_ID=$(echo "$cf" | sed 's|folders/||')
-                CF_PROJECTS=$(gcloud projects list \
-                  --filter="parent.id=$CF_ID AND parent.type=folder" \
-                  --format="value(projectId)" 2>/dev/null || true)
-                for proj in $CF_PROJECTS; do
-                  echo "    Deleting test project: $proj"
-                  gcloud projects delete "$proj" --quiet 2>/dev/null || true
-                done
-                gcloud resource-manager folders delete "$cf" 2>/dev/null || true
-              done
-
-              # Delete runner project
-              ORPHAN_PROJECT="wif-ci-${display_name}"
-              gcloud projects delete "$ORPHAN_PROJECT" --quiet 2>/dev/null || true
-
-              # Delete runner folder
-              gcloud resource-manager folders delete "folders/$ORPHAN_ID" 2>/dev/null || true
-            fi
-          done <<< "$EXISTING_FOLDERS"
-
-          # ── Output runner map as JSON ──
-          JSON="{"
-          FIRST=true
-          for RUNNER_ID in $RUNNERS; do
-            $FIRST || JSON+=","
-            JSON+="\"${RUNNER_ID}\":{\"sa\":\"${RUNNER_SA[$RUNNER_ID]}\",\"tests_folder\":\"${RUNNER_TESTS_FOLDER[$RUNNER_ID]}\",\"test_project\":\"${RUNNER_TEST_PROJECT[$RUNNER_ID]}\"}"
-            FIRST=false
-          done
-          JSON+="}"
-          echo "runner_map=${JSON}" >> "$GITHUB_OUTPUT"
-          echo "Runner map:"
-          echo "$JSON" | python3 -m json.tool 2>/dev/null || echo "$JSON"
-
+  # Each runner uses its own static pre-provisioned GCP project, WIF pool,
+  # service account, and OIDC provider (PATCHed in place with each run's key).
+  # Zero projects/pools/SAs/providers are created or deleted during normal CI runs!
+  # Run .github/workflows/bootstrap-ci.yml manually when adding/removing runners.
   integration-test:
-    needs: bootstrap
     strategy:
       fail-fast: false
       matrix:
         include:
-          # ── Linux x64 ──
+          # ── Linux x64 (swtpm + linux-tpm signer) ──
           - os: ubuntu-22.04
             name: Linux x64 (22.04)
             runner_id: u2204-x64
-            soft_key_flag: ""
+            signer_kind: linux-swtpm
             artifact_name: wif-bunker-ubuntu-22.04
-            expected_algos: "es256 es384 rsa2048 rsa3072"
           - os: ubuntu-24.04
             name: Linux x64 (24.04)
             runner_id: u2404-x64
-            soft_key_flag: ""
+            signer_kind: linux-swtpm
             artifact_name: wif-bunker-ubuntu-24.04
-            expected_algos: "es256 es384 rsa2048 rsa3072"
           - os: ubuntu-26.04
             name: Linux x64 (26.04)
             runner_id: u2604-x64
-            soft_key_flag: ""
+            signer_kind: linux-swtpm
             artifact_name: wif-bunker-ubuntu-26.04
-            expected_algos: "es256 es384 rsa2048 rsa3072"
-          # ── Linux ARM64 ──
+          # ── Linux ARM64 (swtpm + linux-tpm signer) ──
           - os: ubuntu-22.04-arm
             name: Linux ARM64 (22.04)
             runner_id: u2204-arm
-            soft_key_flag: ""
+            signer_kind: linux-swtpm
             artifact_name: wif-bunker-ubuntu-22.04-arm
-            expected_algos: "es256 es384 rsa2048 rsa3072"
           - os: ubuntu-24.04-arm
             name: Linux ARM64 (24.04)
             runner_id: u2404-arm
-            soft_key_flag: ""
+            signer_kind: linux-swtpm
             artifact_name: wif-bunker-ubuntu-24.04-arm
-            expected_algos: "es256 es384 rsa2048 rsa3072"
           - os: ubuntu-26.04-arm
             name: Linux ARM64 (26.04)
             runner_id: u2604-arm
-            soft_key_flag: ""
+            signer_kind: linux-swtpm
             artifact_name: wif-bunker-ubuntu-26.04-arm
-            expected_algos: "es256 es384 rsa2048 rsa3072"
-          # ── macOS ARM64 (Apple Silicon — requires macOS 15+ for CryptoTokenKit) ──
+          # ── macOS ARM64 (GitHub VM has no Secure Enclave -> software PEM signer) ──
           - os: macos-15
             name: macOS ARM64 (15)
             runner_id: macos-15
-            soft_key_flag: ""
+            signer_kind: software-pem
             artifact_name: wif-bunker-macos-15
-            expected_algos: "es256 es384"
           - os: macos-26
             name: macOS ARM64 (26)
             runner_id: macos-26
-            soft_key_flag: ""
+            signer_kind: software-pem
             artifact_name: wif-bunker-macos-26
-            expected_algos: "es256 es384"
-          # ── Windows ──
+          # ── Windows x64 (Windows Certificate Store CNG signer) ──
           - os: windows-2025-vs2026
             name: Windows x64
             runner_id: windows
-            soft_key_flag: "--soft-key"
+            signer_kind: windows-certstore
             artifact_name: wif-bunker-windows-2025-vs2026
-            expected_algos: "es256 es384 rsa2048 rsa3072 rsa4096"
-          #- os: windows-11-vs2026-arm
-          #  name: Windows ARM64
-          #  runner_id: windows
-          #  soft_key_flag: "--soft-key"
-          #  artifact_name: wif-bunker-windows-11-vs2026-arm
-          #  expected_algos: "es256 es384 rsa2048 rsa3072 rsa4096"
-          # ── Native SSL/Python: test with runner's pre-installed OpenSSL + Python ──
-#          - os: ubuntu-24.04
-#            name: Linux x64 (native-ssl)
-#            runner_id: linux-swtpm
-#            soft_key_flag: ""
-#            artifact_name: wif-bunker-ubuntu-24.04
-#            expected_algos: "es256 es384 rsa2048 rsa3072"
-#            use_native_ssl_and_python: true
-#          - os: macos-15
-#            name: macOS ARM64 (native-ssl)
-#            runner_id: macos
-#            soft_key_flag: ""
-#            artifact_name: wif-bunker-macos-15
-#            expected_algos: "es256 es384"
-#            use_native_ssl_and_python: true
-#          - os: windows-2025-vs2026
-#            name: Windows x64 (native-ssl)
-#            runner_id: windows
-#            soft_key_flag: "--soft-key"
-#            artifact_name: wif-bunker-windows-2025-vs2026
-#            expected_algos: "es256 es384 rsa2048 rsa3072 rsa4096"
-#            use_native_ssl_and_python: true
-          # ── Self-hosted hardware ──
-          # runs_on takes precedence for runner selection.
+          # ── Self-hosted real hardware ──
           - name: Hardware TPM (NUC8)
             os: ubuntu-24.04
             runs_on: '["self-hosted", "Linux", "X64", "tpm"]'
             runner_id: nuc8-tpm
-            soft_key_flag: ""
+            signer_kind: linux-hw-tpm
             artifact_name: wif-bunker-ubuntu-24.04
             self_hosted: true
-            expected_algos: "es256 rsa2048"
           - name: YubiKey (NUC8)
             os: ubuntu-24.04
             runs_on: '["self-hosted", "Linux", "X64", "yk"]'
             runner_id: nuc8-yk
-            soft_key_flag: ""
+            signer_kind: yubikey
             artifact_name: wif-bunker-ubuntu-24.04
             self_hosted: true
-            use_yubikey: true
-            expected_algos: "es256 es384 rsa2048"
 
-    # Self-hosted entries set runs_on to a JSON label array; GH-hosted use os
     runs-on: ${{ matrix.runs_on && fromJSON(matrix.runs_on) || matrix.os }}
     name: ${{ matrix.name }}
     environment: ${{ matrix.self_hosted && 'tpm-hardware' || '' }}
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      RUNNER_SA: ${{ fromJSON(needs.bootstrap.outputs.runner_map)[matrix.runner_id].sa }}
-      TESTS_FOLDER: ${{ fromJSON(needs.bootstrap.outputs.runner_map)[matrix.runner_id].tests_folder }}
-      TEST_PROJECT: ${{ fromJSON(needs.bootstrap.outputs.runner_map)[matrix.runner_id].test_project }}
-      # Force Python to use UTF-8 for stdout/stderr on Windows (default is cp1252)
+      RUNNER_SA: ci-runner@wif-ci-${{ matrix.runner_id }}.iam.gserviceaccount.com
+      TEST_PROJECT: wif-test-${{ matrix.runner_id }}
+      POOL_ID: bunker-ci-pool
+      PROVIDER_ID: bunker-ci-oidc
+      BUNKER_SA: bunker-wif-sa@wif-test-${{ matrix.runner_id }}.iam.gserviceaccount.com
+      WORKLOAD_SUBJECT: bunker-ci-workload
       PYTHONIOENCODING: utf-8
 
     defaults:
@@ -402,375 +119,43 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # ── Authenticate to GCP via WIF ──
+      # ── Authenticate to GCP via WIF as this runner's static CI SA ──
       - id: auth
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
-          service_account: ${{ fromJSON(needs.bootstrap.outputs.runner_map)[matrix.runner_id].sa }}
+          service_account: ci-runner@wif-ci-${{ matrix.runner_id }}.iam.gserviceaccount.com
 
       - if: ${{ !matrix.self_hosted }}
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
-      # ── Setup: Linux Software TPM ──
-      # NOTE: tpm2-abrmd is only needed here because swtpm exposes a TCP socket,
-      # not /dev/tpmrm0.  The PKCS#11 layer (tpm2_ptool) requires a resource
-      # manager — on real hardware the kernel provides /dev/tpmrm0, but for
-      # swtpm in CI we need the userspace abrmd bridge.
-      - name: "Linux: Install Software TPM packages"
-        if: runner.os == 'Linux' && !matrix.self_hosted
+      # ── Linux GH-hosted: install swtpm + TSS2 libs ──
+      - name: "Linux: Install Software TPM & TSS2 packages"
+        if: matrix.signer_kind == 'linux-swtpm'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            swtpm swtpm-tools tpm2-tools tpm2-abrmd libtss2-tcti-tabrmd0 \
-            libtss2-dev dbus libtpm2-pkcs11-1 libtpm2-pkcs11-tools \
-            python3-tpm2-pkcs11-tools libpcsclite-dev pkg-config gnutls-bin opensc
-
-      - name: "Linux: Setup Software TPM (swtpm)"
-        if: runner.os == 'Linux' && !matrix.self_hosted
-        run: |
-          SWTPM_DIR=$(mktemp -d)
-          swtpm socket \
-            --tpmstate dir="$SWTPM_DIR" \
-            --tpm2 \
-            --ctrl type=tcp,port=2322 \
-            --server type=tcp,port=2321 \
-            --flags not-need-init,startup-clear &
-          sleep 2
-
-          DBUS_SESSION_BUS_ADDRESS=$(dbus-daemon --session --fork --print-address --address="unix:tmpdir=/tmp")
-          echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
-
-          export DBUS_SESSION_BUS_ADDRESS
-          tpm2-abrmd \
-            --tcti="swtpm:host=127.0.0.1,port=2321" \
-            --session \
-            --allow-root &
-          sleep 1
-
-          echo "TPM2TOOLS_TCTI=tabrmd:bus_type=session" >> "$GITHUB_ENV"
-          echo "TPM2_PKCS11_TCTI=tabrmd:bus_type=session" >> "$GITHUB_ENV"
-
-          # Relax DA lockout parameters — CI tests multiple algorithms,
-          # each triggering a PIN check that increments the DA counter.
-          export TPM2TOOLS_TCTI="tabrmd:bus_type=session"
-          export TPM2_PKCS11_TCTI="tabrmd:bus_type=session"
-          tpm2_dictionarylockout --setup \
-            --max-tries=1000 \
-            --recovery-time=1 \
-            --lockout-recovery-time=1
-
-          # Initialize PKCS#11 store — same state the hardware TPM reset
-          # delivers: fresh store with primary object (pid=1), ready for
-          # WIF Bunker to addtoken.
-          rm -rf "$HOME/.tpm2_pkcs11"
-          mkdir -p "$HOME/.tpm2_pkcs11"
-          echo "TPM2_PKCS11_STORE=$HOME/.tpm2_pkcs11" >> "$GITHUB_ENV"
-          export TPM2_PKCS11_STORE="$HOME/.tpm2_pkcs11"
-          if command -v tpm2_ptool &>/dev/null; then
-            tpm2_ptool init --path="$HOME/.tpm2_pkcs11" 2>/dev/null || true
-            echo "Initialized fresh tpm2-pkcs11 store."
-          fi
-
+            swtpm swtpm-tools tpm2-tools libtss2-dev libpcsclite-dev swig pkg-config
 
       - name: Set up latest Python and OpenSSL
-        if: ${{ !matrix.use_native_ssl_and_python }}
         id: setup-python-ssl
         uses: jay0lee/python-openssl-latest@v1
-
-      - name: "Set PYTHON env var and library paths (native)"
-        if: ${{ matrix.use_native_ssl_and_python }}
-        shell: bash
-        run: |
-          # Use the runner's pre-installed Python and OpenSSL instead of
-          # our cached custom build.  This tests against whatever the
-          # platform ships with natively (OpenSSL 3.x required).
-
-          # ── Find native Python ──
-          if [[ "${RUNNER_OS}" == "Windows" ]]; then
-            PYTHON="$(which python)"
-          else
-            PYTHON="$(which python3)"
-          fi
-          echo "PYTHON=${PYTHON}" >> $GITHUB_ENV
-
-          # ── Find native OpenSSL ──
-          if [[ "${RUNNER_OS}" == "Linux" ]]; then
-            NATIVE_OPENSSL_DIR="/usr"
-          elif [[ "${RUNNER_OS}" == "macOS" ]]; then
-            # macOS runners have Homebrew OpenSSL pre-installed.
-            if brew --prefix openssl@3 >/dev/null 2>&1; then
-              NATIVE_OPENSSL_DIR="$(brew --prefix openssl@3)"
-            elif brew --prefix openssl >/dev/null 2>&1; then
-              NATIVE_OPENSSL_DIR="$(brew --prefix openssl)"
-            else
-              echo "::error::No Homebrew OpenSSL found on macOS runner"
-              exit 1
-            fi
-          elif [[ "${RUNNER_OS}" == "Windows" ]]; then
-            NATIVE_OPENSSL_DIR="C:/Program Files/OpenSSL"
-            if [ ! -d "$NATIVE_OPENSSL_DIR" ]; then
-              echo "::error::OpenSSL not found at ${NATIVE_OPENSSL_DIR}"
-              exit 1
-            fi
-          fi
-
-          # Override OPENSSL_INSTALL_PATH so downstream steps
-          # (hardmTLS build, library path setup) use the native OpenSSL.
-          echo "OPENSSL_INSTALL_PATH=${NATIVE_OPENSSL_DIR}" >> $GITHUB_ENV
-
-          # Library search paths for dynamic linking against native OpenSSL.
-          export LD_LIBRARY_PATH="${NATIVE_OPENSSL_DIR}/lib:${LD_LIBRARY_PATH}"
-          echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" >> $GITHUB_ENV
-          if [[ "${RUNNER_OS}" == "macOS" ]]; then
-            export DYLD_LIBRARY_PATH="${NATIVE_OPENSSL_DIR}/lib:${DYLD_LIBRARY_PATH}"
-            echo "DYLD_LIBRARY_PATH=${DYLD_LIBRARY_PATH}" >> $GITHUB_ENV
-          fi
-
-          echo "── Native environment ──"
-          echo "PYTHON=${PYTHON}"
-          "${PYTHON}" --version
-          echo "OPENSSL_DIR=${NATIVE_OPENSSL_DIR}"
-          if [ -x "${NATIVE_OPENSSL_DIR}/bin/openssl" ]; then
-            "${NATIVE_OPENSSL_DIR}/bin/openssl" version
-          elif command -v openssl >/dev/null 2>&1; then
-            openssl version
-          fi
-
-      - name: "Verify Python + OpenSSL"
-        shell: bash
-        run: |
-          echo "══════════════════════════════════════════════════"
-          echo "ENVIRONMENT VERIFICATION"
-          echo "══════════════════════════════════════════════════"
-
-          echo ""
-          echo "=== PYTHON env var ==="
-          echo "PYTHON=${PYTHON}"
-          ls -la "${PYTHON}" || echo "PYTHON binary NOT FOUND"
-          echo ""
-          echo "=== Python version ==="
-          "${PYTHON}" --version
-          echo ""
-          echo "=== Python sys.executable ==="
-          "${PYTHON}" -c "import sys; print(f'sys.executable: {sys.executable}')"
-          echo ""
-          echo "=== Python ssl module details ==="
-          "${PYTHON}" -c "
-          import ssl, sys, os
-          print(f'Python version:       {sys.version}')
-          print(f'Python executable:    {sys.executable}')
-          print(f'ssl module file:      {ssl.__file__}')
-          print(f'ssl.OPENSSL_VERSION:  {ssl.OPENSSL_VERSION}')
-          print(f'ssl.OPENSSL_VERSION_INFO: {ssl.OPENSSL_VERSION_INFO}')
-          try:
-              import _ssl
-              print(f'_ssl module file:     {_ssl.__file__}')
-          except Exception as e:
-              print(f'_ssl import error:    {e}')
-          "
-          echo ""
-          echo "=== Which python3 is on PATH (for comparison) ==="
-          which python3 2>/dev/null && python3 --version 2>/dev/null || echo "python3 not on PATH"
-          which python 2>/dev/null && python --version 2>/dev/null || echo "python not on PATH"
-
-
 
       - name: Create venv and install dependencies
         run: |
           "${PYTHON}" -m venv venv
-          #if [ -d "venv/Scripts" ]; then
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
-            PYTHON="$PWD/venv/Scripts/python.exe"
+            PYTHON="$GITHUB_WORKSPACE/venv/Scripts/python.exe"
           else
-            PYTHON="$PWD/venv/bin/python3"
+            PYTHON="$GITHUB_WORKSPACE/venv/bin/python3"
           fi
           echo "PYTHON=${PYTHON}" >> "$GITHUB_ENV"
-          echo "PYTHON updated to venv: ${PYTHON}"
 
-          # Install wif-bunker required packages
-          echo "Upgrading pip..."
-          $PYTHON -m pip install --upgrade pip
-          echo "pip upgraded."
-          echo "installing wif-bunker deps..."
-          $PYTHON -m pip install --upgrade --only-deps .
-          echo "wif-bunker deps installed."
-
-      # ── Use the fixed per-runner project (created by bootstrap job) ──
-      - name: Set project and pool IDs
-        id: config
-        shell: bash
-        run: |
-          PROJECT_ID="$TEST_PROJECT"
-          POOL_ID="bunker-pool-${{ github.run_id }}-${{ github.run_attempt }}"
-          echo "project_id=$PROJECT_ID" >> "$GITHUB_OUTPUT"
-          echo "pool_id=$POOL_ID" >> "$GITHUB_OUTPUT"
-          echo "Test Project ID: $PROJECT_ID"
-          echo "Pool ID: $POOL_ID"
-
-
-
-      # ── Baseline: confirm GHA CI service account is working ──
-      - name: "ADC Baseline: GHA CI service account"
-        shell: bash
-        run: |
-          echo "=== ADC baseline with GHA CI credentials ==="
-          # minimal-adc.py handles retries internally with exponential backoff
-          "${PYTHON}" -u scripts/minimal-adc.py 2>&1 | tee "$RUNNER_TEMP/adc_baseline.txt"
-
-          # Confirm we see the expected CI service account
-          GHA_SA="$RUNNER_SA"
-          if grep -q "$GHA_SA" "$RUNNER_TEMP/adc_baseline.txt"; then
-            echo "✓ Baseline ADC working as CI SA: $GHA_SA"
-          else
-            echo "✗ FAIL: Expected CI SA $GHA_SA not found in output!"
-            echo "--- Captured output ---"
-            cat "$RUNNER_TEMP/adc_baseline.txt"
-            exit 1
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            export CFLAGS="-std=c11 ${CFLAGS:-}"
           fi
-
-      # ── Step 1: Clean up leftover WIF resources from previous runs ──
-      - name: "Cleanup previous WIF resources"
-        shell: bash
-        run: |
-          echo "=== Cleaning up previous WIF resources ==="
-          PROJECT_ID="${{ steps.config.outputs.project_id }}"
-
-          # Delete old WIF pools from previous runs (best-effort)
-          echo "Deleting old WIF pools (if any)..."
-          OLD_POOLS=$(gcloud iam workload-identity-pools list \
-            --project="$PROJECT_ID" --location=global \
-            --filter="state=ACTIVE" \
-            --format="value(name.basename())" 2>/dev/null || true)
-          for pool in $OLD_POOLS; do
-            echo "  Deleting pool: $pool"
-            gcloud iam workload-identity-pools delete "$pool" \
-              --project="$PROJECT_ID" --location=global --quiet 2>/dev/null || true
-          done
-
-          # Delete existing service account
-          echo "Deleting SA bunker-wif-sa (if exists)..."
-          gcloud iam service-accounts delete \
-            "bunker-wif-sa@${PROJECT_ID}.iam.gserviceaccount.com" \
-            --project="$PROJECT_ID" --quiet 2>/dev/null || true
-
-          echo "Cleanup complete."
-
-      - name: "Reset TPM to clean state"
-        if: matrix.self_hosted && !matrix.use_yubikey
-        run: |
-          # Clean up tpm2-pkcs11 state from previous CI runs.
-          # IMPORTANT: Do NOT touch NV indices — EK certificates and other
-          # firmware-provisioned data live there and require platform auth
-          # (locked after boot) to restore.
-
-          # 0. TPM health check — fail fast if TPM is in a bad state
-          TPM_PROPS=$(tpm2_getcap properties-variable 2>/dev/null)
-          IN_LOCKOUT=$(echo "$TPM_PROPS" | grep -oP 'inLockout:\s+\K\d+' || echo "0")
-          LOCKOUT_AUTH_SET=$(echo "$TPM_PROPS" | grep -oP 'lockoutAuthSet:\s+\K\d+' || echo "0")
-          if [ "$IN_LOCKOUT" = "1" ] && [ "$LOCKOUT_AUTH_SET" = "0" ]; then
-            echo "TPM in DA lockout but no lockout auth set — clearing automatically."
-            tpm2_dictionarylockout --clear 2>/dev/null || true
-            # Re-check
-            TPM_PROPS=$(tpm2_getcap properties-variable 2>/dev/null)
-            IN_LOCKOUT=$(echo "$TPM_PROPS" | grep -oP 'inLockout:\s+\K\d+' || echo "0")
-            if [ "$IN_LOCKOUT" = "1" ]; then
-              echo "::error::TPM DA lockout could not be cleared automatically."
-              exit 1
-            fi
-            echo "DA lockout cleared successfully."
-          elif [ "$IN_LOCKOUT" = "1" ] || [ "$LOCKOUT_AUTH_SET" = "1" ]; then
-            echo "::error::TPM is in a bad state (inLockout=$IN_LOCKOUT, lockoutAuthSet=$LOCKOUT_AUTH_SET)."
-            echo "Manual recovery required on the NUC:"
-            echo "  1. echo 5 | sudo tee /sys/class/tpm/tpm0/ppi/request"
-            echo "  2. sudo reboot"
-            echo "  3. Press F12 when prompted to clear TPM"
-            exit 1
-          fi
-          echo "TPM health check passed (inLockout=$IN_LOCKOUT, lockoutAuthSet=$LOCKOUT_AUTH_SET)."
-
-          # Proactively reset DA counter and relax lockout parameters
-          # for CI — tests iterate multiple algorithms, each with PIN checks.
-          tpm2_dictionarylockout --clear 2>/dev/null || true
-          tpm2_dictionarylockout --setup \
-            --max-tries=1000 \
-            --recovery-time=1 \
-            --lockout-recovery-time=1 2>/dev/null || true
-
-          # 1. Flush stale transient objects and sessions from previous runs
-          tpm2_flushcontext --transient-object 2>/dev/null || true
-          tpm2_flushcontext --loaded-session 2>/dev/null || true
-          tpm2_flushcontext --saved-session 2>/dev/null || true
-          echo "Flushed transient TPM contexts."
-
-          # 2. Evict persistent handles (tpm2-pkcs11 primary objects + test keys)
-          HANDLES=$(tpm2_getcap handles-persistent 2>/dev/null | grep -oP '0x[0-9A-Fa-f]+' || true)
-          for h in $HANDLES; do
-            tpm2_evictcontrol -c "$h" 2>/dev/null || true
-          done
-          [ -n "$HANDLES" ] && echo "Evicted $(echo "$HANDLES" | wc -w) persistent handle(s)." || echo "No stale persistent handles."
-
-          # 2. Wipe and recreate the PKCS#11 SQLite store
-          rm -rf "$HOME/.tpm2_pkcs11"
-          mkdir -p "$HOME/.tpm2_pkcs11"
-          echo "TPM2_PKCS11_STORE=$HOME/.tpm2_pkcs11" >> "$GITHUB_ENV"
-          export TPM2_PKCS11_STORE="$HOME/.tpm2_pkcs11"
-
-          # 3. Initialize a fresh tpm2-pkcs11 store (token is created by WIF Bunker)
-          if command -v tpm2_ptool &>/dev/null; then
-            tpm2_ptool init --path="$HOME/.tpm2_pkcs11"
-            # Verify the store DB was actually created
-            if [ ! -f "$HOME/.tpm2_pkcs11/tpm2_pkcs11.sqlite3" ]; then
-              echo "::error::tpm2_ptool init did not create the store database"
-              exit 1
-            fi
-            echo "Initialized fresh tpm2-pkcs11 store."
-          fi
-
-          # 4. Verify EK certificate is accessible
-          EK_NV=0x01C00002
-          if tpm2_nvread "$EK_NV" -C o -s 1 &>/dev/null; then
-            echo "EK certificate present in NV at $EK_NV."
-          else
-            echo "EK certificate not in NV (normal for Intel PTT)."
-            echo "Verifying EK cert is fetchable from Intel provisioning..."
-            tpm2_createek -c "$RUNNER_TEMP/ek.ctx" -G rsa2048 -u "$RUNNER_TEMP/ek_pub.tpm2"
-            tpm2_getekcertificate -u "$RUNNER_TEMP/ek_pub.tpm2" -o "$RUNNER_TEMP/ek_cert.der"
-            echo "EK certificate fetchable from Intel ($(wc -c < "$RUNNER_TEMP/ek_cert.der") bytes)."
-            rm -f "$RUNNER_TEMP/ek.ctx" "$RUNNER_TEMP/ek_pub.tpm2" "$RUNNER_TEMP/ek_cert.der"
-          fi
-
-          echo "TPM reset complete."
-
-      # ── Windows ARM64: click through OOBE privacy wizard ──
-      # GHA Windows ARM64 runners show a 2-page OOBE privacy dialog.
-      # Can't be killed or minimized — must click through it.
-      # (matches GAM-team/GAM ssd.mjs current production code)
-      - name: "Windows ARM64: Dismiss OOBE"
-        if: runner.os == 'Windows' && runner.arch == 'ARM64'
-        shell: pwsh
-        run: |
-          $wshell = New-Object -ComObject wscript.shell
-          Start-Sleep -Seconds 3
-          # Page 1: Tab past toggles to "Next" button, then Enter
-          for ($i = 0; $i -lt 7; $i++) {
-            $wshell.SendKeys('{TAB}')
-            Start-Sleep -Milliseconds 200
-          }
-          $wshell.SendKeys('{ENTER}')
-          Write-Host "OOBE Page 1: clicked Next"
-          Start-Sleep -Seconds 3
-          # Page 2: Tab past toggles to "Accept" button, then Enter
-          for ($i = 0; $i -lt 7; $i++) {
-            $wshell.SendKeys('{TAB}')
-            Start-Sleep -Milliseconds 200
-          }
-          $wshell.SendKeys('{ENTER}')
-          Write-Host "OOBE Page 2: clicked Accept"
-          Start-Sleep -Seconds 3
-          # Dismiss the Start menu that may appear after OOBE
-          $wshell.SendKeys('{ESC}')
-          Write-Host "OOBE dismissed."
+          "${PYTHON}" -m pip install --upgrade pip
+          "${PYTHON}" -m pip install --upgrade --only-deps .
 
       # ── Download built binary (release testing) ──
       - name: "Download built binary (Linux/macOS)"
@@ -793,557 +178,313 @@ jobs:
         run: |
           tar -xzf artifact/*.tar.gz
           chmod +x wif-bunker/wif-bunker
-          ls -la wif-bunker/
 
-      # ── Diagnostic: dump all version info early ──
-      - name: "Diagnostic: --all-versions"
+      - name: "Diagnostic: wif-bunker versions"
         run: |
           WIF_CMD="${{ inputs.wif_bunker_cmd || '${PYTHON} -m wif_bunker' }}"
-          $WIF_CMD --all-versions
+          $WIF_CMD versions
 
-      # ── Build hardmTLS native library (source testing only — built binary has it bundled) ──
-      - name: "Install Rust toolchain"
-        if: ${{ !inputs.use_built_binary && !matrix.self_hosted }}
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: "Self-hosted: Add Cargo to PATH"
-        if: ${{ !inputs.use_built_binary && matrix.self_hosted }}
-        shell: bash
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
-      - name: "Windows: Configure MSVC for hardmTLS"
-        if: ${{ !inputs.use_built_binary && runner.os == 'Windows' }}
-        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
-        with:
-          arch: ${{ runner.arch }}
-
-      - name: "Windows: Hide Git link.exe (shadows MSVC)"
-        if: ${{ !inputs.use_built_binary && runner.os == 'Windows' }}
-        shell: bash
+      # ── Baseline ADC verification ──
+      - name: "ADC Baseline: GHA CI service account"
         run: |
-          # Git ships a coreutils link.exe that Rust picks up instead of MSVC's
-          GIT_LINK="/c/Program Files/Git/usr/bin/link.exe"
-          if [ -f "$GIT_LINK" ]; then
-            mv "$GIT_LINK" "${GIT_LINK}.bak"
-            echo "Renamed Git link.exe to avoid MSVC collision"
+          "${PYTHON}" -u scripts/minimal-adc.py 2>&1 | tee "$RUNNER_TEMP/adc_baseline.txt"
+          grep -q "$RUNNER_SA" "$RUNNER_TEMP/adc_baseline.txt"
+
+      # ── Fast idempotent check: ensure static pool & SA exist (no-op after first run) ──
+      - name: "Ensure static per-runner pool & SA exist"
+        run: |
+          if ! gcloud iam workload-identity-pools describe "$POOL_ID" \
+            --project="$TEST_PROJECT" --location=global &>/dev/null; then
+            echo "Creating one-time static WIF pool: $POOL_ID in $TEST_PROJECT"
+            gcloud iam workload-identity-pools create "$POOL_ID" \
+              --project="$TEST_PROJECT" --location=global \
+              --display-name="WIF Bunker Static CI Pool"
+          fi
+          if ! gcloud iam service-accounts describe "$BUNKER_SA" --project="$TEST_PROJECT" &>/dev/null; then
+            echo "Creating one-time static SA: $BUNKER_SA"
+            gcloud iam service-accounts create "bunker-wif-sa" \
+              --project="$TEST_PROJECT" --display-name="WIF Bunker Static CI SA"
+            sleep 10
           fi
 
-      - name: "Build hardmTLS"
-        if: ${{ !inputs.use_built_binary }}
-        shell: bash
-        env:
-          OPENSSL_DIR: ${{ env.OPENSSL_INSTALL_PATH }}
-          # NOTE: Do NOT set OPENSSL_STATIC=1 here. When loaded into
-          # the same process as Python, hardmTLS must dynamically link
-          # against the same OpenSSL that Python uses. Static linking
-          # creates a separate OSSL_LIB_CTX, making our provider
-          # invisible to Python's SSL_CTX during TLS handshakes.
+      # ──────────────────────────────────────────────────────────────────
+      # Provision a pre-existing key per platform (WIF Bunker only USES keys)
+      # ──────────────────────────────────────────────────────────────────
+
+      - name: "Provision pre-existing key: Linux swtpm persistent handle 0x81000001"
+        if: matrix.signer_kind == 'linux-swtpm'
         run: |
-          echo "=== hardmTLS build: OpenSSL being linked ==="
-          echo "OPENSSL_DIR=${OPENSSL_DIR}"
-          echo "OpenSSL version in OPENSSL_DIR:"
-          grep -E 'OPENSSL_VERSION_(TEXT|STR|MAJOR|MINOR|PATCH)' "${OPENSSL_DIR}/include/openssl/opensslv.h" 2>/dev/null | head -5 || echo "opensslv.h not found in OPENSSL_DIR"
-          echo ""
-          echo "OpenSSL libs in OPENSSL_DIR:"
-          ls -la "${OPENSSL_DIR}/lib/"libssl* "${OPENSSL_DIR}/lib/"libcrypto* 2>/dev/null || echo "No OpenSSL libs found"
-          echo ""
-          echo "=== Python's OpenSSL (for comparison) ==="
-          "${PYTHON}" -c "import ssl; print(f'Python ssl uses: {ssl.OPENSSL_VERSION}')" 2>/dev/null || echo "Could not check Python ssl"
-          echo ""
+          SWTPM_DIR="$RUNNER_TEMP/swtpm-state"
+          mkdir -p "$SWTPM_DIR"
+          swtpm socket \
+            --tpmstate dir="$SWTPM_DIR" \
+            --tpm2 \
+            --ctrl type=tcp,port=2322 \
+            --server type=tcp,port=2321 \
+            --flags not-need-init,startup-clear &
+          sleep 2
 
-          cd hardmtls-native
-          cargo build --release
-          echo ""
-          echo "=== hardmTLS library built ==="
-          ls -la target/release/libhardmtls* target/release/hardmtls* 2>/dev/null || true
-          echo ""
-          echo "=== hardmTLS linked OpenSSL (openssl-sys build output) ==="
-          cat target/release/build/openssl-sys-*/output 2>/dev/null | grep -E 'cargo:|version|OPENSSL' | head -20 || echo "Could not find openssl-sys build output"
+          export TPM2TOOLS_TCTI="swtpm:host=127.0.0.1,port=2321"
+          echo "TPM2TOOLS_TCTI=${TPM2TOOLS_TCTI}" >> "$GITHUB_ENV"
 
+          tpm2_createprimary -C o -g sha256 -G ecc -c "$RUNNER_TEMP/primary.ctx"
+          tpm2_create -C "$RUNNER_TEMP/primary.ctx" -g sha256 -G ecc256:ecdsa-sha256 \
+            -u "$RUNNER_TEMP/key.pub" -r "$RUNNER_TEMP/key.priv"
+          tpm2_load -C "$RUNNER_TEMP/primary.ctx" \
+            -u "$RUNNER_TEMP/key.pub" -r "$RUNNER_TEMP/key.priv" -c "$RUNNER_TEMP/key.ctx"
+          tpm2_evictcontrol -C o -c "$RUNNER_TEMP/key.ctx" 0x81000001
+          tpm2_flushcontext --transient-object
+          echo "SIGNER_FLAGS=--signer linux-tpm --tpm-handle 0x81000001" >> "$GITHUB_ENV"
 
-      # ── YubiKey: Discover serials, test error handling, pick random key ──
-      - name: "YubiKey: Discover and validate"
-        if: matrix.use_yubikey
+      - name: "Provision pre-existing key: Linux hardware TPM handle 0x81000001"
+        if: matrix.signer_kind == 'linux-hw-tpm'
+        run: |
+          # NEVER touch NV indices — only evict persistent handles and flush transient state.
+          TPM_PROPS=$(tpm2_getcap properties-variable)
+          IN_LOCKOUT=$(echo "$TPM_PROPS" | grep -oP 'inLockout:\s+\K\d+' || echo "0")
+          LOCKOUT_AUTH_SET=$(echo "$TPM_PROPS" | grep -oP 'lockoutAuthSet:\s+\K\d+' || echo "0")
+          if [ "$IN_LOCKOUT" = "1" ] && [ "$LOCKOUT_AUTH_SET" = "0" ]; then
+            tpm2_dictionarylockout --clear
+          elif [ "$IN_LOCKOUT" = "1" ] || [ "$LOCKOUT_AUTH_SET" = "1" ]; then
+            echo "::error::TPM is in lockout (inLockout=$IN_LOCKOUT, lockoutAuthSet=$LOCKOUT_AUTH_SET)."
+            exit 1
+          fi
+
+          tpm2_flushcontext --transient-object
+          tpm2_flushcontext --loaded-session
+          tpm2_flushcontext --saved-session
+          HANDLES=$(tpm2_getcap handles-persistent | grep -oP '0x[0-9A-Fa-f]+' || true)
+          for h in $HANDLES; do
+            tpm2_evictcontrol -c "$h"
+          done
+
+          tpm2_createprimary -C o -g sha256 -G ecc -c "$RUNNER_TEMP/primary.ctx"
+          tpm2_create -C "$RUNNER_TEMP/primary.ctx" -g sha256 -G ecc256:ecdsa-sha256 \
+            -u "$RUNNER_TEMP/key.pub" -r "$RUNNER_TEMP/key.priv"
+          tpm2_load -C "$RUNNER_TEMP/primary.ctx" \
+            -u "$RUNNER_TEMP/key.pub" -r "$RUNNER_TEMP/key.priv" -c "$RUNNER_TEMP/key.ctx"
+          tpm2_evictcontrol -C o -c "$RUNNER_TEMP/key.ctx" 0x81000001
+          tpm2_flushcontext --transient-object
+          echo "SIGNER_FLAGS=--signer linux-tpm --tpm-handle 0x81000001" >> "$GITHUB_ENV"
+
+      - name: "Provision pre-existing key: YubiKey PIV slot 9c"
+        if: matrix.signer_kind == 'yubikey'
         id: yubikey
-        shell: bash
         run: |
-          echo "=== Discovering YubiKey serials ==="
-          # Discover all connected YubiKey serials and firmware versions
           KEYS=$("${PYTHON}" -c "from ykman.device import list_all_devices; [print(i.serial, '%d.%d.%d' % i.version) for _, i in list_all_devices()]")
-          echo "Connected YubiKeys:"
-          echo "$KEYS"
-
           KEY_COUNT=$(echo "$KEYS" | wc -l | tr -d ' ')
-          if [ "$KEY_COUNT" -lt 2 ]; then
-            echo "FAIL: Expected at least 2 YubiKeys, found $KEY_COUNT"
+          if [ "$KEY_COUNT" -lt 1 ]; then
+            echo "::error::No YubiKey detected"
             exit 1
           fi
-          echo "✓ Found $KEY_COUNT YubiKeys"
-
-          # Test 1: --use-yubikey without --yubikey-serial should error (multiple keys)
-          WIF_CMD="${{ inputs.wif_bunker_cmd || '${PYTHON} -m wif_bunker' }}"
-          outdir=$(mktemp -d)
-          if $WIF_CMD --cert-only --use-yubikey --output-dir "$outdir" 2>&1; then
-            echo "FAIL: --use-yubikey without --yubikey-serial should have errored"
-            rm -rf "$outdir"
-            exit 1
-          fi
-          rm -rf "$outdir"
-          echo "✓ Correctly errored on ambiguous YubiKey (no --yubikey-serial)"
-
-          # Test 2: --yubikey-serial with invalid serial should error
-          outdir=$(mktemp -d)
-          if $WIF_CMD --cert-only --use-yubikey --yubikey-serial 99999999 --output-dir "$outdir" 2>&1; then
-            echo "FAIL: invalid serial should have errored"
-            rm -rf "$outdir"
-            exit 1
-          fi
-          rm -rf "$outdir"
-          echo "✓ Correctly errored on invalid serial"
-
-          # Pick a random key for the rest of the test
           RANDOM_INDEX=$(( (RANDOM % KEY_COUNT) + 1 ))
           SERIAL=$(echo "$KEYS" | sed -n "${RANDOM_INDEX}p" | cut -d' ' -f1)
-          FW=$(echo "$KEYS" | sed -n "${RANDOM_INDEX}p" | cut -d' ' -f2)
-          echo "Randomly selected YubiKey: serial=$SERIAL firmware=$FW (index $RANDOM_INDEX of $KEY_COUNT)"
-          echo "YUBIKEY_FLAGS=--use-yubikey --yubikey-serial $SERIAL" >> "$GITHUB_ENV"
+          echo "Selected YubiKey serial=$SERIAL"
           echo "serial=$SERIAL" >> "$GITHUB_OUTPUT"
-          echo "firmware=$FW" >> "$GITHUB_OUTPUT"
 
-          # Reset PIV applet to factory defaults before testing
-          # (clears any leftover management key, PIN, PUK from previous runs)
-          "${PYTHON}" -c "import sys; from ykman.device import list_all_devices; from yubikit.core.smartcard import SmartCardConnection; from yubikit.piv import PivSession; serial=int(sys.argv[1]); [PivSession(dev.open_connection(SmartCardConnection)).reset() or print('YubiKey', serial, 'PIV reset to factory defaults') for dev, info in list_all_devices() if info.serial == serial]" "$SERIAL"
+          # Reset PIV and generate a fresh ES256 key in slot 9c (on-device so attestation passes!)
+          "${PYTHON}" - "$SERIAL" <<'PYEOF'
+          import sys
+          from ykman.device import list_all_devices
+          from yubikit.core.smartcard import SmartCardConnection
+          from yubikit.piv import DEFAULT_MANAGEMENT_KEY, KEY_TYPE, PIN_POLICY, SLOT, TOUCH_POLICY, PivSession
 
-      # ── Test --cert-and-mtls-test (hardmTLS mTLS smoke test) ──
-      # This tests the full hardware-backed signing → mTLS pipeline WITHOUT
-      # needing GCP project/WIF infrastructure, so it's immune to IAM
-      # propagation delays.  It provisions a cert and tests mTLS handshakes
-      # against storage.mtls.googleapis.com, console-secure.mtls.googleapis.com,
-      # and sts.mtls.googleapis.com.
-      - name: "Test --cert-and-mtls-test (mTLS smoke test)"
-        shell: bash
+          serial = int(sys.argv[1])
+          for dev, info in list_all_devices():
+              if info.serial == serial:
+                  with dev.open_connection(SmartCardConnection) as conn:
+                      piv = PivSession(conn)
+                      piv.reset()
+                      piv.authenticate(DEFAULT_MANAGEMENT_KEY)
+                      piv.generate_key(
+                          SLOT.SIGNATURE,
+                          KEY_TYPE.ECCP256,
+                          pin_policy=PIN_POLICY.ONCE,
+                          touch_policy=TOUCH_POLICY.NEVER,
+                      )
+                      print(f"Generated ES256 key in PIV slot 9c on YubiKey {serial}")
+                  break
+          PYEOF
+
+          echo "SIGNER_FLAGS=--signer yubikey --yubikey-slot 9c --yubikey-serial ${SERIAL} --yubikey-pin 123456" >> "$GITHUB_ENV"
+
+      - name: "Provision pre-existing key: macOS CI software PEM"
+        if: matrix.signer_kind == 'software-pem'
         run: |
-          echo "=== Testing --cert-and-mtls-test ==="
+          KEY_PATH="$RUNNER_TEMP/ci-ec-key.pem"
+          openssl ecparam -name prime256v1 -genkey -noout -out "$KEY_PATH"
+          chmod 600 "$KEY_PATH"
+          echo "SIGNER_FLAGS=--signer software --software-key-file ${KEY_PATH}" >> "$GITHUB_ENV"
+
+      - name: "Provision pre-existing key: Windows Cert Store ECDSA P-256"
+        if: matrix.signer_kind == 'windows-certstore'
+        shell: pwsh
+        run: |
+          Import-Module Microsoft.PowerShell.Security -ErrorAction SilentlyContinue
+          Import-Module PKI -ErrorAction SilentlyContinue
+          Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Subject -eq 'CN=WIF Bunker CI' } | Remove-Item
+          $cert = New-SelfSignedCertificate `
+            -Subject "CN=WIF Bunker CI" `
+            -KeyAlgorithm ECDSA_nistP256 `
+            -KeyExportPolicy NonExportable `
+            -CertStoreLocation "Cert:\CurrentUser\My" `
+            -NotAfter (Get-Date).AddDays(7)
+          Write-Host "Created Windows Cert Store cert: thumbprint=$($cert.Thumbprint)"
+          Add-Content -Path $env:GITHUB_ENV -Value "SIGNER_FLAGS=--signer windows-certstore --windows-thumbprint $($cert.Thumbprint)"
+
+      # ──────────────────────────────────────────────────────────────────
+      # Test 1: Setup (reuses static project, pool, SA & PATCHes static provider)
+      # ──────────────────────────────────────────────────────────────────
+      - name: "WIF Bunker: setup (with static SA & in-place provider PATCH)"
+        run: |
           WIF_CMD="${{ inputs.wif_bunker_cmd || '${PYTHON} -m wif_bunker' }}"
-          outdir=$(mktemp -d)
-
-          # Each cert generation triggers CA store dialogs on Windows
-          DIALOG_PID=""
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            powershell -NoProfile -File .github/scripts/win_dialog_accept.ps1 &
-            DIALOG_PID=$!
-          fi
-
-          $WIF_CMD \
-            --cert-and-mtls-test \
-            --output-dir "$outdir" \
+          $WIF_CMD setup \
             --debug \
-            ${{ matrix.soft_key_flag }} $YUBIKEY_FLAGS
+            --use-adc \
+            --use-project="$TEST_PROJECT" \
+            --use-pool="$POOL_ID" \
+            --use-provider="$PROVIDER_ID" \
+            --use-service-account="$BUNKER_SA" \
+            --subject="$WORKLOAD_SUBJECT" \
+            --config "$RUNNER_TEMP/bunker.json" \
+            --write-executable-adc \
+            --adc-file "$RUNNER_TEMP/adc-exec.json" \
+            --executable-cache-file "$RUNNER_TEMP/jwt-cache.json" \
+            $SIGNER_FLAGS
 
-          echo "✓ --cert-and-mtls-test passed"
-
-          if [[ -n "$DIALOG_PID" ]]; then
-            kill "$DIALOG_PID" 2>/dev/null || true
-            wait "$DIALOG_PID" 2>/dev/null || true
-          fi
-
-          rm -rf "$outdir"
-
-      # ── Test --cert-only for all supported algorithms ──
-      - name: "Test --cert-only (all algorithms)"
-        shell: bash
+      # ── Test 2: Daemon-less executable ADC mode ──
+      - name: "ADC Test: Executable mode (wif-bunker sign-jwt)"
         run: |
-          echo "=== Testing --cert-only for all supported algorithms ==="
+          export GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES=1
+          export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/adc-exec.json"
+          export GOOGLE_CLOUD_PROJECT="$TEST_PROJECT"
+          unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE || true
 
-          WIF_CMD="${{ inputs.wif_bunker_cmd || '${PYTHON} -m wif_bunker' }}"
-
-          # Dynamically discover supported algorithms from the active keystore
-          # tr -d '\r' strips Windows CRLF line endings
-          ALGOS=$($WIF_CMD --supported-algorithms ${{ matrix.soft_key_flag }} $YUBIKEY_FLAGS | tr -d '\r')
-          echo "Supported algorithms: $(echo $ALGOS | sed 's/ /, /g')"
-
-          # Regression check: verify expected algorithms match exactly
-          EXPECTED="${{ matrix.expected_algos }}"
-          if [ -n "$EXPECTED" ]; then
-            # Check for missing algorithms (regression)
-            for expected_algo in $EXPECTED; do
-              if ! echo "$ALGOS" | grep -q "^${expected_algo}$"; then
-                echo "REGRESSION: $expected_algo should be supported on this platform but was not detected"
-                exit 1
-              fi
-            done
-
-            # Check for unexpected algorithms (over-reporting)
-            for detected_algo in $ALGOS; do
-              if ! echo "$EXPECTED" | grep -q "\b${detected_algo}\b"; then
-                echo "UNEXPECTED: $detected_algo was detected but is not in expected list ($EXPECTED)"
-                exit 1
-              fi
-            done
-
-            echo "All expected algorithms confirmed: $EXPECTED"
+          "${PYTHON}" scripts/minimal-adc.py --project="$TEST_PROJECT" | tee "$RUNNER_TEMP/adc_exec_out.txt"
+          if grep -q "$RUNNER_SA" "$RUNNER_TEMP/adc_exec_out.txt"; then
+            echo "::error::Accidentally used GHA CI SA instead of bunker creds"
+            exit 1
           fi
+          grep -q "$BUNKER_SA" "$RUNNER_TEMP/adc_exec_out.txt"
 
-          for algo in $ALGOS; do
-            echo "--- Testing --cert-only --key-algorithm $algo ---"
-            outdir=$(mktemp -d)
+      # ── Test 3: Localhost caching agent (1 HW sign across 3 ADC runs!) ──
+      - name: "ADC Test: Agent mode (1 hardware sign across 3 ADC runs)"
+        run: |
+          WIF_CMD="${{ inputs.wif_bunker_cmd || '${PYTHON} -m wif_bunker' }}"
+          $WIF_CMD agent \
+            --config "$RUNNER_TEMP/bunker.json" \
+            --adc-file "$RUNNER_TEMP/adc-agent.json" \
+            --secret-file "$RUNNER_TEMP/agent-secret" \
+            --warm &
+          AGENT_PID=$!
+          trap 'kill "$AGENT_PID" 2>/dev/null || true' EXIT
 
-            # CI-only: Reset the TPM PKCS#11 store between iterations.
-            # tpm2_ptool rmtoken can leave the SQLite store out-of-sync
-            # with TPM persistent handles, causing addtoken to fail with
-            # "disk I/O error".  Wipe + re-init is safe in CI because we
-            # own the entire TPM state.  WIF Bunker itself never does
-            # this — it only ever touches its own bunker-wif token.
-            if [[ "${{ matrix.self_hosted }}" == "true" ]] && [[ "${{ matrix.use_yubikey }}" != "true" ]] && command -v tpm2_ptool &>/dev/null; then
-              tpm2_flushcontext --transient-object 2>/dev/null || true
-              tpm2_flushcontext --loaded-session 2>/dev/null || true
-              tpm2_flushcontext --saved-session 2>/dev/null || true
-              HANDLES=$(tpm2_getcap handles-persistent 2>/dev/null | grep -oP '0x[0-9A-Fa-f]+' || true)
-              for h in $HANDLES; do
-                tpm2_evictcontrol -c "$h" 2>/dev/null || true
-              done
-              rm -rf "$HOME/.tpm2_pkcs11"
-              mkdir -p "$HOME/.tpm2_pkcs11"
-              export TPM2_PKCS11_STORE="$HOME/.tpm2_pkcs11"
-              tpm2_ptool init --path="$HOME/.tpm2_pkcs11"
-              # Ensure SQLite DB is fully flushed to disk before addtoken
-              # opens it — avoids "disk I/O error" on NUC filesystem.
-              sync
-              sleep 1
-              echo "  [CI] Reset TPM PKCS#11 store for $algo iteration"
-            fi
-
-            # Each cert generation triggers CA store dialogs on Windows —
-            # launch a fresh dialog acceptor per iteration.
-            DIALOG_PID=""
-            if [[ "$RUNNER_OS" == "Windows" ]]; then
-              powershell -NoProfile -File .github/scripts/win_dialog_accept.ps1 &
-              DIALOG_PID=$!
-            fi
-
-            $WIF_CMD \
-              --cert-only \
-              --key-algorithm "$algo" \
-              --output-dir "$outdir" \
-              ${{ matrix.soft_key_flag }} $YUBIKEY_FLAGS
-
-            # Verify cert files were created
-            test -f "$outdir/workload_cert.pem" || { echo "FAIL: no workload_cert.pem for $algo"; exit 1; }
-            test -f "$outdir/trust_chain.pem"   || { echo "FAIL: no trust_chain.pem for $algo"; exit 1; }
-            echo "  ✓ $algo: cert files created"
-
-            # Kill dialog acceptor before next iteration
-            if [[ -n "$DIALOG_PID" ]]; then
-              kill "$DIALOG_PID" 2>/dev/null || true
-              wait "$DIALOG_PID" 2>/dev/null || true
-            fi
-
-            rm -rf "$outdir"
+          for i in $(seq 1 30); do
+            [ -f "$RUNNER_TEMP/adc-agent.json" ] && break
+            sleep 1
           done
-          echo "=== All --cert-only algorithm tests passed ==="
+          test -f "$RUNNER_TEMP/adc-agent.json"
 
-      # ── Test --attest after --cert-only ──
-      - name: "Test --attest (hardware attestation)"
-        shell: bash
+          export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/adc-agent.json"
+          export GOOGLE_CLOUD_PROJECT="$TEST_PROJECT"
+          unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE || true
+
+          for run_idx in 1 2 3; do
+            echo "--- Agent ADC run ${run_idx} ---"
+            "${PYTHON}" scripts/minimal-adc.py --project="$TEST_PROJECT" | tee "$RUNNER_TEMP/adc_agent_${run_idx}.txt"
+            if grep -q "$RUNNER_SA" "$RUNNER_TEMP/adc_agent_${run_idx}.txt"; then
+              echo "::error::Accidentally used GHA CI SA"
+              exit 1
+            fi
+          done
+
+          # Verify agent cached the token (1 hardware sign, >= 2 cache hits)
+          "${PYTHON}" - "$RUNNER_TEMP/adc-agent.json" <<'PYEOF'
+          import json, sys, requests
+          adc = json.load(open(sys.argv[1], encoding="utf-8"))
+          health_url = adc["token_url"].rsplit("/v1/token", 1)[0] + "/health"
+          stats = requests.get(health_url, timeout=5).json()
+          print("Agent health stats:", json.dumps(stats, indent=2))
+          assert stats["hardware_signs"] == 1, f"Expected 1 hardware sign, got {stats['hardware_signs']}"
+          assert stats["cache_hits"] >= 2, f"Expected >= 2 cache hits, got {stats['cache_hits']}"
+          PYEOF
+
+          # Also test `wif-bunker status` against the running agent
+          $WIF_CMD status \
+            --config "$RUNNER_TEMP/bunker.json" \
+            --adc-file "$RUNNER_TEMP/adc-agent.json"
+
+      # ── Test 4: Direct federated WIF (--no-service-account) ──
+      - name: "WIF Bunker: setup (--no-service-account) + agent ADC test"
         run: |
-          echo "=== Testing --attest ==="
-          certdir=$(mktemp -d)
-          attestdir=$(mktemp -d)
           WIF_CMD="${{ inputs.wif_bunker_cmd || '${PYTHON} -m wif_bunker' }}"
-
-          # CI-only: Reset TPM PKCS#11 store (same as cert-only loop above)
-          if [[ "${{ matrix.self_hosted }}" == "true" ]] && [[ "${{ matrix.use_yubikey }}" != "true" ]] && command -v tpm2_ptool &>/dev/null; then
-            tpm2_flushcontext --transient-object 2>/dev/null || true
-            tpm2_flushcontext --loaded-session 2>/dev/null || true
-            tpm2_flushcontext --saved-session 2>/dev/null || true
-            HANDLES=$(tpm2_getcap handles-persistent 2>/dev/null | grep -oP '0x[0-9A-Fa-f]+' || true)
-            for h in $HANDLES; do
-              tpm2_evictcontrol -c "$h" 2>/dev/null || true
-            done
-            rm -rf "$HOME/.tpm2_pkcs11"
-            mkdir -p "$HOME/.tpm2_pkcs11"
-            export TPM2_PKCS11_STORE="$HOME/.tpm2_pkcs11"
-            tpm2_ptool init --path="$HOME/.tpm2_pkcs11"
-            echo "  [CI] Reset TPM PKCS#11 store for attest test"
-          fi
-
-          # Generate a cert first so there's something to attest
-          DIALOG_PID=""
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            powershell -NoProfile -File .github/scripts/win_dialog_accept.ps1 &
-            DIALOG_PID=$!
-          fi
-
-          $WIF_CMD \
-            --cert-only \
-            --output-dir "$certdir" \
-            ${{ matrix.soft_key_flag }} $YUBIKEY_FLAGS
-
-          if [[ -n "$DIALOG_PID" ]]; then
-            kill "$DIALOG_PID" 2>/dev/null || true
-            wait "$DIALOG_PID" 2>/dev/null || true
-          fi
-
-          # Run attestation against the cert we just created
-          # On hardware TPM, --attest must succeed fully.
-          # On software/SE, it may warn about missing attestation support.
-          if [ "${{ matrix.self_hosted }}" = "true" ]; then
-            $WIF_CMD --attest \
-              --cert-file "$certdir/workload_cert.pem" \
-              --output-dir "$attestdir" \
-              $YUBIKEY_FLAGS
-          else
-            $WIF_CMD --attest \
-              --cert-file "$certdir/workload_cert.pem" \
-              --output-dir "$attestdir" || true
-          fi
-
-          # Verify attestation report was created
-          test -f "$attestdir/attestation_report.json" || { echo "FAIL: no attestation_report.json"; exit 1; }
-          test -f "$attestdir/attestation_report.txt"  || { echo "FAIL: no attestation_report.txt"; exit 1; }
-          echo "  ✓ Attestation report files created"
-
-          # Verify JSON is valid and has expected structure
-          # On self-hosted (hardware TPM): demand ALL checks pass (6/6)
-          "${PYTHON}" -c "
-          import json, sys, os
-          report_path = os.path.join(sys.argv[1], 'attestation_report.json')
-          with open(report_path) as f:
-              r = json.load(f)
-          assert 'platform' in r, 'Missing platform'
-          assert 'checks' in r, 'Missing checks'
-          assert 'checks_passed' in r, 'Missing checks_passed'
-          assert r['checks_total'] > 0, 'No checks ran'
-          passed = r['checks_passed']
-          total = r['checks_total']
-          print(f'  Report valid: {r[\"platform\"]}, {passed}/{total} checks passed')
-          if '${{ matrix.self_hosted }}' == 'true':
-              assert passed == total, (
-                  f'Hardware attestation regression: {passed}/{total} checks passed, expected {total}/{total}'
-              )
-              print(f'  \u2713 All {total} attestation checks passed ({r[\"hardware_type\"]})')
-          " "$attestdir"
-
-          rm -rf "$certdir" "$attestdir"
-          echo "=== --attest test passed ==="
-
-      # ── Test --cert-only refuses to overwrite existing config ──
-      - name: "Test --cert-only overwrite protection"
-        shell: bash
-        run: |
-          echo "=== Testing --cert-only overwrite protection ==="
-          outdir=$(mktemp -d)
-          echo '{}' > "$outdir/adc.json"
-          WIF_CMD="${{ inputs.wif_bunker_cmd || '${PYTHON} -m wif_bunker' }}"
-          if $WIF_CMD --cert-only --output-dir "$outdir" ${{ matrix.soft_key_flag }} $YUBIKEY_FLAGS 2>&1; then
-            echo "FAIL: --cert-only should have refused to overwrite"
-            exit 1
-          fi
-          echo "✓ --cert-only correctly refused to overwrite existing config"
-          rm -rf "$outdir"
-
-      # ── Step 2: WIF Bunker fresh run (creates SA, pool, provider in existing project) ──
-      - name: "WIF Bunker: Fresh setup"
-        shell: bash
-        run: |
-          echo "=== Running WIF Bunker (fresh setup in existing project) ==="
-          # On Windows, launch dialog auto-accept in background (clicks
-          # Security Warning dialogs for CA root store operations).
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            powershell -NoProfile -File .github/scripts/win_dialog_accept.ps1 &
-            DIALOG_PID=$!
-            echo "Dialog auto-accept PID: $DIALOG_PID"
-          fi
-          ${{ inputs.wif_bunker_cmd || '${PYTHON} -m wif_bunker' }} \
-            --debug \
+          $WIF_CMD setup \
             --use-adc \
-            --use-project="${{ steps.config.outputs.project_id }}" \
-            --create-pool="${{ steps.config.outputs.pool_id }}" \
-            ${{ matrix.soft_key_flag }} $YUBIKEY_FLAGS
-
-      # ── Grant pool principal browser role so ADC tests can call projects.get ──
-      - name: "Grant WIF pool principal browser role"
-        shell: bash
-        run: |
-          PROJECT_ID="${{ steps.config.outputs.project_id }}"
-          POOL_ID="${{ steps.config.outputs.pool_id }}"
-          PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format="value(projectNumber)")
-
-          PRINCIPAL="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_ID}/*"
-          echo "Granting browser role to: $PRINCIPAL"
-
-          gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-            --member="$PRINCIPAL" \
-            --role="roles/browser" \
-            --condition=None
-
-      # ── Step 3: WIF Bunker reuse run (detects existing resources) ──
-      - name: "WIF Bunker: Reuse existing"
-        shell: bash
-        run: |
-          echo "=== Running WIF Bunker (reuse flow) ==="
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            powershell -NoProfile -File .github/scripts/win_dialog_accept.ps1 &
-          fi
-          ${{ inputs.wif_bunker_cmd || '${PYTHON} -m wif_bunker' }} \
-            --use-adc \
-            --use-project="${{ steps.config.outputs.project_id }}" \
-            --use-pool=${{ steps.config.outputs.pool_id }} \
-            --use-service-account="bunker-wif-sa@${{ steps.config.outputs.project_id }}.iam.gserviceaccount.com" \
-            ${{ matrix.soft_key_flag }} $YUBIKEY_FLAGS
-
-      # ── Step 3b: ADC integration test (with service account) ──
-      - name: "ADC Test: With service account"
-        shell: bash
-        run: |
-          echo "=== Testing ADC with X.509 WIF (service account) ==="
-          # Enable hardmTLS diagnostic output for mTLS debugging
-          export RUST_LOG=hardmtls=debug
-          # Point ADC to WIF Bunker's credentials, NOT the GHA OIDC creds
-          export GOOGLE_APPLICATION_CREDENTIALS="$PWD/adc.json"
-          export GOOGLE_API_USE_CLIENT_CERTIFICATE=true
-          export GOOGLE_API_CERTIFICATE_CONFIG="$PWD/certificate_config.json"
-          export CLOUDSDK_PROJECT="${{ steps.config.outputs.project_id }}"
-          export GOOGLE_CLOUD_PROJECT="${{ steps.config.outputs.project_id }}"
-          # Clear GHA's OIDC credential file to prove we're using bunker creds
-          unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE 2>/dev/null || true
-
-          "${PYTHON}" scripts/minimal-adc.py --project="${{ steps.config.outputs.project_id }}" | tee "$RUNNER_TEMP/adc_output.txt"
-
-          # Validate we're NOT accidentally using the GHA CI service account
-          echo ""
-          echo "=== CI Validation ==="
-          GHA_SA="$RUNNER_SA"
-          if grep -q "$GHA_SA" "$RUNNER_TEMP/adc_output.txt"; then
-            echo "✗ FAIL: Using GHA CI service account, not bunker creds!"
-            exit 1
-          fi
-          EXPECTED_SA="bunker-wif-sa@${{ steps.config.outputs.project_id }}.iam.gserviceaccount.com"
-          if grep -q "$EXPECTED_SA" "$RUNNER_TEMP/adc_output.txt"; then
-            echo "✓ Authenticated as bunker SA: $EXPECTED_SA"
-          else
-            echo "✓ Not using GHA CI SA (bunker SA not shown — may be no-impersonation mode)"
-          fi
-
-      # ── Step 4: WIF Bunker reuse without service account ──
-      - name: "WIF Bunker: Reuse (no service account)"
-        shell: bash
-        run: |
-          echo "=== Running WIF Bunker (reuse, no service account) ==="
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            powershell -NoProfile -File .github/scripts/win_dialog_accept.ps1 &
-          fi
-          ${{ inputs.wif_bunker_cmd || '${PYTHON} -m wif_bunker' }} \
-            --use-adc \
-            --use-project="${{ steps.config.outputs.project_id }}" \
-            --use-pool=${{ steps.config.outputs.pool_id }} \
+            --use-project="$TEST_PROJECT" \
+            --use-pool="$POOL_ID" \
+            --use-provider="$PROVIDER_ID" \
             --no-service-account \
-            ${{ matrix.soft_key_flag }} $YUBIKEY_FLAGS
+            --subject="$WORKLOAD_SUBJECT" \
+            --config "$RUNNER_TEMP/bunker-nosa.json" \
+            $SIGNER_FLAGS
 
-      # ── Step 4b: ADC integration test (no service account) ──
-      - name: "ADC Test: No service account"
-        shell: bash
-        run: |
-          echo "=== Testing ADC with X.509 WIF (no service account) ==="
-          export RUST_LOG=hardmtls=debug
-          export GOOGLE_APPLICATION_CREDENTIALS="$PWD/adc.json"
-          export GOOGLE_API_USE_CLIENT_CERTIFICATE=true
-          export GOOGLE_API_CERTIFICATE_CONFIG="$PWD/certificate_config.json"
-          export CLOUDSDK_PROJECT="${{ steps.config.outputs.project_id }}"
-          export GOOGLE_CLOUD_PROJECT="${{ steps.config.outputs.project_id }}"
-          unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE 2>/dev/null || true
+          $WIF_CMD agent \
+            --config "$RUNNER_TEMP/bunker-nosa.json" \
+            --adc-file "$RUNNER_TEMP/adc-nosa.json" \
+            --secret-file "$RUNNER_TEMP/agent-secret-nosa" &
+          AGENT_PID=$!
+          trap 'kill "$AGENT_PID" 2>/dev/null || true' EXIT
 
-          "${PYTHON}" scripts/minimal-adc.py --project="${{ steps.config.outputs.project_id }}" | tee "$RUNNER_TEMP/adc_output_nosa.txt"
-
-          # Validate we're NOT accidentally using the GHA CI service account
-          echo ""
-          echo "=== CI Validation ==="
-          GHA_SA="$RUNNER_SA"
-          if grep -q "$GHA_SA" "$RUNNER_TEMP/adc_output_nosa.txt"; then
-            echo "✗ FAIL: Using GHA CI service account, not bunker creds!"
+          for i in $(seq 1 30); do
+            [ -f "$RUNNER_TEMP/adc-nosa.json" ] && break
+            sleep 1
+          done
+          export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/adc-nosa.json"
+          export GOOGLE_CLOUD_PROJECT="$TEST_PROJECT"
+          unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE || true
+          "${PYTHON}" scripts/minimal-adc.py --project="$TEST_PROJECT" | tee "$RUNNER_TEMP/adc_nosa_out.txt"
+          if grep -q "$RUNNER_SA" "$RUNNER_TEMP/adc_nosa_out.txt"; then
+            echo "::error::Accidentally used GHA CI SA"
             exit 1
           fi
-          echo "✓ Not using GHA CI SA"
 
-      # ── Test --status after full WIF setup ──
-      - name: "Test --status"
-        shell: bash
+      # ── Test 5: Read-only hardware attestation ──
+      - name: "Test wif-bunker attest (read-only hardware attestation)"
         run: |
-          echo "=== Testing --status ==="
-          export RUST_LOG=hardmtls=debug
-          export GOOGLE_APPLICATION_CREDENTIALS="$PWD/adc.json"
-          export GOOGLE_API_USE_CLIENT_CERTIFICATE=true
-          export GOOGLE_API_CERTIFICATE_CONFIG="$PWD/certificate_config.json"
-          unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE 2>/dev/null || true
-          ${{ inputs.wif_bunker_cmd || '${PYTHON} -m wif_bunker' }} --status
+          WIF_CMD="${{ inputs.wif_bunker_cmd || '${PYTHON} -m wif_bunker' }}"
+          ATTEST_DIR="$RUNNER_TEMP/attest-out"
+          mkdir -p "$ATTEST_DIR"
+          $WIF_CMD attest --config "$RUNNER_TEMP/bunker.json" --output-dir "$ATTEST_DIR"
 
+          test -f "$ATTEST_DIR/attestation_report.json"
+          test -f "$ATTEST_DIR/attestation_report.txt"
 
-      # ── Upload Windows screenshots for dialog debugging ──
-      - name: "Upload debug screenshots"
-        if: always() && runner.os == 'Windows'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: screenshots-${{ matrix.name }}
-          if-no-files-found: ignore
-          path: |
-            ${{ github.workspace }}/*.png
-            ${{ github.workspace }}/*.log
+          "${PYTHON}" - "$ATTEST_DIR/attestation_report.json" "${{ matrix.self_hosted || 'false' }}" <<'PYEOF'
+          import json, sys
+          report = json.load(open(sys.argv[1], encoding="utf-8"))
+          is_hw = sys.argv[2] == "true"
+          print(f"Attestation: platform={report['platform']} {report['checks_passed']}/{report['checks_total']} passed")
+          assert report["checks_total"] > 0
+          if is_hw:
+              assert report["checks_passed"] == report["checks_total"], (
+                  f"Hardware attestation failed: {report['checks_passed']}/{report['checks_total']}"
+              )
+          PYEOF
 
-      # ── Cleanup WIF resources (pool + SA, not the project) ──
-      - name: "Cleanup WIF resources"
-        if: always()
-        shell: bash
-        run: |
-          PROJECT_ID="${{ steps.config.outputs.project_id }}"
-          POOL_ID="${{ steps.config.outputs.pool_id }}"
-          echo "Cleaning up WIF resources in $PROJECT_ID..."
-
-          # Delete this run's WIF pool (cascades to providers)
-          gcloud iam workload-identity-pools delete "$POOL_ID" \
-            --project="$PROJECT_ID" --location=global --quiet 2>/dev/null || true
-
-          # Delete service account
-          gcloud iam service-accounts delete \
-            "bunker-wif-sa@${PROJECT_ID}.iam.gserviceaccount.com" \
-            --project="$PROJECT_ID" --quiet 2>/dev/null || true
-
-          echo "WIF resource cleanup complete."
-
-      # ── Cleanup workspace (self-hosted runner is persistent) ──
-      - name: "Cleanup workspace"
+      # ── Cleanup hardware / cert store (GCP static resources stay intact!) ──
+      - name: "Cleanup self-hosted hardware"
         if: always() && matrix.self_hosted
         run: |
-          rm -rf .venv "$RUNNER_TEMP/adc_"*.txt
-          # Nuke TPM state — but ONLY for TPM test runs.
-          # The YubiKey job shares $HOME with the TPM job on the NUC
-          # and must NEVER touch the TPM or its files.
-          if [ "${{ matrix.use_yubikey }}" != "true" ]; then
-            HANDLES=$(tpm2_getcap handles-persistent 2>/dev/null | grep -oP '0x[0-9A-Fa-f]+' || true)
-            for h in $HANDLES; do tpm2_evictcontrol -c "$h" 2>/dev/null || true; done
-            [ -n "$HANDLES" ] && echo "Post-test: evicted $(echo "$HANDLES" | wc -w) TPM handle(s)."
-            rm -rf "$HOME/.tpm2_pkcs11"
-          fi
-          # Reset YubiKey PIV state if this was a YubiKey test
-          if [ -n "$YUBIKEY_FLAGS" ]; then
-            SERIAL="${{ steps.yubikey.outputs.serial }}"
-            "${PYTHON}" -c "import sys; from ykman.device import list_all_devices; from yubikit.core.smartcard import SmartCardConnection; from yubikit.piv import PivSession; serial=int(sys.argv[1]); [PivSession(dev.open_connection(SmartCardConnection)).reset() or print('YubiKey', serial, 'PIV reset') for dev, info in list_all_devices() if info.serial == serial]" "$SERIAL" || true
+          if [ "${{ matrix.signer_kind }}" = "linux-hw-tpm" ]; then
+            HANDLES=$(tpm2_getcap handles-persistent | grep -oP '0x[0-9A-Fa-f]+' || true)
+            for h in $HANDLES; do tpm2_evictcontrol -c "$h"; done
+          elif [ "${{ matrix.signer_kind }}" = "yubikey" ] && [ -n "${{ steps.yubikey.outputs.serial }}" ]; then
+            "${PYTHON}" -c "import sys; from ykman.device import list_all_devices; from yubikit.core.smartcard import SmartCardConnection; from yubikit.piv import PivSession; serial=int(sys.argv[1]); [PivSession(dev.open_connection(SmartCardConnection)).reset() for dev, info in list_all_devices() if info.serial == serial]" "${{ steps.yubikey.outputs.serial }}"
           fi
 
-      # ── Summary ──
-      - name: Summary
-        if: always()
-        shell: bash
+      - name: "Cleanup Windows Cert Store test cert"
+        if: always() && matrix.signer_kind == 'windows-certstore'
+        shell: pwsh
         run: |
-          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
-          ## ${{ matrix.name }}
-
-          | Property | Value |
-          |----------|-------|
-          | **Runner** | \`${{ matrix.runs_on || matrix.os }}\` |
-          | **Architecture** | \`$(uname -m)\` |
-          | **Project** | \`${{ steps.config.outputs.project_id }}\` |
-          | **Soft Key** | \`${{ matrix.soft_key_flag || 'no (hardware/swtpm)' }}\` |
-          | **YubiKey** | \`${{ steps.yubikey.outputs.serial || 'n/a' }}\` |
-          | **Runner SA** | \`${{ env.RUNNER_SA }}\` |
-
-          EOF
+          Import-Module Microsoft.PowerShell.Security -ErrorAction SilentlyContinue
+          Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Subject -eq 'CN=WIF Bunker CI' } | Remove-Item

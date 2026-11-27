@@ -1,10 +1,12 @@
-import pytest
-from cryptography import x509
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, rsa
-from cryptography.x509.oid import NameOID
+"""Shared pytest fixtures for WIF Bunker v2 tests."""
 
-from wif_bunker.config import WorkloadConfig
+from __future__ import annotations
+
+import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
+
+from wif_bunker.config import BunkerConfig, WorkloadConfig
 
 
 @pytest.fixture
@@ -20,66 +22,40 @@ def sample_ec_key():
 
 
 @pytest.fixture
-def sample_csr_pem(sample_ec_key):
-    csr = (
-        x509.CertificateSigningRequestBuilder()
-        .subject_name(
-            x509.Name(
-                [
-                    x509.NameAttribute(NameOID.COMMON_NAME, "test-workload"),
-                ]
-            )
+def sample_rsa_key():
+    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
+@pytest.fixture
+def sample_software_pem_file(tmp_path, sample_ec_key):
+    pem_path = tmp_path / "test_ec_key.pem"
+    pem_path.write_bytes(
+        sample_ec_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
         )
-        .sign(sample_ec_key, hashes.SHA256())
     )
-    return csr.public_bytes(serialization.Encoding.PEM).decode("utf-8")
+    return pem_path
 
 
 @pytest.fixture
-def sample_rsa_config():
-    config = WorkloadConfig()
-    config.project_id = "test-proj-123"
-    config.key_algorithm = "rsa2048"
-    return config
+def sample_bunker_config(sample_software_pem_file):
+    from wif_bunker.oidc import build_jwks_from_signer
+    from wif_bunker.signers import load_signer
 
-
-@pytest.fixture
-def sample_rsa_csr_pem():
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    csr = (
-        x509.CertificateSigningRequestBuilder()
-        .subject_name(
-            x509.Name(
-                [
-                    x509.NameAttribute(NameOID.COMMON_NAME, "test-workload-rsa"),
-                ]
-            )
-        )
-        .sign(key, hashes.SHA256())
+    signer_cfg = {"type": "software", "key_file": str(sample_software_pem_file)}
+    signer = load_signer(signer_cfg)
+    _jwks, jwk_entry = build_jwks_from_signer(signer)
+    return BunkerConfig(
+        project_id="test-proj-123",
+        project_number="123456789012",
+        pool_id="bunker-wif-pool",
+        provider_id="bunker-oidc-prov-1234",
+        audience="//iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/bunker-wif-pool/providers/bunker-oidc-prov-1234",
+        issuer_uri="https://wif-bunker.internal/bunker-oidc-prov-1234",
+        subject="bunker-workload-1234",
+        service_account_email="bunker-wif-sa@test-proj-123.iam.gserviceaccount.com",
+        signer=signer_cfg,
+        public_jwk=jwk_entry,
     )
-    return csr.public_bytes(serialization.Encoding.PEM).decode("utf-8")
-
-
-@pytest.fixture
-def sample_es384_config():
-    config = WorkloadConfig()
-    config.project_id = "test-proj-123"
-    config.key_algorithm = "es384"
-    return config
-
-
-@pytest.fixture
-def sample_es384_csr_pem():
-    key = ec.generate_private_key(ec.SECP384R1())
-    csr = (
-        x509.CertificateSigningRequestBuilder()
-        .subject_name(
-            x509.Name(
-                [
-                    x509.NameAttribute(NameOID.COMMON_NAME, "test-workload-es384"),
-                ]
-            )
-        )
-        .sign(key, hashes.SHA384())
-    )
-    return csr.public_bytes(serialization.Encoding.PEM).decode("utf-8")
